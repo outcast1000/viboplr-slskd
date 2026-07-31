@@ -385,9 +385,16 @@ function nextReadiness(probe, prev) {
   } else if (probe.kind === "unauthorized") {
     state = "unauthorized";
   } else {
+    // slskd exposes computed booleans (isLoggedIn/isConnecting/…) alongside the
+    // raw flags enum. Prefer them — verified against 0.26.0 — but keep the flag
+    // parsing as a fallback in case an older/newer build omits them.
     var s = probe.serverState || "";
-    if (hasFlag(s, "LoggedIn")) state = "ready";
-    else if (hasFlag(s, "Connecting") || hasFlag(s, "LoggingIn")) state = "connecting";
+    var loggedIn = probe.isLoggedIn != null ? !!probe.isLoggedIn : hasFlag(s, "LoggedIn");
+    var moving = probe.isTransitioning != null
+      ? !!probe.isTransitioning
+      : (hasFlag(s, "Connecting") || hasFlag(s, "LoggingIn"));
+    if (loggedIn) state = "ready";
+    else if (moving) state = "connecting";
     else state = "disconnected";
   }
 
@@ -531,6 +538,24 @@ function baseUrl() {
   return String(settings.url || "").replace(/\/+$/, "");
 }
 
+// slskd returns a bare JSON string for most failures, e.g.
+// "The server connection must be connected and logged in to perform a search
+// (currently: Disconnected)". That is far more useful than the status code.
+function errorText(res, fallback) {
+  if (res && typeof res.json === "string" && res.json) return res.json;
+  if (res && res.json && typeof res.json.message === "string") return res.json.message;
+  if (res && res.text && res.text.length < 300) return res.text.replace(/^"|"$/g, "");
+  return fallback;
+}
+
+// A 409/500 from a connection check means our cached readiness is stale (it only
+// re-probes every 60s), so re-sync rather than leaving a misleading "ready".
+function resyncIfConnectionLost(res) {
+  if (res && (res.status === 409 || res.status === 500)) {
+    refreshReadiness().catch(function (e) { console.error("slskd re-probe failed:", e); });
+  }
+}
+
 async function slskd(method, path, body) {
   var url = baseUrl() + path;
   var init = {
@@ -569,6 +594,8 @@ async function probe() {
   return {
     kind: "ok",
     serverState: server.state || "",
+    isLoggedIn: server.isLoggedIn != null ? server.isLoggedIn : null,
+    isTransitioning: server.isTransitioning != null ? server.isTransitioning : null,
     username: server.username || null,
     version: (st.version && st.version.current) || null,
     shareCount: shares.directories != null ? shares.directories
@@ -665,7 +692,8 @@ async function runSearch(query) {
   }
   if (res.status < 200 || res.status >= 300 || !res.json || !res.json.id) {
     search.running = false;
-    search.error = "slskd rejected the search (HTTP " + res.status + ").";
+    search.error = errorText(res, "slskd rejected the search (HTTP " + res.status + ").");
+    resyncIfConnectionLost(res);
     render();
     return;
   }
@@ -734,7 +762,8 @@ async function enqueueFiles(username, files, label) {
     return false;
   }
   if (res.status < 200 || res.status >= 300) {
-    api.ui.showNotification("slskd refused the download (HTTP " + res.status + ").");
+    api.ui.showNotification(errorText(res, "slskd refused the download (HTTP " + res.status + ")."));
+    resyncIfConnectionLost(res);
     return false;
   }
 

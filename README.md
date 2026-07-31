@@ -11,7 +11,8 @@ to open slskd's own web interface.
 ## What you need
 
 1. **slskd**, running somewhere you can reach. Download it from
-   [slskd.com](https://slskd.com/) (~56 MB) or run the Docker image.
+   [slskd.com](https://slskd.com/) (a ~56 MB zip, ~128 MB installed) or run the
+   Docker image.
 2. A **Soulseek account**, signed in inside slskd.
 3. slskd's **API key** — in slskd under Settings → Options → Web.
 

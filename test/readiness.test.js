@@ -101,3 +101,39 @@ test("nextReadiness passes through identity and share details", () => {
 test("nextReadiness handles a null probe", () => {
   assert.equal(plugin._nextReadiness(null, null).state, "unconfigured");
 });
+
+// slskd exposes computed booleans next to the raw flags enum. Verified against a
+// live 0.26.0: a signed-out daemon reports state "None" with all booleans false.
+
+test("nextReadiness prefers the explicit booleans over the flags string", () => {
+  const r = plugin._nextReadiness(
+    { kind: "ok", serverState: "None", isLoggedIn: true, isTransitioning: false },
+    null
+  );
+  assert.equal(r.state, "ready", "isLoggedIn must win over an uninformative flags string");
+});
+
+test("nextReadiness falls back to flag parsing when booleans are absent", () => {
+  assert.equal(
+    plugin._nextReadiness({ kind: "ok", serverState: "Connected, LoggedIn" }, null).state,
+    "ready"
+  );
+});
+
+test("nextReadiness reads a real signed-out slskd payload as disconnected", () => {
+  // Verbatim from GET /api/v0/application on slskd 0.26.0 with no credentials.
+  const server = {
+    state: "None", isConnected: false, isConnecting: false,
+    isLoggedIn: false, isLoggingIn: false, isTransitioning: false
+  };
+  const r = plugin._nextReadiness({
+    kind: "ok",
+    serverState: server.state,
+    isLoggedIn: server.isLoggedIn,
+    isTransitioning: server.isTransitioning,
+    shareCount: 0
+  }, { state: "ready" });
+  assert.equal(r.state, "disconnected");
+  assert.equal(r.notify, true);
+  assert.equal(r.shareCount, 0, "a zero share count must survive as 0, not become null");
+});

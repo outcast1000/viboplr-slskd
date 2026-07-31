@@ -118,6 +118,44 @@ test("flattenListing tolerates empty nodes", () => {
   assert.deepEqual(plugin._flattenListing({}), []);
 });
 
+test("flattenListing handles slskd's actual FLAT recursive shape", () => {
+  // Verbatim from GET /api/v0/files/downloads/directories?recursive=true on
+  // slskd 0.26.0: every file sits at the root with a full relative fullName, and
+  // nested directories are listed as flat siblings carrying no files of their own.
+  const real = {
+    name: "dl",
+    fullName: "",
+    files: [{
+      name: "03 - Radiohead - Karma Police.mp3",
+      fullName: "viboplr/1-OK_Computer/03 - Radiohead - Karma Police.mp3",
+      length: 28
+    }],
+    directories: [
+      { name: "viboplr", fullName: "viboplr" },
+      { name: "1-OK_Computer", fullName: "viboplr/1-OK_Computer" }
+    ]
+  };
+  const out = plugin._flattenListing(real);
+  assert.equal(out.length, 1, "flat shape must not double-count or drop files");
+  assert.equal(out[0].fullName, "viboplr/1-OK_Computer/03 - Radiohead - Karma Police.mp3");
+});
+
+test("matchFile compares against BYTES — Files API length is size, not duration", () => {
+  // Beware: `length` means bytes here but duration-in-seconds in the search API.
+  const flat = [{
+    name: "03 - Radiohead - Karma Police.mp3",
+    fullName: "viboplr/1-OK_Computer/03 - Radiohead - Karma Police.mp3",
+    length: 28
+  }];
+  const transfer = { filename: "peer\\Music\\OK Computer\\03 - Radiohead - Karma Police.mp3", size: 28 };
+  const hit = plugin._matchFile(transfer, flat);
+  assert.ok(hit, "a byte-size match must resolve");
+  assert.equal(
+    plugin._absolutePath("/downloads", hit.fullName),
+    "/downloads/viboplr/1-OK_Computer/03 - Radiohead - Karma Police.mp3"
+  );
+});
+
 // --- base64 / destinations -------------------------------------------------
 // slskd decodes the {base64SubdirectoryName} route with Convert.FromBase64String,
 // so it must be standard base64 — and a '/' in the output would break the route.
