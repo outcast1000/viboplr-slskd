@@ -1,0 +1,44 @@
+{
+  "id": "slskd",
+  "name": "Soulseek",
+  "version": "0.1.0",
+  "author": "Viboplr",
+  "description": "Search and download from the Soulseek network via a slskd daemon.",
+  "minAppVersion": "1.0.10",
+  "stability": "experimental",
+  "homepage": "https://github.com/outcast1000/viboplr-slskd",
+  "updateUrl": "https://github.com/outcast1000/viboplr-slskd/releases/latest/download/update.json",
+  "icon": "M12 3v12.55a4 4 0 1 0 2 3.45V7h4V3h-6z",
+  "apiUsage": [
+    { "api": "network.fetch", "reason": "Talk to your slskd daemon's REST API" },
+    { "api": "storage", "reason": "Store the slskd address, API key and transfer history" },
+    { "api": "downloads.enqueue", "reason": "Import completed Soulseek files into a collection" }
+  ],
+  "contributes": {
+    "sidebarItems": [
+      {
+        "id": "slskd-browse",
+        "label": "Soulseek",
+        "icon": "M12 3v12.55a4 4 0 1 0 2 3.45V7h4V3h-6z"
+      }
+    ],
+    "downloadProviders": [
+      {
+        "id": "slskd-import",
+        "name": "Soulseek"
+      }
+    ],
+    "contextMenuItems": [
+      {
+        "id": "slskd-search",
+        "label": "Search on Soulseek",
+        "targets": ["track", "album", "artist"]
+      }
+    ],
+    "settingsPanel": {
+      "id": "slskd-settings",
+      "label": "Soulseek",
+      "order": 55
+    }
+  }
+}
