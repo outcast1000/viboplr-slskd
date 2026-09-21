@@ -136,7 +136,7 @@ function fakeHost(opts) {
   const actions = {};
   const tools = {};
   const resolvers = {};
-  const calls = { requestAction: [], notifications: [], badges: [], resync: [], played: [] };
+  const calls = { requestAction: [], notifications: [], badges: [], resync: [], played: [], fetched: [], views: [] };
   const responses = Object.assign({
     "/api/v0/application": {
       server: { state: "Connected, LoggedIn", isLoggedIn: true, isTransitioning: false, username: "me" },
@@ -155,7 +155,14 @@ function fakeHost(opts) {
       delete: async (k) => { delete store[k]; }
     },
     network: {
-      fetch: async (url) => {
+      // `o.fetch(fullUrl, init)` sees the URL *with* its query string and may
+      // answer; returning undefined falls through to the `responses` map.
+      fetch: async (url, init) => {
+        calls.fetched.push(url);
+        if (o.fetch) {
+          const custom = await o.fetch(url, init);
+          if (custom) return custom;
+        }
         const path = url.replace(/^https?:\/\/[^/]+/, "").split("?")[0];
         if (!(path in responses)) return { status: 404, text: async () => '"not found"' };
         return { status: 200, text: async () => JSON.stringify(responses[path]) };
@@ -163,7 +170,7 @@ function fakeHost(opts) {
       openUrl: async () => {}
     },
     ui: {
-      setViewData() {},
+      setViewData: (viewId, data) => calls.views.push({ viewId, data }),
       showNotification: (m) => calls.notifications.push(m),
       onAction: (id, fn) => { actions[id] = fn; },
       navigateToView() {},
@@ -295,6 +302,176 @@ test("assistant download rejects ids that did not come from the last search", as
     await assert.rejects(() => h.tools.download({ ids: ["nope"] }), /Unknown result id/);
     await assert.rejects(() => h.tools.download({}), /"ids"/);
     await assert.rejects(() => h.tools.search({}), /"query"/);
+  } finally {
+    p.deactivate();
+  }
+});
+
+
+// --- search polling ---------------------------------------------------------
+// Measured against slskd 0.26.0: the counts-only poll body is ~254 bytes, the
+// same search's response bodies are 2.6 MB, and the loop polls up to 30 times.
+// Asking for the bodies on every poll pulled ~78 MB through the sandbox to read
+// two integers off it. They are now fetched once, after completion.
+
+function searchHost(opts) {
+  const o = opts || {};
+  const state = { polls: 0 };
+  const files = o.files || [
+    { filename: "music\\RATM\\04. Settle For Nothing.flac", size: 31354797, length: 288, bitDepth: 16, sampleRate: 44100 }
+  ];
+  const bodies = o.bodies || [{ username: "peer", hasFreeUploadSlot: true, queueLength: 0, uploadSpeed: 1000, files }];
+  let bodyReads = 0;
+  const h = fakeHost({
+    fetch: async (url, init) => {
+      const json = (v) => ({ status: 200, text: async () => JSON.stringify(v) });
+      if (url.includes("/api/v0/searches") && init && init.method === "POST") return json({ id: "s1" });
+      if (url.includes("/responses")) {
+        bodyReads++;
+        // slskd writes the bodies a moment AFTER flipping to Completed, so the
+        // first read of a finished search can legitimately come back empty.
+        return json(bodyReads <= (o.emptyReads || 0) ? [] : bodies);
+      }
+      if (url.includes("/api/v0/searches/s1")) {
+        state.polls++;
+        return json({
+          id: "s1",
+          state: state.polls >= (o.completeOnPoll || 2) ? "Completed, ResponseLimitReached" : "InProgress",
+          responseCount: 250,
+          fileCount: 8666
+        });
+      }
+      return undefined;
+    }
+  });
+  return { h, state, bodyCount: () => bodyReads };
+}
+
+test("polling asks for counts only — the response bodies are fetched once, at the end", async () => {
+  const p = loadPlugin();
+  const { h, bodyCount } = searchHost({ completeOnPoll: 3 });
+  await p.activate(h.api);
+  try {
+    const out = await h.tools.search({ query: "rage against the machine" });
+    assert.equal(out.results.length, 1);
+
+    const polls = h.calls.fetched.filter((u) => /\/api\/v0\/searches\/s1(\?|$)/.test(u));
+    assert.ok(polls.length >= 3, "polled while the search ran");
+    for (const u of polls) {
+      assert.ok(!u.includes("includeResponses"), "a progress poll must not drag the bodies along: " + u);
+    }
+    assert.equal(bodyCount(), 1, "bodies read exactly once");
+  } finally {
+    p.deactivate();
+  }
+});
+
+test("an empty first read of a just-completed search is retried, not reported as no results", async () => {
+  const p = loadPlugin();
+  const { h, bodyCount } = searchHost({ completeOnPoll: 1, emptyReads: 2 });
+  await p.activate(h.api);
+  try {
+    const out = await h.tools.search({ query: "rage against the machine" });
+    assert.equal(out.results.length, 1, "the retry found what the first read missed");
+    assert.equal(bodyCount(), 3, "two empty reads, then the real one");
+  } finally {
+    p.deactivate();
+  }
+});
+
+
+// --- the results list ------------------------------------------------------
+// The host's track-row-list has two bodies and only the SELECTABLE one honours
+// `columns`; the other hardcodes Album / Duration and drops them silently. A
+// list that declares columns without `selectable` therefore renders an empty
+// "Album" column where the real ones should be — which is exactly what shipped.
+
+function findNode(node, pred) {
+  if (!node || typeof node !== "object") return null;
+  if (pred(node)) return node;
+  for (const child of node.children || []) {
+    const hit = findNode(child, pred);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+async function searchAndRender(h, p) {
+  h.actions.search({ query: "rage against the machine" });
+  for (let i = 0; i < 100; i++) {
+    const last = [...h.calls.views].reverse()
+      .map((v) => findNode(v.data, (n) => n.type === "track-row-list"))
+      .find(Boolean);
+    if (last && last.items.length) return last;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  throw new Error("the results list never rendered");
+}
+
+test("the results list declares selectable alongside its columns, or they do not render", async () => {
+  const p = loadPlugin();
+  const { h } = searchHost({ completeOnPoll: 1 });
+  await p.activate(h.api);
+  try {
+    const list = await searchAndRender(h, p);
+    assert.equal(list.selectable, true, "columns only render on the selectable body");
+    assert.ok(list.columns && list.columns.length, "columns declared");
+    assert.equal(list.showHeader, true, "columns require a header — unnamed number columns are unreadable");
+    assert.ok(list.openOnClick, "a click on the name must still start the download");
+
+    const row = list.items[0];
+    assert.equal(row.title, "04. Settle For Nothing.flac", "the title is the filename alone");
+    assert.equal(row.subtitle, "peer · music/RATM", "who has it, and where");
+    assert.equal(row.album, undefined, "no Album column — the folder is on the second line");
+    assert.deepEqual(Object.keys(row.cells).sort(), ["availability", "duration", "quality", "size"]);
+  } finally {
+    p.deactivate();
+  }
+});
+
+test("downloading a multi-user selection sends one batch per sharer", async () => {
+  const p = loadPlugin();
+  const batches = [];
+  const { h } = searchHost({
+    completeOnPoll: 1,
+    bodies: [
+      {
+        username: "alice", hasFreeUploadSlot: true, queueLength: 0, uploadSpeed: 1000,
+        files: [
+          { filename: "a\\Album\\01.flac", size: 100, length: 200 },
+          { filename: "a\\Album\\02.flac", size: 100, length: 200 }
+        ]
+      },
+      {
+        username: "bob", hasFreeUploadSlot: true, queueLength: 0, uploadSpeed: 1000,
+        files: [{ filename: "b\\Album\\03.flac", size: 100, length: 200 }]
+      }
+    ]
+  });
+  // slskd addresses an enqueue to ONE peer, so a selection spanning sharers has
+  // to be split into a batch each.
+  const inner = h.api.network.fetch;
+  h.api.network.fetch = async (url, init) => {
+    if (url.includes("/transfers/downloads/batches")) {
+      batches.push(JSON.parse(init.body));
+      return { status: 200, text: async () => JSON.stringify({ failures: [] }) };
+    }
+    return inner(url, init);
+  };
+  await p.activate(h.api);
+  try {
+    const list = await searchAndRender(h, p);
+    const ids = list.items.map((i) => i.id);
+    assert.equal(ids.length, 3);
+    h.actions["download-file"]({ selectedIds: ids });
+    for (let i = 0; i < 100 && batches.length < 2; i++) await new Promise((r) => setTimeout(r, 20));
+    assert.equal(batches.length, 2, "one batch per sharer, not one batch for the selection");
+    assert.deepEqual(batches.map((b) => b.username).sort(), ["alice", "bob"]);
+    assert.deepEqual(batches.map((b) => b.files.length).sort(), [1, 2]);
+    assert.notEqual(
+      batches[0].options.destination, batches[1].options.destination,
+      "each batch claims its own destination folder"
+    );
   } finally {
     p.deactivate();
   }

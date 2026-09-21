@@ -196,3 +196,189 @@ test("groupByFolder keeps the same folder from different users separate", () => 
   ], {});
   assert.equal(plugin._groupByFolder(ranked).length, 2);
 });
+
+// --- resultLabel / resultSource --------------------------------------------
+// The title is the filename and nothing else; who has it and where lives on the
+// second line. Everyone on Soulseek shares the same album, so a column of bare
+// basenames reads as one track repeated 40 times — the sharer and the folder
+// are what tell the rows apart.
+
+test("resultLabel is the filename alone", () => {
+  assert.equal(
+    plugin._resultLabel({
+      username: "ieee802dot11ac",
+      filename: "music\\Rage Against The Machine\\Rage Against The Machine\\04. Settle For Nothing.flac"
+    }),
+    "04. Settle For Nothing.flac"
+  );
+});
+
+test("resultSource is user · folder, with forward slashes", () => {
+  assert.equal(
+    plugin._resultSource({
+      username: "ieee802dot11ac",
+      filename: "music\\Rage Against The Machine\\Rage Against The Machine\\04. Settle For Nothing.flac"
+    }),
+    "ieee802dot11ac · music/Rage Against The Machine/Rage Against The Machine"
+  );
+});
+
+test("resultSource shows the WHOLE folder path, not just its last segment", () => {
+  assert.equal(
+    plugin._resultSource({ username: "u", filename: "Discography\\1992 - Album\\01.mp3" }),
+    "u · Discography/1992 - Album"
+  );
+});
+
+test("resultSource is just the user for a file shared at the root", () => {
+  assert.equal(plugin._resultSource({ username: "u", filename: "01.mp3" }), "u");
+});
+
+test("resultSource is just the folder when there is no user", () => {
+  assert.equal(plugin._resultSource({ username: "", filename: "a/b.mp3" }), "a");
+});
+
+test("the label helpers are null-safe", () => {
+  assert.equal(plugin._resultLabel(null), "");
+  assert.equal(plugin._resultSource(null), "");
+});
+
+// --- resultCells -----------------------------------------------------------
+// A cell the sharer never reported must be ABSENT, not "0" or "": the host
+// renders a missing cell as an em dash, which reads as unknown. Soulseek
+// clients routinely report no bitrate and no duration at all — 1,316 of 8,666
+// files in one measured search carried no length.
+
+test("resultCells fills every column when the sharer reported everything", () => {
+  const cells = plugin._resultCells({
+    extension: "flac", qualityTier: 0, sampleRate: 44100, bitDepth: 16,
+    size: 31354797, length: 288, hasFreeUploadSlot: true, queueLength: 0
+  });
+  assert.equal(cells.quality, "FLAC 44kHz/16bit");
+  assert.equal(cells.size, "30 MB");
+  assert.equal(cells.duration, "4:48");
+  assert.equal(cells.availability, "free slot");
+});
+
+test("resultCells omits duration and quality a client never reported", () => {
+  const cells = plugin._resultCells({
+    extension: "", qualityTier: 2, size: 100, length: null, queueLength: 3
+  });
+  assert.equal("duration" in cells, false);
+  assert.equal("quality" in cells, false);
+  assert.equal(cells.availability, "queue 3");
+});
+
+test("the columns are declared with labels and widths", () => {
+  const ids = plugin._RESULT_COLUMNS.map((c) => c.id);
+  assert.deepEqual(ids, ["quality", "size", "duration", "availability"]);
+  for (const col of plugin._RESULT_COLUMNS) {
+    assert.ok(col.label, "every column needs a header — columns without one are unreadable");
+    assert.ok(col.width > 0);
+  }
+});
+
+// --- result caps -----------------------------------------------------------
+// A broad query returns 20k+ files across 16k+ folders; rendering all of them is
+// unusable and slow. The list is ranked best-first, so the cap only drops a tail
+// nobody would scroll to.
+
+test("the file cap is 1000", () => {
+  assert.equal(plugin._MAX_RESULT_FILES, 1000);
+  assert.equal(plugin._MAX_RESULT_FOLDERS, 1000);
+});
+
+test("capping keeps the BEST results — ranking runs before the slice", () => {
+  const responses = [];
+  for (let i = 0; i < 1200; i++) {
+    responses.push({
+      username: "u" + i,
+      hasFreeUploadSlot: i === 1199, // the very last response is the best one
+      queueLength: i === 1199 ? 0 : 50,
+      uploadSpeed: 1,
+      files: [{ filename: "f\\" + i + ".flac", size: 100, length: 200 }]
+    });
+  }
+  const ranked = plugin._rankResults(responses, {});
+  assert.equal(ranked.length, 1200);
+  assert.equal(ranked[0].username, "u1199");
+  // What runSearch stores is the head of that ranking.
+  const shown = ranked.slice(0, plugin._MAX_RESULT_FILES);
+  assert.equal(shown.length, 1000);
+  assert.equal(shown[0].username, "u1199");
+});
+
+test("folders are grouped from the FULL list, so a kept folder keeps every file", () => {
+  const files = [];
+  for (let i = 0; i < 1100; i++) files.push({ filename: "Album\\" + i + ".flac", size: 100, length: 200 });
+  const ranked = plugin._rankResults([{ username: "u", files, queueLength: 0, uploadSpeed: 1 }], {});
+  const folders = plugin._groupByFolder(ranked);
+  assert.equal(folders.length, 1);
+  // Grouping before the slice is what keeps this at 1100 rather than 1000 —
+  // downloading the folder must not silently grab part of the album.
+  assert.equal(folders[0].files.length, 1100);
+});
+
+// --- formatCount -----------------------------------------------------------
+// toLocaleString is absent from the plugin sandbox.
+
+test("formatCount groups thousands", () => {
+  assert.equal(plugin._formatCount(0), "0");
+  assert.equal(plugin._formatCount(999), "999");
+  assert.equal(plugin._formatCount(1000), "1,000");
+  assert.equal(plugin._formatCount(20431), "20,431");
+  assert.equal(plugin._formatCount(1234567), "1,234,567");
+});
+
+// --- sortCandidates --------------------------------------------------------
+// The host renders `items` in the order given and only reports the header
+// click, so the plugin sorts — on the raw numbers, since the host never sees
+// anything but the formatted strings. "desc" means BEST first on every column,
+// which on Quality and Availability is the opposite of the raw tier number.
+
+const CANDS = [
+  { id: "lossless-slow", qualityTier: 0, bitRate: null, size: 30000000, length: 288, availabilityTier: 2, queueLength: 40, uploadSpeed: 100 },
+  { id: "mp3-free", qualityTier: 1, bitRate: 320, size: 9000000, length: 240, availabilityTier: 0, queueLength: 0, uploadSpeed: 900 },
+  { id: "mp3-low", qualityTier: 3, bitRate: 128, size: 4000000, length: null, availabilityTier: 1, queueLength: 3, uploadSpeed: 500 }
+];
+const order = (col, dir) => plugin._sortCandidates(CANDS, col, dir).map((c) => c.id);
+
+test("quality desc puts lossless first, asc reverses it", () => {
+  assert.deepEqual(order("quality", "desc"), ["lossless-slow", "mp3-free", "mp3-low"]);
+  assert.deepEqual(order("quality", "asc"), ["mp3-low", "mp3-free", "lossless-slow"]);
+});
+
+test("availability desc puts a free slot first, not the longest queue", () => {
+  assert.deepEqual(order("availability", "desc"), ["mp3-free", "mp3-low", "lossless-slow"]);
+});
+
+test("size sorts by bytes, both ways", () => {
+  assert.deepEqual(order("size", "desc"), ["lossless-slow", "mp3-free", "mp3-low"]);
+  assert.deepEqual(order("size", "asc"), ["mp3-low", "mp3-free", "lossless-slow"]);
+});
+
+test("a candidate with no duration sinks to the bottom in BOTH directions", () => {
+  // Flipping the arrow must not float a wall of em dashes to the top: unknown
+  // is not zero. 1,316 of 8,666 files in one measured search had no length.
+  assert.equal(order("duration", "desc").pop(), "mp3-low");
+  assert.equal(order("duration", "asc").pop(), "mp3-low");
+  assert.deepEqual(order("duration", "asc").slice(0, 2), ["mp3-free", "lossless-slow"]);
+});
+
+test("sortCandidates does not mutate the ranked list", () => {
+  const before = CANDS.map((c) => c.id);
+  plugin._sortCandidates(CANDS, "size", "asc");
+  assert.deepEqual(CANDS.map((c) => c.id), before);
+});
+
+test("an unknown column leaves the order alone", () => {
+  assert.equal(plugin._sortCandidates(CANDS, "artist", "desc"), CANDS);
+});
+
+test("every sortable column has a comparator, and vice versa", () => {
+  for (const col of plugin._RESULT_COLUMNS) {
+    if (col.sortable) {
+      assert.notEqual(plugin._sortCandidates(CANDS, col.id, "desc"), CANDS, col.id + " sorts");
+    }
+  }
+});

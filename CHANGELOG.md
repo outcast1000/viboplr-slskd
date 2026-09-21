@@ -1,5 +1,63 @@
 # Changelog
 
+## 0.2.1
+
+- **New icon**: a note inside a ring — music coming off a network. The old one
+  was a *filled* note silhouette, and the host draws plugin icons stroke-only
+  (`fill: none`, 24×24, stroke-width 2, in both the sidebar and the Extensions
+  view), so it rendered as an outline of a note-shaped blob rather than a note.
+- **A finished download plays again.** The local path was built by joining
+  slskd's downloads folder to the filename its Files API reported — but a
+  *targeted* directory listing relativizes names to the directory that was
+  asked for, not to the downloads root, so `viboplr/1-Album/04. Track.flac`
+  came back as `04. Track.flac` and the album folders were lost. Playback then
+  failed on a path that never existed. Targeted listings are now rebased onto
+  the downloads root before anything joins them.
+- **A stored path that can't be right any more is re-derived.** slskd's
+  downloads folder is the user's to repoint, and a tracked record outlives the
+  setting — so play and Download… now check that the remembered path still sits
+  under the *current* downloads folder and re-locate the file from a fresh
+  listing when it doesn't. This also heals paths written by 0.2.0.
+- **Search results are capped at the best 1,000.** A broad query really does come
+  back with 20,000+ files across 16,000+ folders, which is neither scrollable nor
+  cheap to render. Results were already ranked best-first, so the cap only drops
+  a tail nobody reaches; a line above the list says how many matched. Folders are
+  grouped from the full list before the cap, so a folder that is shown still
+  carries every one of its files and "download folder" gets the whole album.
+- **A result row shows its filename, with `user · folder` beneath it.** Everyone
+  on Soulseek shares the same album, so a column of basenames looked like one
+  track repeated forty times — the sharer and the folder they keep it in are what
+  actually tell two candidates apart. The whole remote folder path is shown, not
+  just its last segment.
+- **Quality, size, length and availability are columns now**, in place of the
+  fixed Album / Duration pair, so they line up down the list instead of running
+  together in a sentence per row. A fact the sharer never reported is left blank
+  (an em dash) rather than shown as zero — plenty of Soulseek clients report no
+  bitrate and no duration at all.
+- **Results are selectable, and a selection downloads in one go.** Pick files
+  from several sharers and hit Download: each sharer gets its own batch, because
+  slskd addresses an enqueue to one peer. Clicking a row's *name* still starts
+  that one file, so nothing that worked before needs a modifier now. (This is
+  also what makes the columns above appear at all — the host renders declared
+  columns only on a selectable list.)
+- **Those columns sort.** Clicking a header re-orders the list, and `desc` means
+  *best* first on every column — lossless at the top of Quality, a free slot at
+  the top of Availability — rather than merely largest-first. A file the sharer
+  reported nothing for sinks to the bottom whichever way the arrow points, since
+  unknown is not zero. Sorting happens in the plugin, on the raw numbers; the
+  host only ever sees the formatted text. "Back to best match" restores the
+  ranking, which the header toggle alone can't do.
+- **A search no longer drags its results along on every poll.** The progress
+  poll asked for `includeResponses=true` once a second for up to 30 seconds:
+  measured against slskd 0.26.0, that is ~254 bytes of counts versus 2.6 MB of
+  bodies, so a broad search pulled ~78 MB through the plugin and parsed it 30
+  times to read two integers off it. Bodies are now fetched once, after the
+  search completes.
+- **A finished search that briefly reads as empty is retried.** slskd writes the
+  response bodies a moment *after* the search flips to `Completed` (~68 ms), and
+  the old code took whatever the completing poll happened to hold — so a search
+  that found thousands of files could report "no downloadable audio found".
+
 ## 0.2.0
 
 **Brought in line with the current host and with the yt-dlp and qBittorrent

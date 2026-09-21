@@ -1,14 +1,14 @@
 {
   "id": "slskd",
   "name": "Soulseek",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "author": "Viboplr",
   "description": "Search and download from the Soulseek network via a slskd daemon: ranked results, whole-album grabs, live transfer progress, and finished files that play and reach your library.",
   "minAppVersion": "1.0.34",
   "stability": "experimental",
   "homepage": "https://github.com/outcast1000/viboplr-slskd",
   "updateUrl": "https://github.com/outcast1000/viboplr-slskd/releases/latest/download/update.json",
-  "icon": "M12 3v12.55a4 4 0 1 0 2 3.45V7h4V3h-6z",
+  "icon": "M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0M11 15.4V7.9l5-1.3v2.3l-5 1.3M11 15.4a2 2 0 1 1-4 0 2 2 0 0 1 4 0",
   "apiUsage": [
     { "api": "network.fetch", "reason": "Talk to your slskd daemon's REST API" },
     { "api": "storage.set", "reason": "Remember the slskd address, API key, preferences and which downloads this plugin started" },
@@ -59,7 +59,7 @@
       {
         "id": "slskd-browse",
         "label": "Soulseek",
-        "icon": "M12 3v12.55a4 4 0 1 0 2 3.45V7h4V3h-6z"
+        "icon": "M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0M11 15.4V7.9l5-1.3v2.3l-5 1.3M11 15.4a2 2 0 1 1-4 0 2 2 0 0 1 4 0"
       }
     ],
     "downloadProviders": [

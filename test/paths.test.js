@@ -5,8 +5,8 @@ const { loadPlugin } = require("./harness/sandbox.js");
 const plugin = loadPlugin();
 
 // --- absolutePath ----------------------------------------------------------
-// The Files API relativizes `fullName` to the downloads root
-// (FileService.cs:341), so the root has to be prepended.
+// The Files API relativizes `fullName` to the directory that was asked for, so
+// a rebased name is root-relative and the root has to be prepended.
 
 test("absolutePath joins the downloads root with the relative fullName", () => {
   assert.equal(
@@ -29,6 +29,91 @@ test("absolutePath uses backslashes for a Windows root", () => {
 test("absolutePath returns null on missing input", () => {
   assert.equal(plugin._absolutePath(null, "x"), null);
   assert.equal(plugin._absolutePath("/dl", null), null);
+});
+
+// --- rebaseListing ---------------------------------------------------------
+// The targeted endpoint (/files/downloads/directories/{b64}) relativizes to
+// THAT directory, the root endpoint to the downloads root. Verified against
+// slskd 0.26.0: a root listing answers "viboplr\1-Album\04. Track.flac" while a
+// listing of `viboplr/1-Album` answers "04. Track.flac" for the same file.
+// Joining the latter to the downloads root loses the folders, and playback then
+// fails on a path that never existed.
+
+test("rebaseListing prefixes a targeted listing with its own directory", () => {
+  const out = plugin._rebaseListing(
+    [{ name: "04. Track.flac", fullName: "04. Track.flac", length: 10 }],
+    "viboplr/1-Album"
+  );
+  assert.equal(out[0].fullName, "viboplr/1-Album/04. Track.flac");
+  assert.equal(out[0].name, "04. Track.flac");
+  assert.equal(out[0].length, 10);
+});
+
+test("rebaseListing is idempotent — an already-rooted name is untouched", () => {
+  const rooted = { name: "x.mp3", fullName: "viboplr/1-Album/x.mp3" };
+  assert.equal(plugin._rebaseListing([rooted], "viboplr/1-Album")[0], rooted);
+});
+
+test("rebaseListing recognises a backslashed prefix as already rooted", () => {
+  const rooted = { name: "x.mp3", fullName: "viboplr\\1-Album\\x.mp3" };
+  assert.equal(plugin._rebaseListing([rooted], "viboplr/1-Album")[0], rooted);
+});
+
+test("rebaseListing keeps a nested name's own subfolders", () => {
+  const out = plugin._rebaseListing(
+    [{ name: "x.mp3", fullName: "cd1/x.mp3" }],
+    "viboplr/1-Album"
+  );
+  assert.equal(out[0].fullName, "viboplr/1-Album/cd1/x.mp3");
+});
+
+test("rebaseListing with no destination passes the listing through", () => {
+  const files = [{ name: "x.mp3", fullName: "x.mp3" }];
+  assert.equal(plugin._rebaseListing(files, ""), files);
+  assert.equal(plugin._rebaseListing(files, null), files);
+});
+
+test("a targeted listing, rebased, joins to the real file on disk", () => {
+  const [file] = plugin._rebaseListing(
+    [{ name: "04. Settle For Nothing.flac", fullName: "04. Settle For Nothing.flac" }],
+    "viboplr/1-Rage_Against_The_Machine"
+  );
+  assert.equal(
+    plugin._absolutePath("D:\\dl\\soulseek\\downloads", file.fullName),
+    "D:\\dl\\soulseek\\downloads\\viboplr\\1-Rage_Against_The_Machine\\04. Settle For Nothing.flac"
+  );
+});
+
+// --- pathIsUnder -----------------------------------------------------------
+// Decides whether a stored resolvedPath can still be right: slskd's downloads
+// folder is user-configurable, and a repointed folder leaves every cached path
+// pointing at nothing.
+
+test("pathIsUnder accepts a file inside the root", () => {
+  assert.equal(plugin._pathIsUnder("/dl", "/dl/a/b.mp3"), true);
+  assert.equal(plugin._pathIsUnder("/dl/", "/dl/a/b.mp3"), true);
+});
+
+test("pathIsUnder is case-insensitive for a Windows root, and mixes separators", () => {
+  assert.equal(plugin._pathIsUnder("C:\\dl", "c:\\DL\\a\\b.mp3"), true);
+  assert.equal(plugin._pathIsUnder("C:\\dl", "C:/dl/a/b.mp3"), true);
+});
+
+test("pathIsUnder rejects a path under a DIFFERENT downloads folder", () => {
+  assert.equal(
+    plugin._pathIsUnder("D:\\soulseek\\downloads", "C:\\slskd\\downloads\\x.flac"),
+    false
+  );
+});
+
+test("pathIsUnder rejects a sibling whose name merely starts the same", () => {
+  assert.equal(plugin._pathIsUnder("/dl", "/dl-old/a.mp3"), false);
+});
+
+test("pathIsUnder rejects the root itself and empty input", () => {
+  assert.equal(plugin._pathIsUnder("/dl", "/dl"), false);
+  assert.equal(plugin._pathIsUnder("", "/dl/a.mp3"), false);
+  assert.equal(plugin._pathIsUnder("/dl", ""), false);
 });
 
 // --- file:// URLs ----------------------------------------------------------

@@ -60,8 +60,22 @@ var LOSSLESS_EXTS = ["flac", "wav", "aiff", "aif", "ape", "wv", "alac", "tta", "
 // systematically bury good results.
 var T_LOSSLESS = 0, T_HIGH = 1, T_UNKNOWN = 2, T_MEDIUM = 3, T_LOW = 4;
 
+// A broad query ("rage against the machine") really does come back with 20k+
+// downloadable files across 16k+ folders. Every one of those becomes a row or a
+// card object handed to the host's renderer, which is both unusable to scroll
+// and expensive to build — so the view shows the best N and says so. The list is
+// already ranked best-first, so a cap costs only the tail nobody would reach.
+var MAX_RESULT_FILES = 1000;
+var MAX_RESULT_FOLDERS = 1000;
+
 var SEARCH_POLL_MS = 1000;
 var SEARCH_CAP_MS = 30000;
+// Response bodies are written a moment AFTER the search flips to Completed —
+// measured at ~68ms against slskd 0.26.0, but a poll that lands inside that gap
+// reads an empty list, which used to surface as "no results" for a search that
+// found thousands. Retry briefly before believing an empty answer.
+var RESPONSES_RETRY_MS = 250;
+var RESPONSES_RETRY_TRIES = 12;
 var TRANSFER_POLL_FAST_MS = 3000;
 var TRANSFER_POLL_SLOW_MS = 30000;
 var READINESS_POLL_MS = 60000;
@@ -90,7 +104,10 @@ var downloadsDir = null;
 var tier = "remote";
 
 var activeTab = "search";
-var search = { query: "", id: null, running: false, responseCount: 0, fileCount: 0, results: [], folders: [], error: null };
+// `matchCount` / `folderCount` are what the search actually produced;
+// `results` / `folders` are the capped slices the view renders. `sortColumn` is
+// null while the list is in ranked ("best match") order.
+var search = { query: "", id: null, running: false, responseCount: 0, fileCount: 0, matchCount: 0, folderCount: 0, results: [], folders: [], error: null, sortColumn: null, sortDir: "desc" };
 var searchGen = 0;
 
 var transfers = [];       // raw slskd transfer records (downloads)
@@ -293,6 +310,25 @@ function rankResults(responses, prefs) {
   return out;
 }
 
+// A result row's title: the filename, nothing else. The identifying context
+// (who has it, which folder) goes on the second line — see `resultSource`.
+function resultLabel(c) {
+  return c ? basenameRemote(c.filename) : "";
+}
+
+// The second line: "user · folder". Two files with the same name are the norm on
+// Soulseek (everyone shares the same album), so the sharer and the folder they
+// keep it in are what actually tell two rows apart. The remote folder path is
+// shown whole, not just its last segment — "Discography" says nothing without
+// the "Rage Against The Machine" above it — and with forward slashes, since a
+// Soulseek path is not a path on this machine.
+function resultSource(c) {
+  if (!c) return "";
+  var folder = dirnameRemote(c.filename).replace(/\\/g, "/");
+  if (!c.username) return folder;
+  return folder ? c.username + " · " + folder : c.username;
+}
+
 // Soulseek users mostly share whole albums, so folders are a first-class result.
 function groupByFolder(candidates) {
   var order = [];
@@ -446,8 +482,11 @@ function nextReadiness(probe, prev) {
   };
 }
 
-// Files API `fullName` is relativized to the downloads root (FileService.cs:341),
-// so the absolute path needs directories.downloads prepended.
+// Files API `fullName` is relativized to the directory that was ASKED for, not
+// to the downloads root: the root listing answers "viboplr/b1/Track.mp3" while a
+// targeted listing of `viboplr/b1` answers "Track.mp3" for the same file. Every
+// fullName is rebased onto the root (see `rebaseListing`) before it reaches
+// here, so this only ever has to prepend directories.downloads.
 function absolutePath(downloadsRoot, fullName) {
   if (!downloadsRoot || !fullName) return null;
   var root = String(downloadsRoot).replace(/[\/\\]+$/, "");
@@ -456,6 +495,46 @@ function absolutePath(downloadsRoot, fullName) {
   var rel = String(fullName).replace(/^[\/\\]+/, "");
   rel = windows ? rel.replace(/\//g, "\\") : rel.replace(/\\/g, "/");
   return root + sep + rel;
+}
+
+// Rebase a TARGETED listing's `fullName`s onto the downloads root, so a listing
+// means the same thing whichever endpoint produced it. Idempotent: a name that
+// already carries the prefix (a root listing's, or a future slskd that changes
+// its mind) is left alone.
+function rebaseListing(files, destination) {
+  var dir = String(destination || "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+  var list = files || [];
+  if (!dir) return list;
+  var prefix = dir + "/";
+  var lower = prefix.toLowerCase();
+  var out = [];
+  for (var i = 0; i < list.length; i++) {
+    var f = list[i];
+    var full = String((f && f.fullName) || "").replace(/\\/g, "/").replace(/^\/+/, "");
+    if (!full || full.toLowerCase().indexOf(lower) === 0) { out.push(f); continue; }
+    out.push({
+      name: f.name,
+      fullName: prefix + full,
+      length: f.length,
+      attributes: f.attributes,
+      createdAt: f.createdAt,
+      modifiedAt: f.modifiedAt
+    });
+  }
+  return out;
+}
+
+// Is `filePath` inside `root`? Case-insensitive for a Windows root, with the
+// same separator normalising as `collectionForPath`.
+function pathIsUnder(root, filePath) {
+  var base = String(root || "").replace(/\\/g, "/").replace(/\/+$/, "");
+  var path = String(filePath || "").replace(/\\/g, "/");
+  if (!base || !path) return false;
+  var win = isWindowsPath(root);
+  var subject = win ? path.toLowerCase() : path;
+  var needle = win ? base.toLowerCase() : base;
+  if (subject.indexOf(needle) !== 0) return false;
+  return subject.charAt(needle.length) === "/";
 }
 
 // Transfers carry no local path, and a conflict strategy may have renamed the
@@ -693,6 +772,17 @@ function formatBytes(n) {
   return (i === 0 ? Math.round(v) : (v < 10 ? v.toFixed(1) : Math.round(v))) + " " + units[i];
 }
 
+// Thousands separators without toLocaleString (absent from the sandbox).
+function formatCount(n) {
+  var s = String(Math.floor(Math.abs(Number(n) || 0)));
+  var out = "";
+  for (var i = 0; i < s.length; i++) {
+    if (i > 0 && (s.length - i) % 3 === 0) out += ",";
+    out += s.charAt(i);
+  }
+  return out;
+}
+
 function formatDurationSecs(s) {
   if (s == null || isNaN(s)) return "";
   var t = Math.max(0, Math.round(s));
@@ -897,6 +987,13 @@ function sleep(ms) {
 // counts stream live (SearchService.cs:296-300) while response BODIES land only
 // at completion (:311, :361), so a caller can show a real counter meanwhile.
 //
+// THE POLL IS DELIBERATELY LEAN. `?includeResponses=true` was on every poll,
+// which is why a broad search was so expensive: measured against slskd 0.26.0,
+// the counts-only body is ~254 bytes while the same search's bodies are 2.6 MB,
+// and the loop runs up to 30 times — ~78 MB pulled through the plugin sandbox
+// and JSON-parsed, to read two integers off it 29 times and use the payload
+// once. The bodies are now fetched exactly once, after completion.
+//
 // Serialized through `searchChain`: slskd holds a one-slot semaphore on
 // POST /searches and answers 429 to a second caller, so two searches (the view
 // and an assistant tool, say) must queue rather than collide.
@@ -932,7 +1029,7 @@ async function performSearchNow(query, prefs, onProgress, isStale) {
 
     var poll;
     try {
-      poll = await slskd("GET", "/api/v0/searches/" + encodeURIComponent(id) + "?includeResponses=true");
+      poll = await slskd("GET", "/api/v0/searches/" + encodeURIComponent(id));
     } catch (e) {
       continue;
     }
@@ -943,7 +1040,8 @@ async function performSearchNow(query, prefs, onProgress, isStale) {
     if (onProgress) onProgress(last.responseCount || 0, last.fileCount || 0);
 
     if (hasFlag(last.state, "Completed")) {
-      return rankResults(last.responses || [], prefs || {});
+      var done = await fetchResponses(id, stale);
+      return done === null ? null : rankResults(done, prefs || {});
     }
   }
 
@@ -951,8 +1049,41 @@ async function performSearchNow(query, prefs, onProgress, isStale) {
   // its slot frees up for the next one, but don't wait on that.
   slskd("PUT", "/api/v0/searches/" + encodeURIComponent(id))
     .catch(function (e) { console.error("slskd: couldn't stop a timed-out search:", e); });
-  if (last && last.responses && last.responses.length) return rankResults(last.responses, prefs || {});
+  var partial = await fetchResponses(id, stale);
+  if (partial === null) return null;
+  if (partial.length) return rankResults(partial, prefs || {});
   throw new Error("Search timed out after " + Math.round(SEARCH_CAP_MS / 1000) + " seconds.");
+}
+
+// The one heavy read of a search: its response bodies, fetched after the search
+// is over. `/responses` is the narrow endpoint (just the array); an older slskd
+// without it falls back to the whole search object. Resolves `[]` when there is
+// genuinely nothing, `null` when the caller stopped caring mid-fetch.
+async function fetchResponses(id, stale) {
+  var path = "/api/v0/searches/" + encodeURIComponent(id);
+  for (var i = 0; i < RESPONSES_RETRY_TRIES; i++) {
+    if (stale && stale()) return null;
+    var got = await readResponses(path + "/responses", null);
+    if (got === null) got = await readResponses(path + "?includeResponses=true", "responses");
+    if (got && got.length) return got;
+    await sleep(RESPONSES_RETRY_MS);
+  }
+  return [];
+}
+
+// One attempt at one endpoint. `field` names the property holding the array
+// when the body is an object rather than the array itself. `null` means "this
+// endpoint didn't answer with a list" — try the other shape.
+async function readResponses(path, field) {
+  var res;
+  try {
+    res = await slskd("GET", path);
+  } catch (e) {
+    return null;
+  }
+  if (res.status < 200 || res.status >= 300 || !res.json) return null;
+  var list = field ? res.json[field] : res.json;
+  return Array.isArray(list) ? list : null;
 }
 
 function viewPrefs(extra) {
@@ -966,7 +1097,7 @@ function viewPrefs(extra) {
 async function runSearch(query, extra) {
   if (!query || readiness.state !== "ready") return;
   var gen = ++searchGen;
-  search = { query: query, id: null, running: true, responseCount: 0, fileCount: 0, results: [], folders: [], error: null };
+  search = { query: query, id: null, running: true, responseCount: 0, fileCount: 0, matchCount: 0, folderCount: 0, results: [], folders: [], error: null, sortColumn: null, sortDir: "desc" };
   activeTab = "search";
   render();
 
@@ -986,8 +1117,14 @@ async function runSearch(query, extra) {
     return;
   }
   if (gen !== searchGen || ranked === null) return;
-  search.results = ranked;
-  search.folders = groupByFolder(ranked);
+  // Group from the FULL ranked list, then cap: a folder that survives the cut
+  // must keep every one of its files, or "download folder" would silently grab
+  // part of an album.
+  var folders = groupByFolder(ranked);
+  search.matchCount = ranked.length;
+  search.folderCount = folders.length;
+  search.results = ranked.slice(0, MAX_RESULT_FILES);
+  search.folders = folders.slice(0, MAX_RESULT_FOLDERS);
   search.running = false;
   render();
 }
@@ -1230,7 +1367,10 @@ async function listDestination(rec) {
   if (rec.b64) {
     try {
       var res = await slskd("GET", "/api/v0/files/downloads/directories/" + rec.b64 + "?recursive=true");
-      if (res.status >= 200 && res.status < 300 && res.json) return flattenListing(res.json);
+      // Names come back relative to THIS directory, not to the downloads root.
+      if (res.status >= 200 && res.status < 300 && res.json) {
+        return rebaseListing(flattenListing(res.json), rec.destination);
+      }
     } catch (e) {
       console.error("slskd: targeted listing failed, falling back to the root listing:", e);
     }
@@ -1272,6 +1412,34 @@ async function resolveTransferPath(transfer, rec) {
   tracked[trackKeyOf(transfer)] = rec;
   await api.storage.set("tracked", tracked);
   return rec.resolvedPath;
+}
+
+// The transfer a tracked record describes, rebuilt from the record itself.
+// `resolveTransferPath` only needs the remote filename (for the basename) and
+// the size, and slskd forgets a finished transfer once the user clears it — so
+// a record has to be able to re-locate its own file without one.
+function transferFromRecord(ref, rec) {
+  var parts = splitKey(ref);
+  return {
+    username: parts ? parts.username : "",
+    filename: parts ? parts.filename : "",
+    size: rec ? rec.size : null
+  };
+}
+
+// Where a tracked file is NOW. `resolvedPath` is a cache of where slskd put it,
+// and slskd's downloads folder is the user's to repoint — do that and every
+// stored path is stale, which playback only discovers as "file not found". So
+// the cache is trusted only while it still sits under the CURRENT folder, and
+// re-derived from a fresh listing otherwise. Also what heals a path written by
+// a version of this plugin that mis-joined the targeted listing.
+async function currentPath(ref, rec) {
+  if (!rec) return null;
+  if (!downloadsDir) await loadDownloadsDir();
+  if (!downloadsDir) return rec.resolvedPath || null;
+  if (rec.resolvedPath && pathIsUnder(downloadsDir, rec.resolvedPath)) return rec.resolvedPath;
+  rec.resolvedPath = null;
+  return await resolveTransferPath(transferByKey(ref) || transferFromRecord(ref, rec), rec);
 }
 
 function findTrackedByRef(ref) {
@@ -1340,15 +1508,78 @@ function statusLine() {
   return "Connecting…";
 }
 
+// Sorting happens HERE, on the raw numbers, because the host only ever sees the
+// formatted strings ("30 MB", "4:48", "—") and sorting those would sort text.
+// `desc` is defined as BEST-first for every column, not merely largest-first: on
+// Quality that means lossless at the top, on Availability a free slot — which is
+// what a user clicking "Quality ▼" means, and the opposite of the raw tier
+// numbers, where 0 is best.
+var RESULT_SORTS = {
+  quality: function (c) { return [-c.qualityTier, c.bitRate || 0, c.size || 0]; },
+  size: function (c) { return [c.size || 0]; },
+  duration: function (c) { return c.length == null ? null : [c.length]; },
+  availability: function (c) { return [-c.availabilityTier, -(c.queueLength || 0), c.uploadSpeed || 0]; }
+};
+
+// A copy of `list` ordered by `column`. Candidates with nothing to report on
+// that column sink to the bottom in BOTH directions — "unknown" is not "zero",
+// and flipping the arrow should not float a wall of em dashes to the top.
+function sortCandidates(list, column, dir) {
+  var keyOf = RESULT_SORTS[column];
+  if (!keyOf) return list;
+  var sign = dir === "asc" ? -1 : 1;
+  var out = list.slice();
+  out.sort(function (a, b) {
+    var ka = keyOf(a), kb = keyOf(b);
+    if (ka === null && kb === null) return 0;
+    if (ka === null) return 1;
+    if (kb === null) return -1;
+    for (var i = 0; i < ka.length; i++) {
+      if (ka[i] !== kb[i]) return (kb[i] - ka[i]) * sign;
+    }
+    return 0;
+  });
+  return out;
+}
+
+// Columns replace the fixed Album / Duration pair. Kept to four: every one is a
+// number the user actually chooses between, and the title + source line already
+// eat most of the row's width.
+var RESULT_COLUMNS = [
+  { id: "quality", label: "Quality", width: 130, sortable: true },
+  { id: "size", label: "Size", width: 80, align: "right", sortable: true },
+  { id: "duration", label: "Length", width: 70, align: "right", sortable: true },
+  { id: "availability", label: "Availability", width: 110, sortable: true }
+];
+
+function resultCells(c) {
+  var cells = {};
+  var quality = qualityLabel(c);
+  if (quality && quality !== "unknown") cells.quality = quality;
+  if (c.size) cells.size = formatBytes(c.size);
+  if (c.length != null) cells.duration = formatDurationSecs(c.length);
+  cells.availability = availabilityLabel(c);
+  return cells;
+}
+
+function sortedResults() {
+  if (!search.sortColumn) return search.results;
+  return sortCandidates(search.results, search.sortColumn, search.sortDir);
+}
+
 function resultRows() {
-  return search.results.map(function (c) {
+  return sortedResults().map(function (c) {
     var meta = parseTrackMeta(c.filename);
     return {
       id: "f:" + c.username + KEY_SEP + c.filename,
-      title: basenameRemote(c.filename),
-      subtitle: c.username + " · " + qualityLabel(c) + " · " + formatBytes(c.size) + " · " + availabilityLabel(c),
-      album: basenameRemote(dirnameRemote(c.filename)),
-      duration: formatDurationSecs(c.length),
+      title: resultLabel(c),
+      subtitle: resultSource(c),
+      // What the subtitle used to carry now has columns of its own, so the
+      // facts stay comparable down the list instead of running together in one
+      // sentence per row. A cell the sharer didn't report is simply absent —
+      // the host renders that as an em dash, which reads as "unknown" rather
+      // than as zero.
+      cells: resultCells(c),
       durationSecs: c.length != null ? c.length : null,
       action: "download-file",
       artistName: meta.artist,
@@ -1396,6 +1627,17 @@ function folderCards() {
   });
 }
 
+// "Showing the best 1,000 of 20,431 files" — the cap has to be visible, or a
+// broad query silently looks like it found exactly 1,000 things.
+function truncationNote() {
+  var shown = activeTab === "folders" ? search.folders.length : search.results.length;
+  var total = activeTab === "folders" ? search.folderCount : search.matchCount;
+  var noun = activeTab === "folders" ? "folders" : "files";
+  if (!total || total <= shown) return null;
+  return "Showing the best " + formatCount(shown) + " of " + formatCount(total) + " " + noun +
+    ". Narrow the search to see the rest.";
+}
+
 function searchTab() {
   var children = [];
   children.push({
@@ -1438,10 +1680,44 @@ function searchTab() {
     { id: "folders", label: "Folders", count: search.folders.length }
   ], activeTab: activeTab === "folders" ? "folders" : "files", action: "result-mode" });
 
+  var trimmed = truncationNote();
+  if (trimmed) children.push({ type: "text", content: trimmed, className: "plugin-muted" });
+
+  // The host's headers toggle asc/desc and never offer a third state, so the way
+  // back to the ranked order needs its own control — otherwise one click on a
+  // column costs you the ranking until you search again.
+  if (activeTab !== "folders" && search.sortColumn) {
+    children.push({ type: "button", label: "Back to best match", action: "sort-best", variant: "secondary" });
+  }
+
   if (activeTab === "folders") {
     children.push({ type: "card-grid", items: folderCards() });
   } else {
-    children.push({ type: "track-row-list", items: resultRows(), showHeader: true });
+    // `selectable` is what makes `columns` render at all: the host's list has
+    // two bodies, and only the selectable one swaps the fixed Album / Duration
+    // pair for declared columns — the other hardcodes them and ignores
+    // `columns` entirely, which showed up as an empty "Album" column where
+    // Quality / Size / Length / Availability should have been.
+    //
+    // It earns its place anyway: a selection can be downloaded in one go, which
+    // matters when the tracks you want sit with different sharers. `openOnClick`
+    // keeps a click on the name doing what it always did — clicking anywhere
+    // else in the row selects, so multi-select costs no modifier.
+    //
+    // The host renders `items` in the order given and only reports a header
+    // click; it never reorders anything itself.
+    children.push({
+      type: "track-row-list",
+      items: resultRows(),
+      showHeader: true,
+      selectable: true,
+      openOnClick: "title",
+      actions: [{ id: "download-file", label: "Download", icon: "⬇" }],
+      columns: RESULT_COLUMNS,
+      sortBy: search.sortColumn || undefined,
+      sortDir: search.sortColumn ? search.sortDir : undefined,
+      sortAction: "sort-results"
+    });
   }
   return { type: "layout", direction: "vertical", children: children };
 }
@@ -1560,6 +1836,23 @@ function renderSettings() {
 // ---------------------------------------------------------------------------
 // Actions
 // ---------------------------------------------------------------------------
+// A selection can span several sharers, but an enqueue is addressed to ONE peer
+// (slskd queues per user), so group first and send one batch each — sequentially,
+// because each batch claims the next destination folder number.
+async function downloadCandidates(list) {
+  var byUser = {};
+  var order = [];
+  for (var i = 0; i < list.length; i++) {
+    var c = list[i];
+    if (!byUser[c.username]) { byUser[c.username] = []; order.push(c.username); }
+    byUser[c.username].push(c);
+  }
+  for (var u = 0; u < order.length; u++) {
+    var files = byUser[order[u]];
+    await enqueueFiles(order[u], files, basenameRemote(dirnameRemote(files[0].filename)));
+  }
+}
+
 function candidateByRef(ref) {
   var raw = String(ref || "");
   if (raw.indexOf("f:") === 0) raw = raw.slice(2);
@@ -1659,10 +1952,33 @@ function registerActions() {
     render();
   });
 
+  api.ui.onAction("sort-results", function (data) {
+    var col = data && data.column;
+    if (!RESULT_SORTS[col]) return;
+    search.sortColumn = col;
+    search.sortDir = (data && data.direction) === "asc" ? "asc" : "desc";
+    render();
+  });
+
+  api.ui.onAction("sort-best", function () {
+    search.sortColumn = null;
+    search.sortDir = "desc";
+    render();
+  });
+
+  // One row (its hover button, or a click on the name) or a whole selection —
+  // the selection toolbar sends `selectedIds` and no `itemId`, a row sends both.
   api.ui.onAction("download-file", function (data) {
-    var c = candidateByRef(data && data.itemId);
-    if (!c) return;
-    enqueueFiles(c.username, [c], basenameRemote(dirnameRemote(c.filename)))
+    var refs = (data && data.selectedIds && data.selectedIds.length)
+      ? data.selectedIds
+      : [data && data.itemId];
+    var picked = [];
+    for (var i = 0; i < refs.length; i++) {
+      var c = candidateByRef(refs[i]);
+      if (c) picked.push(c);
+    }
+    if (!picked.length) return;
+    downloadCandidates(picked)
       .catch(function (e) { console.error("slskd enqueue failed:", e); });
   });
 
@@ -2016,11 +2332,8 @@ async function activate(hostApi) {
     if (tier !== "local") return null;
     var rec = findTrackedByRef(ref);
     if (!rec) return null;
-    if (!rec.resolvedPath) {
-      var t = transferByKey(ref);
-      if (t && transferPhase(t.state) === "succeeded") await resolveTransferPath(t, rec);
-    }
-    return rec.resolvedPath ? fileUrlForPlayback(rec.resolvedPath) : null;
+    var path = await currentPath(ref, rec);
+    return path ? fileUrlForPlayback(path) : null;
   });
 
   // The download modal's provider for slsk:// — "Download…" on any of our rows
@@ -2031,11 +2344,12 @@ async function activate(hostApi) {
   api.downloads.onResolveByUri(PROVIDER_ID, async function (uri) {
     var ref = String(uri || "").replace(/^slsk:\/\//, "");
     var rec = findTrackedByRef(ref);
-    if (!rec || !rec.resolvedPath) return null;
+    var path = await currentPath(ref, rec);
+    if (!path) return null;
     var meta = rec.meta || {};
-    var ext = extOf(rec.resolvedPath);
+    var ext = extOf(path);
     var out = {
-      url: fileUrlForDownload(rec.resolvedPath),
+      url: fileUrlForDownload(path),
       metadata: {
         title: meta.title || null,
         artist: meta.artist || null,
@@ -2090,6 +2404,14 @@ return {
   _availabilityTier: availabilityTier,
   _rankResults: rankResults,
   _groupByFolder: groupByFolder,
+  _resultLabel: resultLabel,
+  _resultSource: resultSource,
+  _resultCells: resultCells,
+  _sortCandidates: sortCandidates,
+  _RESULT_COLUMNS: RESULT_COLUMNS,
+  _formatCount: formatCount,
+  _MAX_RESULT_FILES: MAX_RESULT_FILES,
+  _MAX_RESULT_FOLDERS: MAX_RESULT_FOLDERS,
   _parseTrackMeta: parseTrackMeta,
   _parsePreferredFormats: parsePreferredFormats,
   _detectTier: detectTier,
@@ -2098,6 +2420,8 @@ return {
   _nextReadiness: nextReadiness,
   _matchFile: matchFile,
   _absolutePath: absolutePath,
+  _rebaseListing: rebaseListing,
+  _pathIsUnder: pathIsUnder,
   _collectionForPath: collectionForPath,
   _mergeMeta: mergeMeta,
   _candidateId: candidateId,
