@@ -1,20 +1,60 @@
 {
   "id": "slskd",
   "name": "Soulseek",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "Viboplr",
-  "description": "Search and download from the Soulseek network via a slskd daemon.",
-  "minAppVersion": "1.0.10",
+  "description": "Search and download from the Soulseek network via a slskd daemon: ranked results, whole-album grabs, live transfer progress, and finished files that play and reach your library.",
+  "minAppVersion": "1.0.34",
   "stability": "experimental",
   "homepage": "https://github.com/outcast1000/viboplr-slskd",
   "updateUrl": "https://github.com/outcast1000/viboplr-slskd/releases/latest/download/update.json",
   "icon": "M12 3v12.55a4 4 0 1 0 2 3.45V7h4V3h-6z",
   "apiUsage": [
     { "api": "network.fetch", "reason": "Talk to your slskd daemon's REST API" },
-    { "api": "storage", "reason": "Store the slskd address, API key and transfer history" },
-    { "api": "downloads.enqueue", "reason": "Import completed Soulseek files into a collection" }
+    { "api": "storage.set", "reason": "Remember the slskd address, API key, preferences and which downloads this plugin started" },
+    { "api": "playback.onResolveStreamByUri", "reason": "Play finished Soulseek downloads straight from slskd's downloads folder" },
+    { "api": "downloads.onResolveByUri", "reason": "Add a finished download to a collection through Viboplr's own download modal (tags and cover art written)" },
+    { "api": "system.readAudioTags", "reason": "Read title, artist and album out of a finished file instead of guessing from its name" },
+    { "api": "collections.resync", "reason": "Rescan your library when a download finishes inside one of your collections" }
   ],
   "contributes": {
+    "assistant": {
+      "instructions": "Fetch music from the Soulseek peer-to-peer network through the user's slskd daemon. Flow: status (connected? signed in? where do downloads land?) → search (a real network search, ~5-30s; results are ranked best-first and carry an id) → download with one or more result ids. A download sits in another user's upload queue — it can take minutes or hours — so watch it with list_downloads rather than waiting. download is a real transfer the user's daemon performs: only download what the user actually asked for. Finished files play from the Downloads tab, and land in the library automatically when slskd's downloads folder is inside a collection.",
+      "tools": [
+        {
+          "name": "status",
+          "description": "Connection state (unconfigured / unreachable / unauthorized / disconnected / connecting / ready), the Soulseek username, slskd version, whether slskd shares anything, and where finished downloads land"
+        },
+        {
+          "name": "search",
+          "description": "Search the Soulseek network. Slow (5-30s, one search at a time). Returns ranked candidates: id, user, filename, folder, quality (format, bitrate, lossless), size, duration, and availability (free slot / queue length / upload speed). Feed ids to download",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "query": { "type": "string", "description": "Free text — artist, album and/or track. Soulseek matches on file and folder names" },
+              "limit": { "type": "number", "description": "1-100, default 25" },
+              "durationSecs": { "type": "number", "description": "Expected track length; candidates more than 5s off are dropped (catches mislabeled files)" }
+            },
+            "required": ["query"]
+          }
+        },
+        {
+          "name": "download",
+          "description": "Queue one or more search results (by id, all from the same search) in slskd. A real download the user's daemon performs — download only what the user asked for. Returns the queued files; progress via list_downloads",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "ids": { "type": "array", "items": { "type": "string" }, "description": "Result ids from search. Pass every file of a folder to grab a whole album" }
+            },
+            "required": ["ids"]
+          }
+        },
+        {
+          "name": "list_downloads",
+          "description": "The downloads slskd is managing: file, user, phase (requested / queued / starting / downloading / succeeded / failed / cancelled), progress (0-1), place in the other user's queue, speed, error, and — once finished and slskd runs on this computer — the local path"
+        }
+      ]
+    },
     "sidebarItems": [
       {
         "id": "slskd-browse",
@@ -31,7 +71,7 @@
     "contextMenuItems": [
       {
         "id": "slskd-search",
-        "label": "Search on Soulseek",
+        "label": "Search on Soulseek…",
         "targets": ["track", "album", "artist"]
       }
     ],

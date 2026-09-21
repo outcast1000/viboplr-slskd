@@ -1,4 +1,4 @@
-# Soulseek for Viboplr
+# viboplr-slskd
 
 Search and download from the [Soulseek](https://www.slsknet.org/) network inside
 Viboplr.
@@ -8,27 +8,45 @@ plugins only get HTTP. So this plugin drives **[slskd](https://slskd.com/)**, a
 free, open-source headless Soulseek daemon that you run yourself. You never need
 to open slskd's own web interface.
 
-## What you need
+## Setup
 
 1. **slskd**, running somewhere you can reach. Download it from
-   [slskd.com](https://slskd.com/) (a ~56 MB zip, ~128 MB installed) or run the
+   [slskd.com](https://slskd.com/) (a ~56 MB zip, ~130 MB installed) or run the
    Docker image.
 2. A **Soulseek account**, signed in inside slskd.
 3. slskd's **API key** — in slskd under Settings → Options → Web.
 
 Then open **Soulseek** in the Viboplr sidebar and paste the address
-(e.g. `http://localhost:5030`) and the API key.
+(e.g. `http://localhost:5030`) and the API key. The view tells you which of four
+things is wrong until it isn't: not set up, slskd not reachable, key rejected, or
+slskd not signed in to Soulseek — each with the fix.
 
-## What it does
+## Features
 
-- Search the Soulseek network, with results ranked by quality first and then by
-  who can actually send them fastest.
-- Browse results as individual **Files** or as whole **Folders** — Soulseek users
-  mostly share complete albums.
-- Queue downloads and watch their progress, including your position in the other
-  user's upload queue.
-- Play finished downloads, or import them into a library collection with tags and
-  cover art written by Viboplr's own downloader.
+- **Search** the Soulseek network. Results are ranked by quality first (lossless,
+  then high bitrate, then unknown, then lower), then by who can actually send
+  them soonest (free upload slot, short queue, fast upload). An optional
+  preferred-format list ("flac, mp3") goes on top.
+- **Files or Folders.** Soulseek users mostly share complete albums, so every
+  search also shows folders; one click queues the whole album.
+- **Right-click → Search on Soulseek…** on any track, album or artist in
+  Viboplr, and Cmd+K offers Soulseek as a source for whatever you typed.
+- **Downloads tab** with progress, your position in the other user's queue, and
+  per-row actions that show only what applies: Cancel while it runs, Retry /
+  Another source on a failure, Play / Add to library once it's done, Remove for
+  anything finished. Finished rows are ordinary tracks — right-click menu,
+  drag-to-queue, Download… all work.
+- **Play** a finished download straight from slskd's folder.
+- **Into your library, two ways.** If slskd's downloads folder is inside one of
+  your collections, finished files are picked up automatically (the plugin
+  rescans that collection as they land). Otherwise **Add to library…** copies one
+  or several finished files into a collection through Viboplr's own download
+  modal, with tags and cover art written. Settings → Soulseek → Library says
+  which case you're in.
+- **Real metadata.** Embedded tags are read from finished files and win, field by
+  field, over the filename guess.
+- **AI assistants** can drive it through Viboplr's assistant API: `status`,
+  `search`, `download`, `list_downloads`.
 
 ## Where slskd runs matters
 
@@ -37,12 +55,27 @@ happens *after* a download finishes.
 
 | slskd location | Finished downloads |
 |---|---|
-| **Same computer as Viboplr** | Playable immediately; **Add to library** imports them into a collection |
+| **Same computer as Viboplr** | Playable immediately; **Add to library…** copies them into a collection, or they arrive on their own if the downloads folder is inside one |
 | **Docker / NAS / another machine** | Land in slskd's downloads folder. Add that folder (or its mount) as a music source in Collections |
 
 The plugin guesses from the address you enter and you can override it with
-**"slskd runs on this computer"** in Settings → Soulseek. If a play or import
-fails because the file isn't reachable, it corrects itself and tells you.
+**"slskd runs on this computer"** in Settings → Soulseek.
+
+## Assistant tools
+
+On hosts with the assistant surface (Viboplr 1.0.60+), an AI assistant using
+Viboplr's control API or MCP server gets four tools:
+
+| Tool | What it does |
+|---|---|
+| `status` | Connection state, Soulseek username, slskd version, whether slskd shares anything, where downloads land and whether they reach the library automatically |
+| `search` | A real network search (5–30 s, one at a time). Ranked candidates with an `id`, quality, size, duration and availability |
+| `download` | Queue results by `id` — a real transfer the daemon performs, so only what the user asked for. Every file of one folder = the whole album |
+| `list_downloads` | Every transfer with phase, progress, queue position, speed, error, and the local path once finished |
+
+`search` runs its own search and never touches what you have open in the
+sidebar; `download` goes through the same code as a clicked download, so an
+assistant-queued file is tracked, located and imported identically.
 
 ## What it deliberately doesn't do
 
@@ -50,7 +83,9 @@ fails because the file isn't reachable, it corrects itself and tells you.
   sit in a stranger's queue for a long time. It's "download, then play."
 - **Automatically find tracks on Soulseek in the background.** Soulseek waits are
   unbounded, so the plugin never inserts itself into Viboplr's automatic playback
-  or download fallback chains. You always start a search yourself.
+  or download fallback chains. You always start a search yourself (or an
+  assistant does, deliberately).
+- **Delete files.** Remove drops a row from slskd's list; the file stays on disk.
 - **Manage your shares.** Do that in slskd.
 
 ## Sharing
@@ -65,7 +100,28 @@ Your slskd address and API key are stored in Viboplr's plugin storage, which is 
 plain SQLite table — the same way every other plugin stores its credentials. It is
 not encrypted.
 
-## Development
+## Requirements
+
+- Viboplr **1.0.34** or newer (1.0.60+ for the assistant tools, 1.0.65+ for the
+  Cmd+K handover; both degrade silently on older hosts).
+- slskd **0.22** or newer. Verified against 0.26.0.
+
+## How it works
+
+Everything goes over slskd's REST API with the `X-API-Key` header. A search is
+`POST /api/v0/searches` then polling `GET /searches/{id}?includeResponses=true`
+until slskd reports it complete; a download is
+`POST /api/v0/transfers/downloads/batches` with a plugin-chosen `destination`
+subfolder, so the finished file can be found again through the Files API (slskd's
+transfer records carry only the *remote* filename). Progress is polled — slskd has
+no live feed for transfers.
+
+Four traps every reader of that API hits, all handled here: flag enums arrive as
+comma-joined strings (`"Completed, Succeeded"`), `length` is seconds in search
+results and bytes in the Files API, the recursive Files listing is flat, and
+`fullName` is relative to the downloads root.
+
+## Develop
 
 ```bash
 node --check index.js   # syntax
@@ -76,4 +132,11 @@ scripts/package.sh      # build slskd.zip + update.json
 The plugin is just `manifest.json` + `index.js`. Tests run the real `index.js`
 through a sandbox harness that shadows every global the Viboplr host does *not*
 provide (`fetch`, `Map`, `Set`, `btoa`, `WebSocket`, …), so anything that would
-work in Node but break in the app fails loudly in CI.
+work in Node but break in the app fails loudly in CI. `test/transfers.test.js`
+also activates the plugin against a fake host and checks that every surface the
+manifest declares is registered and that Add to library opens the host modal
+with the payload the host expects.
+
+## Release
+
+See [RELEASING.md](RELEASING.md).

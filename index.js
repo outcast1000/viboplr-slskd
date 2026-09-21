@@ -6,8 +6,14 @@
 // Design notes:
 //  - THE PLUGIN OWNS THE TRANSFER LIFECYCLE. A Soulseek transfer can sit in a
 //    stranger's upload queue for hours; every host resolver path is bounded at
-//    60s. So we enqueue in slskd and render our own progress, and only touch
-//    api.downloads.enqueue AFTER a file is complete (then it's an instant copy).
+//    60s. So we enqueue in slskd and render our own progress. A finished file
+//    reaches the library two ways, both of which the qBittorrent plugin uses:
+//    automatically, by rescanning the collection slskd's downloads folder sits
+//    in (api.collections.resync); or on demand, through the host's own download
+//    modal (api.ui.requestAction("download-tracks") → our onResolveByUri answers
+//    a file:// URL, which is an instant local copy well inside any budget).
+//    There is no api.downloads.enqueue any more — the host removed its
+//    background queue — so nothing here relies on it.
 //  - DEPENDENCY NOTIFICATION IS OURS. The host's binaryDependencies mechanism
 //    only resolves names in its own Rust REGISTRY (ffmpeg/yt-dlp); a name outside
 //    it is silently dropped. slskd also isn't a host-exec'd binary. So we run our
@@ -22,11 +28,26 @@
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
+var PLUGIN_ID = "slskd";
 var VIEW_ID = "slskd-browse";
 var SETTINGS_VIEW_ID = "slskd-settings";
 var PROVIDER_ID = "slskd-import";
+// The host keys download providers as "pluginId:providerId" — what
+// requestAction("download-tracks") must be handed (cf. "ytdlp:ytdlp-download").
+var PROVIDER_KEY = PLUGIN_ID + ":" + PROVIDER_ID;
+var PROVIDER_NAME = "Soulseek";
 var SCHEME = "slsk";
 var DEST_ROOT = "viboplr";
+// Separator inside the "user<sep>filename" keys that identify a transfer
+// (tracked records, row ids, slsk:// refs). NUL can appear in neither a Soulseek
+// username nor a path, so the split is unambiguous; written as an escape so the
+// source stays a text file.
+var KEY_SEP = "\u0000";
+// Reserved host action: Cmd+K hands its typed query to a plugin view through
+// this (HOST_SEARCH_ACTION in the host). A tabbed view has to handle it — the
+// host's own seeding only finds a top-level search-input, and ours lives inside
+// the Search tab.
+var HOST_SEARCH_ACTION = "host:search";
 
 var AUDIO_EXTS = [
   "mp3", "flac", "m4a", "aac", "ogg", "oga", "opus", "wav", "aiff", "aif",
@@ -73,8 +94,19 @@ var search = { query: "", id: null, running: false, responseCount: 0, fileCount:
 var searchGen = 0;
 
 var transfers = [];       // raw slskd transfer records (downloads)
-var tracked = {};         // transferId -> { destination, resolvedPath, meta }
-var viewOpen = false;
+var tracked = {};         // "user filename" -> { destination, b64, resolvedPath, meta, size, length }
+var localCollections = []; // host's local collections, for "did this land in the library?"
+var knownDone = {};       // transfer keys already seen finished (completion detection)
+var completionsSeeded = false;
+var tagsPending = {};     // resolvedPath -> in-flight readAudioTags promise
+
+// slskd runs ONE search at a time (POST /searches answers 429 while another is
+// in flight), so every search — the view's, a context-menu one, an assistant
+// tool's — goes through this chain.
+var searchChain = Promise.resolve();
+// The last ranked list the assistant `search` tool produced, keyed by candidate
+// id, so `download` can be handed ids instead of (user, filename, size) triples.
+var toolResults = {};
 
 var readinessTimer = null;
 var transferTimer = null;
@@ -224,7 +256,7 @@ function rankResults(responses, prefs) {
       if (AUDIO_EXTS.indexOf(ext) < 0) continue;
       if (known != null && file.length != null && Math.abs(file.length - known) > 5) continue;
 
-      var key = (resp.username || "") + " " + file.filename;
+      var key = (resp.username || "") + KEY_SEP + file.filename;
       if (seen[key]) continue;
       seen[key] = 1;
 
@@ -269,7 +301,7 @@ function groupByFolder(candidates) {
   for (var i = 0; i < list.length; i++) {
     var c = list[i];
     var folder = dirnameRemote(c.filename);
-    var key = c.username + " " + folder;
+    var key = c.username + KEY_SEP + folder;
     if (!map[key]) {
       map[key] = {
         key: key,
@@ -455,6 +487,164 @@ function fileUrlForDownload(absPath) {
   return absPath ? "file://" + String(absPath).replace(/%/g, "%25") : null;
 }
 
+function isWindowsPath(p) {
+  var s = String(p == null ? "" : p);
+  return /^[A-Za-z]:/.test(s) || s.indexOf("\\") >= 0;
+}
+
+// The collection whose root contains `filePath` — longest root wins, so a
+// nested collection beats its parent. Case-insensitive on Windows only. Same
+// contract as the qBittorrent plugin's helper of the same name, so the two
+// plugins agree about "is this file in the library".
+function collectionForPath(filePath, collections) {
+  var path = String(filePath || "").replace(/\\/g, "/");
+  if (!path) return null;
+  var best = null;
+  var bestLen = -1;
+  var list = collections || [];
+  for (var i = 0; i < list.length; i++) {
+    var c = list[i];
+    var root = String((c && c.path) || "").replace(/\\/g, "/").replace(/\/+$/, "");
+    if (!root) continue;
+    var win = isWindowsPath(root);
+    var subject = win ? path.toLowerCase() : path;
+    var needle = win ? root.toLowerCase() : root;
+    if (subject.indexOf(needle) !== 0) continue;
+    var nextChar = subject.charAt(needle.length);
+    if (nextChar !== "" && nextChar !== "/") continue;
+    if (needle.length > bestLen) { best = c; bestLen = needle.length; }
+  }
+  return best;
+}
+
+// Embedded tags win field by field; the filename parse fills the gaps. Per
+// field, not all-or-nothing: a file tagged with an artist but no track number
+// should still take its number off the "03 - " in front. `tags` is one entry of
+// api.system.readAudioTags' answer (or null for an unreadable file).
+function mergeMeta(parsed, tags) {
+  var p = parsed || {};
+  var t = tags || {};
+  var pick = function (a, b) {
+    if (a != null && String(a).trim() !== "") return typeof a === "string" ? a.trim() : a;
+    return b != null && b !== "" ? b : null;
+  };
+  return {
+    title: pick(t.title, p.title),
+    artist: pick(t.artist, p.artist),
+    album: pick(t.album, p.album),
+    albumArtist: pick(t.album_artist, null),
+    trackNumber: pick(t.track_number, p.trackNumber),
+    year: pick(t.year, null),
+    genre: pick(t.genre, null),
+    durationSecs: pick(t.duration_secs, p.durationSecs)
+  };
+}
+
+// Result ids the assistant passes back to `download`. Deterministic from the
+// (user, filename) pair — a fresh search for the same query yields the same id
+// for the same file — and route-safe (no spaces, backslashes or slashes).
+function candidateId(c) {
+  return "c" + hashString((c && c.username) + "\u0000" + (c && c.filename));
+}
+
+function hashString(s) {
+  var h = 5381;
+  var str = String(s == null ? "" : s);
+  for (var i = 0; i < str.length; i++) {
+    h = ((h << 5) + h + str.charCodeAt(i)) | 0;
+  }
+  return (h >>> 0).toString(36);
+}
+
+// 0..1, or null when slskd hasn't reported a size.
+function transferProgress(t) {
+  if (!t || !t.size) return null;
+  var v = (t.bytesTransferred || 0) / t.size;
+  return v < 0 ? 0 : (v > 1 ? 1 : v);
+}
+
+function formatSpeed(bytesPerSec) {
+  if (!bytesPerSec) return "";
+  return formatBytes(bytesPerSec) + "/s";
+}
+
+// One line under a transfer's name, phase first. Reads the same way down the
+// column so a glance at the Downloads tab tells the story without opening
+// anything — the qBittorrent plugin's torrent rows set the pattern.
+function transferSubtitle(t, rec, currentTier) {
+  var phase = transferPhase(t && t.state);
+  var bits = [];
+  var user = (t && t.username) || "?";
+  if (phase === "downloading" || phase === "starting") {
+    var pct = transferProgress(t);
+    bits.push(pct == null ? "Downloading" : "Downloading " + Math.round(pct * 100) + "%");
+    bits.push(formatBytes(t.bytesTransferred) + " of " + formatBytes(t.size));
+    if (t.averageSpeed) bits.push("↓ " + formatSpeed(t.averageSpeed));
+    bits.push("from " + user);
+  } else if (phase === "queued" || phase === "requested") {
+    bits.push(t.placeInQueue != null
+      ? "Waiting in " + user + "'s queue · position " + t.placeInQueue
+      : "Queued with " + user);
+    bits.push(formatBytes(t.size));
+  } else if (phase === "succeeded") {
+    bits.push("Finished");
+    bits.push(formatBytes(t.size));
+    bits.push("from " + user);
+    if (currentTier === "local" && !(rec && rec.resolvedPath)) bits.push("locating file…");
+  } else if (phase === "failed") {
+    bits.push("Failed" + (t.exception ? " — " + t.exception : ""));
+    if (t.attempts) bits.push("attempt " + t.attempts);
+    bits.push("from " + user);
+  } else if (phase === "cancelled") {
+    bits.push("Cancelled");
+    bits.push("from " + user);
+  } else {
+    bits.push("Pending");
+    bits.push("from " + user);
+  }
+  return bits.filter(Boolean).join("  ·  ");
+}
+
+// Which of the list's declared actions a transfer row shows. Only what would
+// do something to THIS transfer: Play / Add to library need a finished, located
+// file; Retry / Another source need a failure; Remove is for anything at rest.
+function transferRowActions(t, rec, currentTier) {
+  var phase = transferPhase(t && t.state);
+  var ids = [];
+  if (phase === "succeeded") {
+    if (currentTier === "local" && rec && rec.resolvedPath) {
+      ids.push("play-transfer");
+      ids.push("import-transfer");
+    }
+    ids.push("remove-transfer");
+  } else if (phase === "failed") {
+    ids.push("retry-transfer");
+    ids.push("another-source");
+    ids.push("remove-transfer");
+  } else if (phase === "cancelled") {
+    ids.push("retry-transfer");
+    ids.push("remove-transfer");
+  } else {
+    ids.push("cancel-transfer");
+  }
+  return ids;
+}
+
+// Row ids out of a list action payload: a hover button sends `itemId`, the
+// selection toolbar sends `selectedIds`, a plain button sends `data.ref`.
+function rowIds(data) {
+  var out = [];
+  var ids = data && data.selectedIds;
+  if (ids && ids.length) {
+    for (var i = 0; i < ids.length; i++) {
+      if (ids[i] != null && ids[i] !== "") out.push(String(ids[i]));
+    }
+  }
+  if (!out.length && data && data.itemId != null && data.itemId !== "") out.push(String(data.itemId));
+  if (!out.length && data && data.ref != null && data.ref !== "") out.push(String(data.ref));
+  return out;
+}
+
 function transferPhase(stateString) {
   var s = stateString || "";
   if (hasFlag(s, "Succeeded")) return "succeeded";
@@ -614,6 +804,31 @@ async function loadDownloadsDir() {
   }
 }
 
+// The host's local collections — what decides whether a finished file is
+// already "in the library" (→ rescan) or needs the download modal to copy it
+// into one. Feature-detected: older hosts have no api.collections.
+async function loadCollections() {
+  if (!api || !api.collections || typeof api.collections.getLocalCollections !== "function") {
+    localCollections = [];
+    return;
+  }
+  try {
+    var list = await api.collections.getLocalCollections();
+    localCollections = Array.isArray(list) ? list : [];
+  } catch (e) {
+    console.error("slskd: couldn't list local collections:", e);
+    localCollections = [];
+  }
+}
+
+// The collection slskd's downloads folder lives in, if any. When there is one,
+// every finished download is already inside the library's roots and a rescan
+// is all it takes; when there isn't, the user is told how to make it so.
+function downloadsCollection() {
+  if (tier !== "local" || !downloadsDir) return null;
+  return collectionForPath(downloadsDir, localCollections);
+}
+
 // ---------------------------------------------------------------------------
 // Readiness
 // ---------------------------------------------------------------------------
@@ -655,6 +870,7 @@ async function refreshReadiness() {
   if (!next.notify && next.changed) notifiedState = null;
 
   if (next.state === "ready" && !downloadsDir) await loadDownloadsDir();
+  if (next.state === "ready") await loadCollections();
 
   // Sharing drives queue priority. A leeching setup produces slow downloads that
   // read as "this plugin is broken", so say it once, informationally.
@@ -675,66 +891,104 @@ function sleep(ms) {
   return new Promise(function (resolve) { setTimeout(resolve, ms); });
 }
 
-async function runSearch(query) {
-  if (!query || readiness.state !== "ready") return;
-  var gen = ++searchGen;
-  search = { query: query, id: null, running: true, responseCount: 0, fileCount: 0, results: [], folders: [], error: null };
-  render();
+// One Soulseek search, start to ranked list. Throws with a user-readable
+// message on failure; resolves `null` when `isStale()` says nobody wants the
+// answer any more. `onProgress(responseCount, fileCount)` fires on every poll —
+// counts stream live (SearchService.cs:296-300) while response BODIES land only
+// at completion (:311, :361), so a caller can show a real counter meanwhile.
+//
+// Serialized through `searchChain`: slskd holds a one-slot semaphore on
+// POST /searches and answers 429 to a second caller, so two searches (the view
+// and an assistant tool, say) must queue rather than collide.
+function performSearch(query, prefs, onProgress, isStale) {
+  var run = function () { return performSearchNow(query, prefs, onProgress, isStale); };
+  var next = searchChain.then(run, run);
+  searchChain = next.catch(function () { /* keep the chain alive for the next caller */ });
+  return next;
+}
+
+async function performSearchNow(query, prefs, onProgress, isStale) {
+  var stale = isStale || function () { return false; };
+  if (stale()) return null;
 
   var res;
   try {
     res = await slskd("POST", "/api/v0/searches", { searchText: query });
   } catch (e) {
-    search.running = false;
-    search.error = "Couldn't reach slskd: " + ((e && e.message) || e);
-    render();
-    return;
+    throw new Error("Couldn't reach slskd: " + ((e && e.message) || e));
   }
   if (res.status < 200 || res.status >= 300 || !res.json || !res.json.id) {
-    search.running = false;
-    search.error = errorText(res, "slskd rejected the search (HTTP " + res.status + ").");
     resyncIfConnectionLost(res);
-    render();
-    return;
+    throw new Error(errorText(res, "slskd rejected the search (HTTP " + res.status + ")."));
   }
-  search.id = res.json.id;
+  var id = res.json.id;
 
   var waited = 0;
+  var last = null;
   while (waited < SEARCH_CAP_MS) {
     await sleep(SEARCH_POLL_MS);
-    if (gen !== searchGen) return;
+    if (stale()) return null;
     waited += SEARCH_POLL_MS;
 
     var poll;
     try {
-      poll = await slskd("GET", "/api/v0/searches/" + encodeURIComponent(search.id) + "?includeResponses=true");
+      poll = await slskd("GET", "/api/v0/searches/" + encodeURIComponent(id) + "?includeResponses=true");
     } catch (e) {
       continue;
     }
-    if (gen !== searchGen) return;
+    if (stale()) return null;
     if (!poll.json) continue;
+    last = poll.json;
 
-    // Counts stream live (SearchService.cs:296-300); response BODIES only land at
-    // completion (:311, :361). So show a live counter, then render the list once.
-    search.responseCount = poll.json.responseCount || 0;
-    search.fileCount = poll.json.fileCount || 0;
+    if (onProgress) onProgress(last.responseCount || 0, last.fileCount || 0);
 
-    var done = hasFlag(poll.json.state, "Completed");
-    if (done) {
-      var ranked = rankResults(poll.json.responses || [], {
-        preferredFormats: parsePreferredFormats(settings.preferredFormats)
-      });
-      search.results = ranked;
-      search.folders = groupByFolder(ranked);
-      search.running = false;
-      render();
-      return;
+    if (hasFlag(last.state, "Completed")) {
+      return rankResults(last.responses || [], prefs || {});
     }
-    render();
   }
 
+  // Past the cap: whatever slskd holds now is the answer. Stop the search so
+  // its slot frees up for the next one, but don't wait on that.
+  slskd("PUT", "/api/v0/searches/" + encodeURIComponent(id))
+    .catch(function (e) { console.error("slskd: couldn't stop a timed-out search:", e); });
+  if (last && last.responses && last.responses.length) return rankResults(last.responses, prefs || {});
+  throw new Error("Search timed out after " + Math.round(SEARCH_CAP_MS / 1000) + " seconds.");
+}
+
+function viewPrefs(extra) {
+  var prefs = { preferredFormats: parsePreferredFormats(settings.preferredFormats) };
+  if (extra && extra.knownDurationSecs != null) prefs.knownDurationSecs = extra.knownDurationSecs;
+  return prefs;
+}
+
+// The sidebar's search: owns `search` (the view state) and re-renders as counts
+// arrive. A newer search supersedes an older one through `searchGen`.
+async function runSearch(query, extra) {
+  if (!query || readiness.state !== "ready") return;
+  var gen = ++searchGen;
+  search = { query: query, id: null, running: true, responseCount: 0, fileCount: 0, results: [], folders: [], error: null };
+  activeTab = "search";
+  render();
+
+  var ranked;
+  try {
+    ranked = await performSearch(query, viewPrefs(extra), function (responses, files) {
+      if (gen !== searchGen) return;
+      search.responseCount = responses;
+      search.fileCount = files;
+      render();
+    }, function () { return gen !== searchGen; });
+  } catch (e) {
+    if (gen !== searchGen) return;
+    search.running = false;
+    search.error = (e && e.message) || String(e);
+    render();
+    return;
+  }
+  if (gen !== searchGen || ranked === null) return;
+  search.results = ranked;
+  search.folders = groupByFolder(ranked);
   search.running = false;
-  if (!search.results.length) search.error = "Search timed out after 30 seconds.";
   render();
 }
 
@@ -747,7 +1001,11 @@ async function nextBatch(label) {
   return safeDestination(settings.batchSeq, label);
 }
 
-async function enqueueFiles(username, files, label) {
+// The one place a download is started — the view's buttons, Retry, and the
+// assistant's `download` tool all come through here, so an assistant-queued
+// file is tracked, located and imported exactly like a clicked one. Throws
+// with a readable message; the caller decides how to surface it.
+async function enqueueBatch(username, files, label) {
   var batch = await nextBatch(label);
   var payload = {
     username: username,
@@ -758,49 +1016,78 @@ async function enqueueFiles(username, files, label) {
   try {
     res = await slskd("POST", "/api/v0/transfers/downloads/batches", payload);
   } catch (e) {
-    api.ui.showNotification("Couldn't reach slskd to start the download.");
-    return false;
+    throw new Error("Couldn't reach slskd to start the download.");
   }
   if (res.status < 200 || res.status >= 300) {
-    api.ui.showNotification(errorText(res, "slskd refused the download (HTTP " + res.status + ")."));
     resyncIfConnectionLost(res);
-    return false;
+    throw new Error(errorText(res, "slskd refused the download (HTTP " + res.status + ")."));
+  }
+  // 207: some files were refused (already queued, or a bad name). Track the
+  // rest; the caller reports the failures.
+  var failures = (res.json && res.json.failures) || [];
+  var failed = {};
+  for (var f = 0; f < failures.length; f++) {
+    if (failures[f] && failures[f].filename) failed[failures[f].filename] = failures[f].message || "refused";
   }
 
+  var queued = [];
   for (var i = 0; i < files.length; i++) {
-    tracked[username + " " + files[i].filename] = {
+    if (failed[files[i].filename]) continue;
+    tracked[username + KEY_SEP + files[i].filename] = {
       destination: batch.destination,
       b64: batch.b64,
       resolvedPath: null,
-      meta: parseTrackMeta(files[i].filename)
+      meta: parseTrackMeta(files[i].filename),
+      size: files[i].size || null,
+      length: files[i].length != null ? files[i].length : null
     };
+    queued.push(files[i]);
   }
   await api.storage.set("tracked", tracked);
-  api.ui.showNotification(files.length === 1
-    ? "Queued 1 file from " + username + "."
-    : "Queued " + files.length + " files from " + username + ".");
+  schedulePoll(true);
+  return { queued: queued, failures: failures };
+}
 
+// View-side wrapper: notification, switch to the Downloads tab.
+async function enqueueFiles(username, files, label) {
+  var out;
+  try {
+    out = await enqueueBatch(username, files, label);
+  } catch (e) {
+    api.ui.showNotification((e && e.message) || "Couldn't start the download.");
+    return false;
+  }
+  var n = out.queued.length;
+  var msg = n === 0 ? "slskd refused every file" : (n === 1 ? "Queued 1 file from " + username : "Queued " + n + " files from " + username);
+  if (out.failures.length) msg += " · " + out.failures.length + " refused";
+  api.ui.showNotification(msg + ".");
   activeTab = "transfers";
   render();
-  schedulePoll(true);
-  return true;
+  return n > 0;
 }
 
 function trackKeyOf(t) {
-  return (t.username || "") + " " + (t.filename || "");
+  return (t.username || "") + KEY_SEP + (t.filename || "");
 }
 
-async function refreshTransfers() {
-  if (readiness.state !== "ready") return;
-  var res;
-  try {
-    res = await slskd("GET", "/api/v0/transfers/downloads");
-  } catch (e) {
-    return;
+function transferByKey(key) {
+  for (var i = 0; i < transfers.length; i++) {
+    if (trackKeyOf(transfers[i]) === key) return transfers[i];
   }
-  if (!res.json) return;
+  return null;
+}
 
-  // The endpoint groups by user then directory; flatten to a transfer list.
+function splitKey(key) {
+  var ref = String(key || "");
+  var sep = ref.indexOf(KEY_SEP);
+  if (sep < 0) return null;
+  return { username: ref.slice(0, sep), filename: ref.slice(sep + 1) };
+}
+
+// Transfers slskd knows about, flattened out of its user → directory grouping.
+async function fetchTransfers() {
+  var res = await slskd("GET", "/api/v0/transfers/downloads");
+  if (!res.json) return null;
   var flat = [];
   var users = Array.isArray(res.json) ? res.json : [];
   for (var u = 0; u < users.length; u++) {
@@ -813,17 +1100,128 @@ async function refreshTransfers() {
       }
     }
   }
+  return flat;
+}
+
+async function refreshTransfers() {
+  if (readiness.state !== "ready") return;
+  var flat;
+  try {
+    flat = await fetchTransfers();
+  } catch (e) {
+    return;
+  }
+  if (!flat) return;
   transfers = flat;
 
+  var justFinished = [];
   for (var k = 0; k < flat.length; k++) {
     var tr = flat[k];
     var key = trackKeyOf(tr);
     var rec = tracked[key];
-    if (rec && !rec.resolvedPath && transferPhase(tr.state) === "succeeded") {
+    var phase = transferPhase(tr.state);
+    if (phase === "succeeded" && !knownDone[key]) {
+      knownDone[key] = true;
+      if (completionsSeeded) justFinished.push(tr);
+    }
+    if (rec && !rec.resolvedPath && phase === "succeeded") {
       await resolveTransferPath(tr, rec);
     }
   }
+  // First poll of the session: everything already finished is new to US but
+  // nothing just happened. Seed silently, or a restart would notify (and
+  // rescan) once per finished file.
+  completionsSeeded = true;
+
+  await readTagsForResolved();
   render();
+  if (justFinished.length) await handleCompletions(justFinished);
+}
+
+// Embedded tags for every located file that hasn't been read yet, in ONE host
+// call: the host probes on a worker thread and a call per file is a round trip
+// per file. Feature-detected; the filename parse stands where tags can't be
+// read, and a failure is deliberately not cached as a miss (it is the host or
+// the mount, not the file).
+async function readTagsForResolved() {
+  if (!api || !api.system || typeof api.system.readAudioTags !== "function") return;
+  var wanted = [];
+  var keys = Object.keys(tracked);
+  for (var i = 0; i < keys.length; i++) {
+    var rec = tracked[keys[i]];
+    if (rec && rec.resolvedPath && !rec.tagsRead && !tagsPending[rec.resolvedPath]) wanted.push(keys[i]);
+  }
+  if (!wanted.length) return;
+  var paths = wanted.map(function (k) { return tracked[k].resolvedPath; });
+  var job = api.system.readAudioTags(paths)
+    .then(function (results) {
+      for (var j = 0; j < wanted.length; j++) {
+        var rec = tracked[wanted[j]];
+        if (!rec) continue;
+        var tags = (results && results[j]) || null;
+        rec.meta = mergeMeta(rec.meta, tags);
+        rec.tagsRead = true;
+      }
+      return api.storage.set("tracked", tracked);
+    })
+    .catch(function (e) {
+      console.error("slskd: could not read tags for finished files:", e);
+    })
+    .then(function () {
+      for (var m = 0; m < paths.length; m++) delete tagsPending[paths[m]];
+    });
+  for (var p = 0; p < paths.length; p++) tagsPending[paths[p]] = job;
+  await job;
+}
+
+// Announce what just finished and, when it landed inside a collection, rescan
+// that collection so the files reach the library without a click. Deduped by
+// collection: an album finishing is a dozen files and must not queue a dozen
+// scans of the same folder.
+async function handleCompletions(finished) {
+  var names = [];
+  var byCollection = {};
+  for (var i = 0; i < finished.length; i++) {
+    var rec = tracked[trackKeyOf(finished[i])];
+    var meta = (rec && rec.meta) || parseTrackMeta(finished[i].filename);
+    names.push(meta.title || basenameRemote(finished[i].filename));
+    if (rec && rec.resolvedPath && tier === "local") {
+      var c = collectionForPath(rec.resolvedPath, localCollections);
+      if (c) byCollection[c.id] = c;
+    }
+  }
+  api.ui.showNotification(finished.length === 1
+    ? "Finished downloading: " + names[0]
+    : "Finished downloading " + finished.length + " files (" + names[0] + ", …)");
+
+  if (!api.collections || typeof api.collections.resync !== "function") return;
+  var ids = Object.keys(byCollection);
+  for (var k = 0; k < ids.length; k++) {
+    try {
+      await api.collections.resync(Number(ids[k]));
+      api.ui.showNotification("Scanning “" + byCollection[ids[k]].name + "” for the new files");
+    } catch (e) {
+      console.error("slskd: could not rescan collection " + ids[k] + ":", e);
+    }
+  }
+}
+
+// DELETE cancels a live transfer; `remove=true` also drops the record so the
+// row disappears from slskd's list (and ours on the next poll). A 404 means it
+// is already gone, which is the outcome we wanted.
+async function cancelTransfer(t, remove) {
+  if (!t || t.id == null) return;
+  var path = "/api/v0/transfers/downloads/" + encodeURIComponent(t.username || "") + "/" + encodeURIComponent(t.id) + (remove ? "?remove=true" : "");
+  var res = await slskd("DELETE", path);
+  var ok = (res.status >= 200 && res.status < 300) || res.status === 404;
+  if (!ok) {
+    throw new Error(errorText(res, "slskd couldn't " + (remove ? "remove" : "cancel") + " that download (HTTP " + res.status + ")."));
+  }
+  if (remove) {
+    var key = trackKeyOf(t);
+    delete knownDone[key];
+    transfers = transfers.filter(function (x) { return trackKeyOf(x) !== key; });
+  }
 }
 
 async function listDestination(rec) {
@@ -833,7 +1231,9 @@ async function listDestination(rec) {
     try {
       var res = await slskd("GET", "/api/v0/files/downloads/directories/" + rec.b64 + "?recursive=true");
       if (res.status >= 200 && res.status < 300 && res.json) return flattenListing(res.json);
-    } catch (e) { /* fall through to the root listing */ }
+    } catch (e) {
+      console.error("slskd: targeted listing failed, falling back to the root listing:", e);
+    }
   }
   try {
     var root = await slskd("GET", "/api/v0/files/downloads/directories?recursive=true");
@@ -844,7 +1244,9 @@ async function listDestination(rec) {
         return String(f.fullName || "").replace(/\\/g, "/").indexOf(prefix) === 0;
       });
     }
-  } catch (e) { /* nothing else to try */ }
+  } catch (e) {
+    console.error("slskd: couldn't list the downloads folder:", e);
+  }
   return [];
 }
 
@@ -916,7 +1318,7 @@ function connectionSection() {
       { type: "settings-row", label: "slskd address", description: "e.g. http://localhost:5030",
         control: { type: "text-input", placeholder: "http://localhost:5030", action: "set-url", value: settings.url } },
       { type: "settings-row", label: "API key", description: "slskd → Settings → Options → Web",
-        control: { type: "text-input", placeholder: "API key", action: "set-key", value: settings.apiKey } },
+        control: { type: "text-input", placeholder: "API key", action: "set-key", password: true, value: settings.apiKey } },
       { type: "settings-row", label: "Allow self-signed certificate", description: "Needed if slskd serves HTTPS with its default certificate",
         control: { type: "toggle", label: "", action: "set-insecure", checked: !!settings.insecure } },
       { type: "toolbar", buttons: [{ label: "Test connection", action: "test-connection", variant: "accent" }],
@@ -939,16 +1341,46 @@ function statusLine() {
 }
 
 function resultRows() {
-  return search.results.map(function (c, i) {
+  return search.results.map(function (c) {
+    var meta = parseTrackMeta(c.filename);
     return {
-      id: "f:" + c.username + " " + c.filename,
+      id: "f:" + c.username + KEY_SEP + c.filename,
       title: basenameRemote(c.filename),
       subtitle: c.username + " · " + qualityLabel(c) + " · " + formatBytes(c.size) + " · " + availabilityLabel(c),
       album: basenameRemote(dirnameRemote(c.filename)),
       duration: formatDurationSecs(c.length),
+      durationSecs: c.length != null ? c.length : null,
       action: "download-file",
-      artistName: parseTrackMeta(c.filename).artist,
-      albumTitle: parseTrackMeta(c.filename).album
+      artistName: meta.artist,
+      albumTitle: meta.album,
+      kind: "audio"
+    };
+  });
+}
+
+// The Downloads tab as a track-row-list: finished, located files carry a
+// `path`, so the host's universal track menu, drag-to-queue and "Download…"
+// (→ our onResolveByUri) all work on them with no code here.
+function transferRows() {
+  return transfers.map(function (t) {
+    var key = trackKeyOf(t);
+    var rec = tracked[key];
+    var meta = (rec && rec.meta) || parseTrackMeta(t.filename);
+    var playable = tier === "local" && rec && rec.resolvedPath && transferPhase(t.state) === "succeeded";
+    var duration = meta.durationSecs != null ? meta.durationSecs : (rec && rec.length != null ? rec.length : null);
+    return {
+      id: key,
+      title: meta.title || basenameRemote(t.filename),
+      subtitle: transferSubtitle(t, rec, tier),
+      album: meta.album || basenameRemote(dirnameRemote(t.filename)) || undefined,
+      duration: duration != null ? formatDurationSecs(duration) : undefined,
+      durationSecs: duration,
+      artistName: meta.artist || null,
+      albumTitle: meta.album || null,
+      path: playable ? SCHEME + "://" + key : null,
+      kind: "audio",
+      actions: transferRowActions(t, rec, tier),
+      action: playable ? "play-transfer" : undefined
     };
   });
 }
@@ -1022,49 +1454,44 @@ function transfersTab() {
   }
 
   if (tier === "remote") {
-    children.push({ type: "text", content: "slskd is running on another machine, so finished files can't be played or imported from here. Add slskd's downloads folder (or its mount) as a music source in Collections.", className: "plugin-muted" });
+    children.push({ type: "text", content: "slskd is running on another machine, so finished files can't be played or added to the library from here. Add slskd's downloads folder (or its mount) as a music source in Collections.", className: "plugin-muted" });
+  } else {
+    var col = downloadsCollection();
+    children.push({ type: "text", className: "plugin-muted", content: col
+      ? "Finished downloads land in “" + col.name + "” and are added to your library automatically."
+      : "Finished downloads play from here. Add to library copies one into a collection; or add slskd's downloads folder as a collection and they will be picked up automatically." });
   }
 
-  for (var i = 0; i < transfers.length; i++) {
-    var t = transfers[i];
-    var phase = transferPhase(t.state);
-    var rec = tracked[trackKeyOf(t)];
-    var name = basenameRemote(t.filename);
-    var kids = [];
-
-    kids.push({ type: "text", content: name });
-
-    if (phase === "downloading" || phase === "starting") {
-      kids.push({ type: "progress-bar", value: t.bytesTransferred || 0, max: t.size || 1,
-        label: formatBytes(t.bytesTransferred) + " of " + formatBytes(t.size) + " from " + t.username });
-    } else if (phase === "queued" || phase === "requested") {
-      kids.push({ type: "text", content: t.placeInQueue != null
-        ? "Waiting in " + t.username + "'s queue — position " + t.placeInQueue
-        : "Queued with " + t.username, className: "plugin-muted" });
-    } else if (phase === "succeeded") {
-      var sub = "Finished · " + formatBytes(t.size);
-      if (tier === "local" && rec && rec.resolvedPath) {
-        kids.push({ type: "text", content: sub, className: "plugin-muted" });
-        kids.push({ type: "toolbar", buttons: [
-          { label: "Play", action: "play-transfer", variant: "accent", data: { ref: trackKeyOf(t) } },
-          { label: "Add to library", action: "import-transfer", variant: "secondary", data: { ref: trackKeyOf(t) } }
-        ] });
-      } else {
-        kids.push({ type: "text", content: sub + (tier === "local" ? " · locating file…" : ""), className: "plugin-muted" });
-      }
-    } else if (phase === "failed") {
-      kids.push({ type: "text", content: "Failed" + (t.exception ? " — " + t.exception : "") +
-        (t.attempts ? " (attempt " + t.attempts + ")" : ""), className: "plugin-error" });
-      kids.push({ type: "toolbar", buttons: [
-        { label: "Retry", action: "retry-transfer", variant: "secondary", data: { ref: trackKeyOf(t) } },
-        { label: "Try another source", action: "another-source", variant: "secondary", data: { ref: trackKeyOf(t) } }
-      ] });
-    } else if (phase === "cancelled") {
-      kids.push({ type: "text", content: "Cancelled", className: "plugin-muted" });
-    }
-
-    children.push({ type: "section", title: "", children: kids });
+  // Live rows keep showing a percentage in the subtitle; a progress bar per row
+  // isn't a thing the list can draw, and the phase text reads the same way down
+  // the column.
+  var active = transfers.filter(function (t) {
+    var p = transferPhase(t.state);
+    return p === "downloading" || p === "starting";
+  });
+  if (active.length) {
+    var done = 0, total = 0;
+    for (var i = 0; i < active.length; i++) { done += active[i].bytesTransferred || 0; total += active[i].size || 0; }
+    children.push({ type: "progress-bar", value: done, max: total || 1,
+      label: active.length + (active.length === 1 ? " download" : " downloads") + " in progress · " + formatBytes(done) + " of " + formatBytes(total) });
   }
+
+  children.push({
+    type: "track-row-list",
+    items: transferRows(),
+    selectable: true,
+    showHeader: true,
+    // Which of these a row shows is transferRowActions' call — only what would
+    // do something to THAT transfer.
+    actions: [
+      { id: "play-transfer", label: "Play", icon: "▶" },
+      { id: "import-transfer", label: "Add to library…", icon: "＋" },
+      { id: "retry-transfer", label: "Retry", icon: "↻" },
+      { id: "another-source", label: "Another source", icon: "⇄" },
+      { id: "cancel-transfer", label: "Cancel", icon: "⏹" },
+      { id: "remove-transfer", label: "Remove", icon: "🗑" }
+    ]
+  });
   return { type: "layout", direction: "vertical", children: children };
 }
 
@@ -1108,6 +1535,17 @@ function renderSettings() {
     ]
   });
 
+  if (readiness.state === "ready" && tier === "local" && downloadsDir) {
+    var col = downloadsCollection();
+    children.push({
+      type: "section",
+      title: "Library",
+      children: [{ type: "text", className: "plugin-muted", content: col
+        ? "slskd's downloads folder is inside your “" + col.name + "” collection, so finished downloads are added to the library automatically."
+        : "slskd's downloads folder isn't inside any of your collections. Add it (or a parent folder) as a music source in Collections and finished downloads will reach the library on their own; until then, use Add to library on a finished download to copy it into one." }]
+    });
+  }
+
   if (readiness.state === "ready" && readiness.shareCount === 0) {
     children.push({
       type: "section",
@@ -1127,7 +1565,7 @@ function candidateByRef(ref) {
   if (raw.indexOf("f:") === 0) raw = raw.slice(2);
   for (var i = 0; i < search.results.length; i++) {
     var c = search.results[i];
-    if (c.username + " " + c.filename === raw) return c;
+    if (c.username + KEY_SEP + c.filename === raw) return c;
   }
   return null;
 }
@@ -1141,10 +1579,73 @@ function folderByRef(ref) {
   return null;
 }
 
+// A finished, located transfer as the track the host's download modal expects
+// (same field names the yt-dlp plugin hands it). Null when the file isn't ours
+// to offer — remote tier, still transferring, or not located yet.
+function importTrackFor(key) {
+  var rec = tracked[key];
+  if (!rec || !rec.resolvedPath || tier !== "local") return null;
+  var t = transferByKey(key);
+  if (t && transferPhase(t.state) !== "succeeded") return null;
+  var meta = rec.meta || {};
+  var duration = meta.durationSecs != null ? meta.durationSecs : (rec.length != null ? rec.length : null);
+  return {
+    title: meta.title || basenameRemote(rec.resolvedPath),
+    artist_name: meta.artist || null,
+    album_title: meta.album || null,
+    uri: SCHEME + "://" + key,
+    durationSecs: duration
+  };
+}
+
+// Copy finished downloads into a collection through the host's own download
+// modal (one track → the configure step, several → the batch flow). The modal
+// picks the destination, writes tags and cover art, and handles a file that
+// already exists — none of which is worth reimplementing here.
+function openImport(keys) {
+  var tracks = [];
+  for (var i = 0; i < keys.length; i++) {
+    var tr = importTrackFor(keys[i]);
+    if (tr) tracks.push(tr);
+  }
+  if (!tracks.length) {
+    api.ui.showNotification(tier === "local"
+      ? "Nothing here has finished downloading yet."
+      : "slskd runs on another machine, so its files can't be copied from here. Add its downloads folder as a collection instead.");
+    return;
+  }
+  api.ui.requestAction("download-tracks", { providerId: PROVIDER_KEY, providerName: PROVIDER_NAME, tracks: tracks });
+}
+
+function playTransfer(key) {
+  var rec = tracked[key];
+  if (!rec || !rec.resolvedPath) return;
+  var meta = rec.meta || {};
+  var duration = meta.durationSecs != null ? meta.durationSecs : (rec.length != null ? rec.length : null);
+  api.playback.playTrack({
+    path: SCHEME + "://" + key,
+    title: meta.title || basenameRemote(rec.resolvedPath),
+    artist_name: meta.artist || null,
+    album_title: meta.album || null,
+    track_number: meta.trackNumber || null,
+    duration_secs: duration,
+    kind: "audio"
+  });
+}
+
 function registerActions() {
   api.ui.onAction("search", function (data) {
     var q = (data && data.query) || "";
     runSearch(q.trim()).catch(function (e) { console.error("slskd search failed:", e); });
+  });
+
+  // Cmd+K hands its typed query over through this reserved action. The host
+  // only auto-seeds a TOP-LEVEL search-input, and ours sits inside the Search
+  // tab, so without this the query would sit unconsumed on the Downloads tab.
+  api.ui.onAction(HOST_SEARCH_ACTION, function (data) {
+    var q = String((data && data.query) || "").trim();
+    if (!q) return;
+    runSearch(q).catch(function (e) { console.error("slskd handed-over search failed:", e); });
   });
 
   api.ui.onAction("main-tab", function (data) {
@@ -1172,59 +1673,99 @@ function registerActions() {
       .catch(function (e) { console.error("slskd folder enqueue failed:", e); });
   });
 
+  // A selection plays as ONE queue, in list order; a single row just plays.
   api.ui.onAction("play-transfer", function (data) {
-    var rec = findTrackedByRef(data && data.ref);
-    if (!rec || !rec.resolvedPath) return;
-    var meta = rec.meta || {};
-    api.playback.playTrack({
-      path: SCHEME + "://" + (data && data.ref),
-      title: meta.title || "Soulseek file",
-      artist_name: meta.artist || null,
-      album_title: meta.album || null
-    });
+    var keys = rowIds(data).filter(function (k) { return !!importTrackFor(k); });
+    if (!keys.length) return;
+    if (keys.length === 1) { playTransfer(keys[0]); return; }
+    var tracks = [];
+    for (var i = 0; i < keys.length; i++) {
+      var rec = tracked[keys[i]];
+      var meta = (rec && rec.meta) || {};
+      tracks.push({
+        path: SCHEME + "://" + keys[i],
+        title: meta.title || basenameRemote(rec.resolvedPath),
+        artist_name: meta.artist || null,
+        album_title: meta.album || null,
+        track_number: meta.trackNumber || null,
+        duration_secs: meta.durationSecs != null ? meta.durationSecs : (rec.length != null ? rec.length : null),
+        kind: "audio"
+      });
+    }
+    api.playback.playTracks(tracks, 0, { name: "Soulseek downloads", source: "playlist" });
   });
 
   api.ui.onAction("import-transfer", function (data) {
-    var ref = data && data.ref;
-    var rec = findTrackedByRef(ref);
-    if (!rec || !rec.resolvedPath) return;
-    var meta = rec.meta || {};
-    api.downloads.enqueue({
-      title: meta.title || basenameRemote(rec.resolvedPath),
-      artistName: meta.artist || undefined,
-      albumTitle: meta.album || undefined,
-      uri: SCHEME + "://" + ref,
-      provider: PROVIDER_ID
-    }).then(function () {
-      api.ui.showNotification("Importing “" + (meta.title || "file") + "” into your library.");
-    }).catch(function (e) {
-      console.error("slskd import failed:", e);
-      api.ui.showNotification("Couldn't import that file.");
-    });
+    openImport(rowIds(data));
   });
 
+  // Re-queue with the same user. slskd retries a failed transfer on its own
+  // schedule (attempts / nextAttemptAt); this is for after it has given up, or
+  // for one the user cancelled.
   api.ui.onAction("retry-transfer", function (data) {
-    var ref = String((data && data.ref) || "");
-    var sep = ref.indexOf(" ");
-    if (sep < 0) return;
-    var username = ref.slice(0, sep);
-    var filename = ref.slice(sep + 1);
-    var t = null;
-    for (var i = 0; i < transfers.length; i++) {
-      if (trackKeyOf(transfers[i]) === ref) { t = transfers[i]; break; }
-    }
-    enqueueFiles(username, [{ filename: filename, size: (t && t.size) || 0 }], basenameRemote(dirnameRemote(filename)))
-      .catch(function (e) { console.error("slskd retry failed:", e); });
+    var keys = rowIds(data);
+    var chain = Promise.resolve();
+    keys.forEach(function (key) {
+      var parts = splitKey(key);
+      if (!parts) return;
+      var t = transferByKey(key);
+      var rec = tracked[key];
+      var size = (t && t.size) || (rec && rec.size) || 0;
+      chain = chain.then(function () {
+        return enqueueFiles(parts.username, [{ filename: parts.filename, size: size }], basenameRemote(dirnameRemote(parts.filename)));
+      });
+    });
+    chain.catch(function (e) { console.error("slskd retry failed:", e); });
   });
 
+  // Search again for the same song, rejecting anything whose duration is off
+  // from the copy that failed — the same knownDurationSecs guard the context
+  // menu uses, so a mislabeled file can't be the "other source".
   api.ui.onAction("another-source", function (data) {
-    var ref = String((data && data.ref) || "");
-    var sep = ref.indexOf(" ");
-    var filename = sep >= 0 ? ref.slice(sep + 1) : ref;
-    var meta = parseTrackMeta(filename);
-    activeTab = "search";
-    runSearch([meta.artist, meta.title].filter(Boolean).join(" ") || basenameRemote(filename))
+    var key = rowIds(data)[0];
+    var parts = splitKey(key);
+    var filename = parts ? parts.filename : String(key || "");
+    var rec = tracked[key];
+    var meta = (rec && rec.meta) || parseTrackMeta(filename);
+    var known = meta.durationSecs != null ? meta.durationSecs : (rec && rec.length != null ? rec.length : null);
+    runSearch([meta.artist, meta.title].filter(Boolean).join(" ") || basenameRemote(filename),
+      known != null ? { knownDurationSecs: known } : null)
       .catch(function (e) { console.error("slskd re-search failed:", e); });
+  });
+
+  api.ui.onAction("cancel-transfer", function (data) {
+    var keys = rowIds(data);
+    var chain = Promise.resolve();
+    keys.forEach(function (key) {
+      var t = transferByKey(key);
+      if (!t) return;
+      chain = chain.then(function () { return cancelTransfer(t, false); });
+    });
+    chain
+      .then(function () { schedulePoll(true); })
+      .catch(function (e) {
+        console.error("slskd cancel failed:", e);
+        api.ui.showNotification((e && e.message) || "Couldn't cancel that download.");
+      });
+  });
+
+  // Drops the row from slskd's list. The file on disk is untouched — this is a
+  // list, not a trash can, and slskd's own remote_file_management gate exists
+  // precisely so an API caller can't delete downloads by default.
+  api.ui.onAction("remove-transfer", function (data) {
+    var keys = rowIds(data);
+    var chain = Promise.resolve();
+    keys.forEach(function (key) {
+      var t = transferByKey(key);
+      if (!t) return;
+      chain = chain.then(function () { return cancelTransfer(t, true); });
+    });
+    chain
+      .then(function () { render(); schedulePoll(true); })
+      .catch(function (e) {
+        console.error("slskd remove failed:", e);
+        api.ui.showNotification((e && e.message) || "Couldn't remove that download.");
+      });
   });
 
   api.ui.onAction("open-slskd-site", function () {
@@ -1253,8 +1794,152 @@ function registerActions() {
     var q = searchQueryForTarget(target);
     if (!q) return;
     api.ui.navigateToView(VIEW_ID);
-    activeTab = "search";
-    runSearch(q).catch(function (e) { console.error("slskd context search failed:", e); });
+    // When the host hands over the track's length, a Soulseek result more than a
+    // few seconds off it is a different recording or a mislabeled file. Absent
+    // on current hosts (the target carries ids and names only) — then no filter.
+    var known = target && target.kind === "track" && target.durationSecs != null ? target.durationSecs : null;
+    runSearch(q, known != null ? { knownDurationSecs: known } : null)
+      .catch(function (e) { console.error("slskd context search failed:", e); });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Assistant tools (api.assistant)
+// ---------------------------------------------------------------------------
+// The AI-facing surface (host control API / MCP). Same shape as the yt-dlp and
+// qBittorrent plugins: small verbs, structured JSON, ids a model can pass back.
+// `search` runs its OWN search and never touches the sidebar's state, which
+// belongs to whatever the user has open; `download` goes through the same core
+// as a clicked download, so an assistant-queued file is tracked, located and
+// imported identically. Guarded: older hosts have no api.assistant namespace.
+function toolCandidate(c) {
+  return {
+    id: candidateId(c),
+    user: c.username,
+    filename: basenameRemote(c.filename),
+    folder: basenameRemote(dirnameRemote(c.filename)),
+    format: c.extension || null,
+    bitrateKbps: c.bitRate,
+    lossless: c.qualityTier === T_LOSSLESS,
+    quality: qualityLabel(c),
+    sizeBytes: c.size,
+    durationSecs: c.length,
+    hasFreeUploadSlot: !!c.hasFreeUploadSlot,
+    queueLength: c.queueLength,
+    uploadSpeedBytesPerSec: c.uploadSpeed
+  };
+}
+
+function toolTransfer(t) {
+  var key = trackKeyOf(t);
+  var rec = tracked[key];
+  var meta = (rec && rec.meta) || parseTrackMeta(t.filename);
+  return {
+    user: t.username,
+    filename: basenameRemote(t.filename),
+    title: meta.title || null,
+    artist: meta.artist || null,
+    album: meta.album || null,
+    phase: transferPhase(t.state),
+    state: t.state,
+    progress: transferProgress(t),
+    bytesTransferred: t.bytesTransferred || 0,
+    sizeBytes: t.size || null,
+    placeInQueue: t.placeInQueue != null ? t.placeInQueue : null,
+    speedBytesPerSec: t.averageSpeed || null,
+    error: t.exception || null,
+    attempts: t.attempts || null,
+    localPath: (rec && rec.resolvedPath && tier === "local") ? rec.resolvedPath : null,
+    startedByViboplr: !!rec
+  };
+}
+
+function registerAssistantTools() {
+  if (!api.assistant || typeof api.assistant.onTool !== "function") return;
+
+  api.assistant.onTool("status", async function () {
+    var col = downloadsCollection();
+    return {
+      state: readiness.state,
+      detail: readiness.detail || null,
+      soulseekUsername: readiness.username || null,
+      slskdVersion: readiness.version || null,
+      slskdAddress: settings.url || null,
+      sharesAnything: readiness.shareCount == null ? null : readiness.shareCount > 0,
+      slskdOnThisComputer: tier === "local",
+      downloadsFolder: downloadsDir || null,
+      downloadsReachLibraryAutomatically: !!col,
+      libraryCollection: col ? col.name : null,
+      activeDownloads: transfers.filter(function (t) {
+        var p = transferPhase(t.state);
+        return p === "downloading" || p === "queued" || p === "starting" || p === "requested";
+      }).length
+    };
+  });
+
+  api.assistant.onTool("search", async function (args) {
+    var q = typeof args.query === "string" ? args.query.trim() : "";
+    if (!q) throw new Error('"query" (string) is required');
+    if (readiness.state !== "ready") throw new Error("slskd is not ready (" + readiness.state + ") — see the status tool");
+    var limit = Math.min(100, Math.max(1, parseInt(args.limit, 10) || 25));
+    var prefs = viewPrefs(args.durationSecs != null && !isNaN(Number(args.durationSecs))
+      ? { knownDurationSecs: Number(args.durationSecs) } : null);
+    var ranked = await performSearch(q, prefs, null, null);
+    if (ranked === null) ranked = [];
+    toolResults = {};
+    for (var i = 0; i < ranked.length; i++) toolResults[candidateId(ranked[i])] = ranked[i];
+    return {
+      query: q,
+      total: ranked.length,
+      note: "Ranked best-first: preferred format, then quality tier, then who can send it soonest. Pass ids to download; every file of a folder from one user = the whole album.",
+      results: ranked.slice(0, limit).map(toolCandidate)
+    };
+  });
+
+  api.assistant.onTool("download", async function (args) {
+    var ids = Array.isArray(args.ids) ? args.ids.map(String) : (typeof args.ids === "string" ? [args.ids] : []);
+    if (!ids.length) throw new Error('"ids" (array of result ids from search) is required');
+    if (readiness.state !== "ready") throw new Error("slskd is not ready (" + readiness.state + ") — see the status tool");
+    var byUser = {};
+    var unknown = [];
+    for (var i = 0; i < ids.length; i++) {
+      var c = toolResults[ids[i]];
+      if (!c) { unknown.push(ids[i]); continue; }
+      (byUser[c.username] = byUser[c.username] || []).push(c);
+    }
+    if (unknown.length && !Object.keys(byUser).length) {
+      throw new Error("Unknown result id(s): " + unknown.join(", ") + " — ids come from the most recent search call");
+    }
+    var queued = [];
+    var failures = [];
+    var users = Object.keys(byUser);
+    for (var u = 0; u < users.length; u++) {
+      var files = byUser[users[u]];
+      var label = basenameRemote(dirnameRemote(files[0].filename));
+      var out = await enqueueBatch(users[u], files, label);
+      for (var q = 0; q < out.queued.length; q++) queued.push({ user: users[u], filename: basenameRemote(out.queued[q].filename) });
+      for (var f = 0; f < out.failures.length; f++) failures.push({ user: users[u], filename: basenameRemote(out.failures[f].filename), message: out.failures[f].message || "refused" });
+    }
+    if (queued.length) {
+      api.ui.showNotification(queued.length === 1
+        ? "Queued 1 Soulseek download (" + queued[0].filename + ")"
+        : "Queued " + queued.length + " Soulseek downloads");
+      render();
+    }
+    return { queued: queued, failures: failures, unknownIds: unknown,
+      note: "Transfers wait in the other user's queue; watch list_downloads." };
+  });
+
+  api.assistant.onTool("list_downloads", async function () {
+    if (readiness.state === "ready") {
+      try {
+        var fresh = await fetchTransfers();
+        if (fresh) transfers = fresh;
+      } catch (e) {
+        console.error("slskd: list_downloads refresh failed:", e);
+      }
+    }
+    return { downloads: transfers.map(toolTransfer) };
   });
 }
 
@@ -1323,6 +2008,7 @@ async function activate(hostApi) {
   tier = detectTier(settings.url, settings.tierOverride);
 
   registerActions();
+  registerAssistantTools();
 
   // Completed Soulseek files play as ordinary local files. parseUrlScheme does a
   // raw substring(7), so the path must NOT be percent-encoded.
@@ -1331,33 +2017,38 @@ async function activate(hostApi) {
     var rec = findTrackedByRef(ref);
     if (!rec) return null;
     if (!rec.resolvedPath) {
-      for (var i = 0; i < transfers.length; i++) {
-        if (trackKeyOf(transfers[i]) === ref && transferPhase(transfers[i].state) === "succeeded") {
-          await resolveTransferPath(transfers[i], rec);
-          break;
-        }
-      }
+      var t = transferByKey(ref);
+      if (t && transferPhase(t.state) === "succeeded") await resolveTransferPath(t, rec);
     }
     return rec.resolvedPath ? fileUrlForPlayback(rec.resolvedPath) : null;
   });
 
-  // Import-only: the transfer already finished, so this resolve is an instant
-  // local copy, well inside the host's 60s resolver budget.
+  // The download modal's provider for slsk:// — "Download…" on any of our rows
+  // and the Add to library button both land here. The transfer already
+  // finished, so this resolve is an instant local copy, well inside any budget.
+  // No metadata-based resolver, deliberately: that would put an unbounded
+  // Soulseek wait into the host's automatic fallback for every unplayable track.
   api.downloads.onResolveByUri(PROVIDER_ID, async function (uri) {
     var ref = String(uri || "").replace(/^slsk:\/\//, "");
     var rec = findTrackedByRef(ref);
     if (!rec || !rec.resolvedPath) return null;
     var meta = rec.meta || {};
-    return {
+    var ext = extOf(rec.resolvedPath);
+    var out = {
       url: fileUrlForDownload(rec.resolvedPath),
-      ext: extOf(rec.resolvedPath) || "auto",
       metadata: {
         title: meta.title || null,
         artist: meta.artist || null,
         album: meta.album || null,
-        trackNumber: meta.trackNumber || null
+        trackNumber: meta.trackNumber || null,
+        year: meta.year || null,
+        genre: meta.genre || null
       }
     };
+    // The provider names the file: a concrete extension whenever it is known,
+    // never "auto" (the host no longer sniffs bytes).
+    if (ext) out.ext = ext;
+    return out;
   });
 
   api.downloads.onGetQualities(PROVIDER_ID, function () {
@@ -1382,6 +2073,9 @@ function deactivate() {
   transferTimer = null;
   saveTimer = null;
   searchGen++;
+  toolResults = {};
+  knownDone = {};
+  completionsSeeded = false;
   api = null;
 }
 
@@ -1404,6 +2098,14 @@ return {
   _nextReadiness: nextReadiness,
   _matchFile: matchFile,
   _absolutePath: absolutePath,
+  _collectionForPath: collectionForPath,
+  _mergeMeta: mergeMeta,
+  _candidateId: candidateId,
+  _transferProgress: transferProgress,
+  _transferSubtitle: transferSubtitle,
+  _transferRowActions: transferRowActions,
+  _rowIds: rowIds,
+  _KEY_SEP: KEY_SEP,
   _fileUrlForPlayback: fileUrlForPlayback,
   _fileUrlForDownload: fileUrlForDownload,
   _transferPhase: transferPhase,
