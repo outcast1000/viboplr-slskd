@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Set up slskd for Viboplr</title>
+<meta name="description" content="Install and run slskd, the Soulseek daemon the Viboplr Soulseek plugin talks to. Step-by-step for Windows, macOS and Docker.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #ffffff; --bg-alt: #f8f9fa; --text: #1a1a2e; --muted: #5a5a72; --light: #8888a0; --border: #e8e8f0;
+    --accent-start: #FF6B6B; --accent-end: #E91E8A;
+    --gradient: linear-gradient(135deg, var(--accent-start), var(--accent-end));
+    --display: 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    --body: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', system-ui, sans-serif;
+    --mono: 'SF Mono', 'Fira Code', 'Cascadia Code', Consolas, monospace;
+    --radius: 12px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0d0d14; --bg-alt: #15151f; --text: #f0f0f6; --muted: #a8a8bc; --light: #7a7a90; --border: #26263a; }
+  }
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  [hidden] { display: none !important; }
+  html { -webkit-text-size-adjust: 100%; scroll-behavior: smooth; }
+  body { font-family: var(--body); color: var(--text); background: var(--bg); line-height: 1.6; padding: 0 16px 64px; }
+  a { color: var(--accent-end); }
+  .wrap { max-width: 820px; margin: 0 auto; }
+  header { padding: 40px 0 24px; }
+  .brand { font-family: var(--display); font-weight: 700; font-size: 1.1rem; letter-spacing: -0.01em; }
+  .gradient-text { background: var(--gradient); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
+  h1 { font-family: var(--display); font-weight: 700; font-size: clamp(1.8rem, 4vw, 2.6rem); line-height: 1.15; margin: 12px 0 10px; letter-spacing: -0.02em; }
+  .lead { color: var(--muted); font-size: 1.05rem; max-width: 640px; }
+  .notice { margin-top: 20px; padding: 14px 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-alt); font-size: 0.95rem; }
+  .notice.warn { border-color: #f0b35a; }
+  .keyrow { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 12px; }
+  .key { font-family: var(--mono); font-size: 0.9rem; word-break: break-all; padding: 6px 10px; border-radius: 8px; background: var(--bg); border: 1px solid var(--border); }
+  .tabs { display: flex; gap: 6px; margin: 32px 0 20px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  .tab { appearance: none; border: 0; background: none; font: inherit; font-family: var(--display); font-weight: 600; color: var(--muted); padding: 10px 14px; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+  .tab[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent-end); }
+  .panel[hidden] { display: none; }
+  ol.steps { list-style: none; counter-reset: step; display: flex; flex-direction: column; gap: 22px; }
+  ol.steps > li { counter-increment: step; position: relative; padding-left: 48px; }
+  ol.steps > li::before { content: counter(step); position: absolute; left: 0; top: 0; width: 32px; height: 32px; border-radius: 50%; background: var(--gradient); color: #fff; font-family: var(--display); font-weight: 700; display: grid; place-items: center; font-size: 0.95rem; }
+  ol.steps h2 { font-family: var(--display); font-weight: 600; font-size: 1.15rem; margin: 2px 0 6px; }
+  ol.steps p { color: var(--muted); margin: 0 0 8px; }
+  code { font-family: var(--mono); font-size: 0.9em; background: var(--bg-alt); border: 1px solid var(--border); border-radius: 5px; padding: 1px 5px; }
+  .snippet { position: relative; margin: 10px 0 4px; }
+  .snippet pre { font-family: var(--mono); font-size: 0.85rem; line-height: 1.5; background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; padding-right: 84px; overflow: auto; white-space: pre; }
+  .copy { position: absolute; top: 10px; right: 10px; appearance: none; border: 1px solid var(--border); background: var(--bg); color: var(--text); font: inherit; font-size: 0.8rem; font-weight: 600; padding: 5px 10px; border-radius: 8px; cursor: pointer; }
+  .copy:hover { border-color: var(--accent-end); }
+  .btn { display: inline-block; font: inherit; font-family: var(--display); font-weight: 600; color: #fff; background: var(--gradient); border: 0; border-radius: 999px; padding: 10px 18px; text-decoration: none; cursor: pointer; }
+  .btn.secondary { background: none; color: var(--text); border: 1px solid var(--border); }
+  .small { font-size: 0.85rem; color: var(--light); }
+  footer { margin-top: 48px; padding-top: 20px; border-top: 1px solid var(--border); color: var(--light); font-size: 0.85rem; }
+  .placeholder { color: var(--accent-end); font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand"><span class="gradient-text">Viboplr</span> · Soulseek plugin</div>
+    <h1>Set up slskd</h1>
+    <p class="lead">Viboplr can't speak Soulseek itself, so the Soulseek plugin drives <strong>slskd</strong>: a free, open-source Soulseek daemon that you install and run. It's a ten-minute job. slskd stays yours — its files, its settings, its process; Viboplr only talks to it over its local API.</p>
+
+    <div class="notice" id="keybox">
+      <div><strong>Your API key.</strong> <span id="keysource">Generated by the Soulseek plugin and already filled into the config below; it must match the API key field in the plugin.</span></div>
+      <div class="keyrow">
+        <code class="key" id="key">generating…</code>
+        <button class="copy" style="position:static" data-copy-target="key">Copy</button>
+        <button class="btn secondary" id="newkey" type="button" hidden>Generate a key</button>
+      </div>
+      <p class="small" id="keynote" hidden>You opened this page directly, so the key above was made here. Paste it into the plugin's <strong>API key</strong> field in Viboplr as well.</p>
+    </div>
+  </header>
+
+  <div class="tabs" role="tablist">
+    <button class="tab" role="tab" data-os="windows">Windows</button>
+    <button class="tab" role="tab" data-os="macos">macOS</button>
+    <button class="tab" role="tab" data-os="docker">Docker</button>
+  </div>
+
+  <!-- ============================ Windows ============================ -->
+  <section class="panel" data-os="windows" role="tabpanel">
+    <ol class="steps">
+      <li>
+        <h2>Download</h2>
+        <p>Get <code>slskd-&lt;version&gt;-win-x64.zip</code> from the <a href="https://github.com/slskd/slskd/releases/latest" target="_blank" rel="noopener">releases page</a> and extract it somewhere it can stay, for example <code>C:\slskd</code>. It's a single <code>slskd.exe</code> plus a few files.</p>
+        <a class="btn" href="https://github.com/slskd/slskd/releases/latest" target="_blank" rel="noopener">Open slskd releases</a>
+      </li>
+      <li>
+        <h2>Run it once</h2>
+        <p>Double-click <code>slskd.exe</code>. A console window opens and slskd creates its settings folder at <code>%LOCALAPPDATA%\slskd</code> with a <code>slskd.yml</code> inside. Close the window (or press Ctrl+C) before the next step.</p>
+        <p>The first start asks to allow incoming connections (port 50300). Allow it — otherwise other Soulseek users can't reach you and downloads are slow to start.</p>
+      </li>
+      <li>
+        <h2>Configure</h2>
+        <p>Paste <code>%LOCALAPPDATA%\slskd\slskd.yml</code> into the Explorer address bar, or open it from Notepad. Add the lines below (indentation matters — two spaces per level). Replace the two <span class="placeholder">Soulseek placeholders</span> with your own account; the key is already yours. If the file already has an uncommented <code>soulseek:</code> or <code>web:</code> section, add the lines inside it instead of repeating the heading.</p>
+        <div class="snippet"><pre data-yml></pre><button class="copy" data-copy>Copy</button></div>
+      </li>
+      <li>
+        <h2>Start it again</h2>
+        <p>Run <code>slskd.exe</code> again and keep the console window open while you use Soulseek — minimising is fine.</p>
+        <p>Or make it start hidden at every login: paste this into a PowerShell window, after changing the path on the first line to where you put <code>slskd.exe</code>.</p>
+        <div class="snippet"><pre>$exe = "C:\slskd\slskd.exe"   # &lt;- your path
+$lnk = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\slskd.lnk"
+$s = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk)
+$s.TargetPath = "powershell.exe"
+$s.Arguments = "-WindowStyle Hidden -Command Start-Process -WindowStyle Hidden '$exe'"
+$s.Save()</pre><button class="copy" data-copy>Copy</button></div>
+        <p class="small">To undo: delete <code>slskd.lnk</code> from that Startup folder.</p>
+      </li>
+      <li>
+        <h2>Connect</h2>
+        <p>Back in Viboplr, open <strong>Soulseek</strong> in the sidebar and press <strong>Connect</strong>. Finished downloads land in <code>%LOCALAPPDATA%\slskd\downloads</code>; add that folder as a music source in Collections and they join your library on their own.</p>
+        <p class="small">slskd's own web page is at <code>http://localhost:5030</code>, user <code>slskd</code> / password <code>slskd</code>. You don't need it for Viboplr, but change that password in <code>slskd.yml</code> (<code>web.authentication.username / password</code>) if other people use this computer.</p>
+      </li>
+    </ol>
+  </section>
+
+  <!-- ============================ macOS ============================ -->
+  <section class="panel" data-os="macos" role="tabpanel" hidden>
+    <ol class="steps">
+      <li>
+        <h2>Download</h2>
+        <p>Get <code>slskd-&lt;version&gt;-osx-arm64.zip</code> (Apple silicon) or <code>osx-x64.zip</code> (Intel) from the <a href="https://github.com/slskd/slskd/releases/latest" target="_blank" rel="noopener">releases page</a> and unzip it into a folder called <code>slskd</code> in your home folder.</p>
+        <a class="btn" href="https://github.com/slskd/slskd/releases/latest" target="_blank" rel="noopener">Open slskd releases</a>
+      </li>
+      <li>
+        <h2>Run it once</h2>
+        <p>macOS blocks unsigned downloads, so the first start has to come from Terminal. These three commands clear the download flag, make it executable and start it. slskd creates <code>~/.local/share/slskd/slskd.yml</code>. Press Ctrl+C to stop it.</p>
+        <div class="snippet"><pre>xattr -dr com.apple.quarantine ~/slskd
+chmod +x ~/slskd/slskd
+~/slskd/slskd</pre><button class="copy" data-copy>Copy</button></div>
+        <p>The first start asks to allow incoming connections (port 50300). Allow it — otherwise other Soulseek users can't reach you and downloads are slow to start.</p>
+      </li>
+      <li>
+        <h2>Configure</h2>
+        <p><code>open -e ~/.local/share/slskd/slskd.yml</code> opens the file in TextEdit. Add the lines below (indentation matters — two spaces per level). Replace the two <span class="placeholder">Soulseek placeholders</span> with your own account; the key is already yours. If the file already has an uncommented <code>soulseek:</code> or <code>web:</code> section, add the lines inside it instead of repeating the heading.</p>
+        <div class="snippet"><pre data-yml></pre><button class="copy" data-copy>Copy</button></div>
+      </li>
+      <li>
+        <h2>Start it again</h2>
+        <p><code>~/slskd/slskd</code> in Terminal starts it; leave that window open.</p>
+        <p>Or start it in the background at every login with a launch agent — paste the whole block into Terminal once.</p>
+        <div class="snippet"><pre>cat &gt; ~/Library/LaunchAgents/com.slskd.plist &lt;&lt;EOF
+&lt;?xml version="1.0" encoding="UTF-8"?&gt;
+&lt;!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"&gt;
+&lt;plist version="1.0"&gt;&lt;dict&gt;
+  &lt;key&gt;Label&lt;/key&gt;&lt;string&gt;com.slskd&lt;/string&gt;
+  &lt;key&gt;ProgramArguments&lt;/key&gt;&lt;array&gt;&lt;string&gt;${HOME}/slskd/slskd&lt;/string&gt;&lt;/array&gt;
+  &lt;key&gt;RunAtLoad&lt;/key&gt;&lt;true/&gt;
+  &lt;key&gt;KeepAlive&lt;/key&gt;&lt;true/&gt;
+  &lt;key&gt;StandardOutPath&lt;/key&gt;&lt;string&gt;${HOME}/.local/share/slskd/launchd.log&lt;/string&gt;
+  &lt;key&gt;StandardErrorPath&lt;/key&gt;&lt;string&gt;${HOME}/.local/share/slskd/launchd.log&lt;/string&gt;
+&lt;/dict&gt;&lt;/plist&gt;
+EOF
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.slskd.plist</pre><button class="copy" data-copy>Copy</button></div>
+        <p class="small">To undo: <code>launchctl bootout gui/$(id -u)/com.slskd</code> and delete the plist.</p>
+      </li>
+      <li>
+        <h2>Connect</h2>
+        <p>Back in Viboplr, open <strong>Soulseek</strong> in the sidebar and press <strong>Connect</strong>. Finished downloads land in <code>~/.local/share/slskd/downloads</code>; add that folder as a music source in Collections and they join your library on their own.</p>
+        <p class="small">slskd's own web page is at <code>http://localhost:5030</code>, user <code>slskd</code> / password <code>slskd</code>. You don't need it for Viboplr, but change that password in <code>slskd.yml</code> (<code>web.authentication.username / password</code>) if other people use this computer.</p>
+      </li>
+    </ol>
+  </section>
+
+  <!-- ============================ Docker ============================ -->
+  <section class="panel" data-os="docker" role="tabpanel" hidden>
+    <ol class="steps">
+      <li>
+        <h2>Start the container</h2>
+        <p>One command, on the machine that will run it. slskd's settings and downloads are kept in <code>~/slskd</code> on the host.</p>
+        <div class="snippet"><pre>mkdir -p ~/slskd
+docker run -d --name slskd --restart unless-stopped \
+  -p 5030:5030 -p 50300:50300 \
+  -v ~/slskd:/app \
+  --user $(id -u):$(id -g) \
+  slskd/slskd:latest</pre><button class="copy" data-copy>Copy</button></div>
+      </li>
+      <li>
+        <h2>Configure</h2>
+        <p>The first start creates <code>~/slskd/slskd.yml</code>. Add the lines below (indentation matters — two spaces per level). Replace the two <span class="placeholder">Soulseek placeholders</span> with your own account; the key is already yours. If the file already has an uncommented <code>soulseek:</code> or <code>web:</code> section, add the lines inside it instead of repeating the heading. Then <code>docker restart slskd</code>.</p>
+        <div class="snippet"><pre data-yml></pre><button class="copy" data-copy>Copy</button></div>
+      </li>
+      <li>
+        <h2>Connect</h2>
+        <p>Back in Viboplr, open <strong>Soulseek</strong> in the sidebar. If Docker runs on this same computer, press <strong>Connect</strong>; otherwise type the machine's address (for example <code>http://nas.local:5030</code>) into the Connection section. Downloads land in <code>~/slskd/downloads</code> on that machine — add the folder (or its network share) as a music source in Collections.</p>
+        <p class="small">slskd's own web page is on port 5030, user <code>slskd</code> / password <code>slskd</code>. Change that password in <code>slskd.yml</code> if the machine is reachable by others.</p>
+      </li>
+    </ol>
+  </section>
+
+  <footer>
+    slskd is a separate open-source project: <a href="https://github.com/slskd/slskd" target="_blank" rel="noopener">github.com/slskd/slskd</a>. This page is part of the <a href="https://github.com/outcast1000/viboplr-slskd">Viboplr Soulseek plugin</a>. Nothing here is downloaded, written or launched for you — every step is yours.
+  </footer>
+</div>
+
+<script>
+(function () {
+  // --- API key: from the plugin (#key=...) or made here -------------------
+  function fragmentParams() {
+    var out = {};
+    var h = location.hash.replace(/^#/, "");
+    h.split("&").forEach(function (kv) {
+      var i = kv.indexOf("=");
+      if (i > 0) out[decodeURIComponent(kv.slice(0, i))] = decodeURIComponent(kv.slice(i + 1));
+    });
+    return out;
+  }
+  function randomKey() {
+    var bytes = new Uint8Array(20);
+    (window.crypto || window.msCrypto).getRandomValues(bytes);
+    return Array.prototype.map.call(bytes, function (b) { return ("0" + b.toString(16)).slice(-2); }).join("");
+  }
+  function ymlFor(key) {
+    return [
+      "soulseek:",
+      "  username: YOUR_SOULSEEK_USERNAME",
+      "  password: YOUR_SOULSEEK_PASSWORD",
+      "web:",
+      "  authentication:",
+      "    api_keys:",
+      "      viboplr:",
+      "        key: " + key,
+      "        role: readwrite"
+    ].join("\n");
+  }
+  var params = fragmentParams();
+  var key = /^[A-Za-z0-9_-]{16,255}$/.test(params.key || "") ? params.key : null;
+  var fromPlugin = !!key;
+  if (!key) key = randomKey();
+
+  function applyKey(k) {
+    key = k;
+    document.getElementById("key").textContent = k;
+    document.querySelectorAll("pre[data-yml]").forEach(function (pre) { pre.textContent = ymlFor(k); });
+  }
+  applyKey(key);
+  if (!fromPlugin) {
+    document.getElementById("keysource").textContent = "Every Soulseek plugin install uses its own key; slskd must be given the same one.";
+    document.getElementById("keynote").hidden = false;
+    var nk = document.getElementById("newkey");
+    nk.hidden = false;
+    nk.addEventListener("click", function () { applyKey(randomKey()); });
+  }
+
+  // --- Copy buttons --------------------------------------------------------
+  document.querySelectorAll(".copy").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var target = btn.dataset.copyTarget ? document.getElementById(btn.dataset.copyTarget) : btn.parentElement.querySelector("pre");
+      var text = target ? target.textContent : "";
+      var done = function () { btn.textContent = "Copied"; setTimeout(function () { btn.textContent = "Copy"; }, 1600); };
+      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, done);
+      else { var r = document.createRange(); r.selectNodeContents(target); var sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); done(); }
+    });
+  });
+
+  // --- OS tabs: URL (#os=), then the visitor's platform ----------------------
+  function detectOs() {
+    var ua = navigator.userAgent || "";
+    var p = navigator.platform || "";
+    if (/Win/i.test(p) || /Windows/i.test(ua)) return "windows";
+    if (/Mac/i.test(p) || /Mac OS X/i.test(ua)) return "macos";
+    return "docker";
+  }
+  var tabs = Array.prototype.slice.call(document.querySelectorAll(".tab"));
+  var panels = Array.prototype.slice.call(document.querySelectorAll(".panel"));
+  function select(os) {
+    if (!tabs.some(function (t) { return t.dataset.os === os; })) os = "windows";
+    tabs.forEach(function (t) { t.setAttribute("aria-selected", String(t.dataset.os === os)); });
+    panels.forEach(function (p) { p.hidden = p.dataset.os !== os; });
+  }
+  tabs.forEach(function (t) { t.addEventListener("click", function () { select(t.dataset.os); }); });
+  select(params.os || detectOs());
+})();
+</script>
+</body>
+</html>

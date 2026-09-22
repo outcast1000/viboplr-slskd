@@ -1446,18 +1446,61 @@ function findTrackedByRef(ref) {
   return tracked[ref] || null;
 }
 
+
+// ---------------------------------------------------------------------------
+// Setup — the guide lives on the plugin's GitHub Pages site, not in this view:
+// a web page can auto-detect the OS, offer real Copy buttons and be read on
+// the phone next to the computer being set up. The plugin's job is to mint
+// the API key, hand it to the page in the URL fragment (never sent to the
+// server) and connect once slskd is up. Nothing is downloaded, written or
+// launched from here — the user owns slskd.
+// ---------------------------------------------------------------------------
+
+var SETUP_GUIDE_URL = "https://outcast1000.github.io/viboplr-slskd/";
+var SETUP_DEFAULT_URL = "http://localhost:5030";
+
+// 40 hex chars. Math.random is the only source the plugin sandbox offers (no
+// crypto); the key only ever travels between two programs on the user's own
+// machine, and slskd itself accepts anything 16–255 chars long.
+function randomApiKey() {
+  var hex = "0123456789abcdef";
+  var out = "";
+  for (var i = 0; i < 40; i++) out += hex.charAt(Math.floor(Math.random() * 16));
+  return out;
+}
+
+// The key rides in the fragment so the page can fill it into the yml snippet
+// without it ever reaching GitHub's servers.
+function setupGuideUrl(apiKey) {
+  return SETUP_GUIDE_URL + "#key=" + encodeURIComponent(apiKey || "");
+}
+
+function setupBlock(apiKey) {
+  return {
+    type: "section",
+    title: "Set up slskd",
+    children: [
+      { type: "text", content: "The guide opens in your browser: where to download slskd, how to run it the first time, the exact lines to paste into its <code>slskd.yml</code> (with your key already in them), and how to start it at login. Come back and press Connect when it's running." },
+      { type: "toolbar", buttons: [
+        { label: "Open setup guide", action: "setup-open-guide", variant: "accent" },
+        { label: "Connect to " + SETUP_DEFAULT_URL, action: "setup-connect", variant: "secondary" },
+        { label: "Generate a new key", action: "setup-new-key", variant: "secondary" }
+      ], status: "Your API key: " + apiKey }
+    ]
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Views
 // ---------------------------------------------------------------------------
 function setupView() {
   var children = [];
   var st = readiness.state;
+  var showGuide = st === "unconfigured" || st === "unreachable";
 
   if (st === "unconfigured") {
     children.push({ type: "text", content: "Search and download from Soulseek", className: "plugin-heading" });
-    children.push({ type: "text", content: "Viboplr can't talk to Soulseek directly, so this plugin drives slskd — a free, open-source Soulseek daemon you run yourself. Install it, sign in with a Soulseek account, then paste its address and API key below." });
-    children.push({ type: "button", label: "Get slskd", action: "open-slskd-site", variant: "accent" });
-    children.push({ type: "text", content: "Find the API key in slskd under Settings → Options → Web.", className: "plugin-muted" });
+    children.push({ type: "text", content: "Viboplr can't talk to Soulseek directly, so this plugin drives slskd — a free, open-source Soulseek daemon that you install and run yourself. It's a ten-minute job; the guide walks through it for Windows, macOS and Docker, and the API key is already generated for you. Already running slskd somewhere (Docker, a NAS)? Skip to the Connection section." });
   } else if (st === "unreachable") {
     children.push({ type: "text", content: "slskd isn't reachable", className: "plugin-heading" });
     children.push({ type: "text", content: "Nothing answered at " + (settings.url || "(no address set)") + ". Check that slskd is running and the address is right." + (readiness.detail ? " (" + readiness.detail + ")" : "") });
@@ -1473,9 +1516,22 @@ function setupView() {
     children.push({ type: "loading", message: "slskd is connecting to Soulseek…" });
   }
 
+  if (showGuide) {
+    children.push({ type: "spacer" });
+    children.push(setupBlock(settings.apiKey));
+  }
   children.push({ type: "spacer" });
   children.push(connectionSection());
   return { type: "layout", direction: "vertical", children: children };
+}
+
+// The guide shows a key and the yml carries it, so a key must exist before the
+// first render. Saved straight to storage: `saveSetting` would also re-probe,
+// and a key without an address is still "unconfigured".
+function ensureSetupKey() {
+  if (settings.apiKey) return;
+  settings.apiKey = randomApiKey();
+  api.storage.set("apiKey", settings.apiKey).catch(function (e) { console.error("slskd: couldn't save apiKey:", e); });
 }
 
 function connectionSection() {
@@ -1773,6 +1829,7 @@ function transfersTab() {
 
 function render() {
   if (!api) return;
+  if (readiness.state === "unconfigured") ensureSetupKey();
   if (readiness.state !== "ready") {
     api.ui.setViewData(VIEW_ID, setupView(), { scrollKey: "setup" });
     return;
@@ -2086,6 +2143,23 @@ function registerActions() {
 
   api.ui.onAction("open-slskd-site", function () {
     api.network.openUrl("https://slskd.com/").catch(console.error);
+  });
+
+  // Setup. Nothing here touches the user's machine: it opens the guide page
+  // with the key in the fragment, mints a new key, or connects.
+  api.ui.onAction("setup-open-guide", function () {
+    ensureSetupKey();
+    api.network.openUrl(setupGuideUrl(settings.apiKey)).catch(console.error);
+  });
+  api.ui.onAction("setup-new-key", function () {
+    settings.apiKey = "";
+    ensureSetupKey();
+    render();
+    renderSettings();
+  });
+  api.ui.onAction("setup-connect", function () {
+    if (!settings.url) settings.url = SETUP_DEFAULT_URL;
+    saveSetting("url", settings.url);
   });
 
   api.ui.onAction("open-slskd", function () {
@@ -2415,6 +2489,9 @@ return {
   _parseTrackMeta: parseTrackMeta,
   _parsePreferredFormats: parsePreferredFormats,
   _detectTier: detectTier,
+  _randomApiKey: randomApiKey,
+  _setupGuideUrl: setupGuideUrl,
+  _setupBlock: setupBlock,
   _hostOf: hostOf,
   _searchQueryForTarget: searchQueryForTarget,
   _nextReadiness: nextReadiness,
