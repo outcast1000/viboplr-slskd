@@ -7,59 +7,13 @@
 <meta name="description" content="Install and run slskd, the Soulseek daemon the Viboplr Soulseek plugin talks to. Step-by-step for Windows, macOS and Docker.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@500;600;700&display=swap" rel="stylesheet">
-<style>
-  :root {
-    --bg: #ffffff; --bg-alt: #f8f9fa; --text: #1a1a2e; --muted: #5a5a72; --light: #8888a0; --border: #e8e8f0;
-    --accent-start: #FF6B6B; --accent-end: #E91E8A;
-    --gradient: linear-gradient(135deg, var(--accent-start), var(--accent-end));
-    --display: 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    --body: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', system-ui, sans-serif;
-    --mono: 'SF Mono', 'Fira Code', 'Cascadia Code', Consolas, monospace;
-    --radius: 12px;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root { --bg: #0d0d14; --bg-alt: #15151f; --text: #f0f0f6; --muted: #a8a8bc; --light: #7a7a90; --border: #26263a; }
-  }
-  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-  [hidden] { display: none !important; }
-  html { -webkit-text-size-adjust: 100%; scroll-behavior: smooth; }
-  body { font-family: var(--body); color: var(--text); background: var(--bg); line-height: 1.6; padding: 0 16px 64px; }
-  a { color: var(--accent-end); }
-  .wrap { max-width: 820px; margin: 0 auto; }
-  header { padding: 40px 0 24px; }
-  .brand { font-family: var(--display); font-weight: 700; font-size: 1.1rem; letter-spacing: -0.01em; }
-  .gradient-text { background: var(--gradient); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
-  h1 { font-family: var(--display); font-weight: 700; font-size: clamp(1.8rem, 4vw, 2.6rem); line-height: 1.15; margin: 12px 0 10px; letter-spacing: -0.02em; }
-  .lead { color: var(--muted); font-size: 1.05rem; max-width: 640px; }
-  .notice { margin-top: 20px; padding: 14px 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-alt); font-size: 0.95rem; }
-  .notice.warn { border-color: #f0b35a; }
-  .keyrow { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 12px; }
-  .key { font-family: var(--mono); font-size: 0.9rem; word-break: break-all; padding: 6px 10px; border-radius: 8px; background: var(--bg); border: 1px solid var(--border); }
-  .tabs { display: flex; gap: 6px; margin: 32px 0 20px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
-  .tab { appearance: none; border: 0; background: none; font: inherit; font-family: var(--display); font-weight: 600; color: var(--muted); padding: 10px 14px; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; }
-  .tab[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent-end); }
-  .panel[hidden] { display: none; }
-  ol.steps { list-style: none; counter-reset: step; display: flex; flex-direction: column; gap: 22px; }
-  ol.steps > li { counter-increment: step; position: relative; padding-left: 48px; }
-  ol.steps > li::before { content: counter(step); position: absolute; left: 0; top: 0; width: 32px; height: 32px; border-radius: 50%; background: var(--gradient); color: #fff; font-family: var(--display); font-weight: 700; display: grid; place-items: center; font-size: 0.95rem; }
-  ol.steps h2 { font-family: var(--display); font-weight: 600; font-size: 1.15rem; margin: 2px 0 6px; }
-  ol.steps p { color: var(--muted); margin: 0 0 8px; }
-  code { font-family: var(--mono); font-size: 0.9em; background: var(--bg-alt); border: 1px solid var(--border); border-radius: 5px; padding: 1px 5px; }
-  .snippet { position: relative; margin: 10px 0 4px; }
-  .snippet pre { font-family: var(--mono); font-size: 0.85rem; line-height: 1.5; background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; padding-right: 84px; overflow: auto; white-space: pre; }
-  .copy { position: absolute; top: 10px; right: 10px; appearance: none; border: 1px solid var(--border); background: var(--bg); color: var(--text); font: inherit; font-size: 0.8rem; font-weight: 600; padding: 5px 10px; border-radius: 8px; cursor: pointer; }
-  .copy:hover { border-color: var(--accent-end); }
-  .btn { display: inline-block; font: inherit; font-family: var(--display); font-weight: 600; color: #fff; background: var(--gradient); border: 0; border-radius: 999px; padding: 10px 18px; text-decoration: none; cursor: pointer; }
-  .btn.secondary { background: none; color: var(--text); border: 1px solid var(--border); }
-  .small { font-size: 0.85rem; color: var(--light); }
-  footer { margin-top: 48px; padding-top: 20px; border-top: 1px solid var(--border); color: var(--light); font-size: 0.85rem; }
-  .placeholder { color: var(--accent-end); font-weight: 600; }
-</style>
+<link rel="stylesheet" href="style.css">
 </head>
 <body>
 <div class="wrap">
   <header>
     <div class="brand"><span class="gradient-text">Viboplr</span> · Soulseek plugin</div>
+    <nav class="nav"><a href="what-is-this.html" id="nav-about">What is this?</a><a href="index.html" aria-current="page">Set up slskd</a><a href="#connect">Connecting</a></nav>
     <h1>Set up slskd</h1>
     <p class="lead">Viboplr can't speak Soulseek itself, so the Soulseek plugin drives <strong>slskd</strong>: a free, open-source Soulseek daemon that you install and run. It's a ten-minute job. slskd stays yours — its files, its settings, its process; Viboplr only talks to it over its local API.</p>
 
@@ -112,7 +66,7 @@ $s.Save()</pre><button class="copy" data-copy>Copy</button></div>
       </li>
       <li>
         <h2>Connect</h2>
-        <p>Back in Viboplr, open <strong>Soulseek</strong> in the sidebar and press <strong>Connect</strong>. Finished downloads land in <code>%LOCALAPPDATA%\slskd\downloads</code>; add that folder as a music source in Collections and they join your library on their own.</p>
+        <p>Back in Viboplr, open <strong>Soulseek</strong> in the sidebar and press <strong>Connect</strong>. Finished downloads land in <code>%LOCALAPPDATA%\slskd\downloads</code>; add that folder as a music source in Collections and they join your library on their own. Field by field: <a href="#connect">finishing the connection</a>.</p>
         <p class="small">slskd's own web page is at <code>http://localhost:5030</code>, user <code>slskd</code> / password <code>slskd</code>. You don't need it for Viboplr, but change that password in <code>slskd.yml</code> (<code>web.authentication.username / password</code>) if other people use this computer.</p>
       </li>
     </ol>
@@ -160,7 +114,7 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.slskd.plist</pre><bu
       </li>
       <li>
         <h2>Connect</h2>
-        <p>Back in Viboplr, open <strong>Soulseek</strong> in the sidebar and press <strong>Connect</strong>. Finished downloads land in <code>~/.local/share/slskd/downloads</code>; add that folder as a music source in Collections and they join your library on their own.</p>
+        <p>Back in Viboplr, open <strong>Soulseek</strong> in the sidebar and press <strong>Connect</strong>. Finished downloads land in <code>~/.local/share/slskd/downloads</code>; add that folder as a music source in Collections and they join your library on their own. Field by field: <a href="#connect">finishing the connection</a>.</p>
         <p class="small">slskd's own web page is at <code>http://localhost:5030</code>, user <code>slskd</code> / password <code>slskd</code>. You don't need it for Viboplr, but change that password in <code>slskd.yml</code> (<code>web.authentication.username / password</code>) if other people use this computer.</p>
       </li>
     </ol>
@@ -186,10 +140,63 @@ docker run -d --name slskd --restart unless-stopped \
       </li>
       <li>
         <h2>Connect</h2>
-        <p>Back in Viboplr, open <strong>Soulseek</strong> in the sidebar. If Docker runs on this same computer, press <strong>Connect</strong>; otherwise type the machine's address (for example <code>http://nas.local:5030</code>) into the Connection section. Downloads land in <code>~/slskd/downloads</code> on that machine — add the folder (or its network share) as a music source in Collections.</p>
+        <p>Back in Viboplr, open <strong>Soulseek</strong> in the sidebar. If Docker runs on this same computer, press <strong>Connect</strong>; otherwise type the machine's address (for example <code>http://nas.local:5030</code>) into the Connection section. Downloads land in <code>~/slskd/downloads</code> on that machine — add the folder (or its network share) as a music source in Collections. Running it on a NAS or server? See <a href="#connect">finishing the connection</a> below.</p>
         <p class="small">slskd's own web page is on port 5030, user <code>slskd</code> / password <code>slskd</code>. Change that password in <code>slskd.yml</code> if the machine is reachable by others.</p>
       </li>
     </ol>
+  </section>
+
+  <!-- ============================ Connection ============================ -->
+  <section class="connect" id="connect">
+    <h2 class="connect-title">Finishing the connection in Viboplr</h2>
+    <p class="lead">Open <strong>Soulseek</strong> in the Viboplr sidebar. The <strong>Connection</strong> section has three fields and a test button; here is what goes in each.</p>
+
+    <table class="fields">
+      <tr>
+        <th>slskd address</th>
+        <td>
+          <p>Where the plugin reaches slskd's web API. It is the address of slskd's own web page, without a path.</p>
+          <ul>
+            <li><strong>Same computer</strong> (the Windows and macOS guides above, or Docker on this machine): <code>http://localhost:5030</code>. The <strong>Connect</strong> button fills this in for you.</li>
+            <li><strong>Another machine</strong> — Docker on a NAS, a home server, a Raspberry Pi: that machine's name or IP and the port, for example <code>http://nas.local:5030</code> or <code>http://192.168.1.20:5030</code>. It must be reachable from the computer running Viboplr — if you can open the address in a browser there and see slskd's login page, the plugin can reach it too.</li>
+            <li><strong>HTTPS</strong>: slskd also serves <code>https://…:5031</code> with a self-signed certificate. If you point the plugin at that, turn on <strong>Allow self-signed certificate</strong>; plain <code>http</code> on a home network is fine and simpler.</li>
+          </ul>
+        </td>
+      </tr>
+      <tr>
+        <th>API key</th>
+        <td>
+          <p>The key you added to <code>slskd.yml</code> under <code>web.authentication.api_keys</code>. If you followed this page it is already in the plugin's field — it is the key shown at the top, and the two must match exactly. Changed it in the yml? Paste the new value here and press <strong>Test connection</strong>; slskd reads its config file live.</p>
+        </td>
+      </tr>
+      <tr>
+        <th>slskd runs on this computer</th>
+        <td>
+          <p>Found under <strong>Downloads</strong> in the plugin's settings. The plugin guesses from the address (<code>localhost</code> means yes); flip it if the guess is wrong. It decides what happens to a finished download:</p>
+          <ul>
+            <li><strong>On</strong>: Viboplr can play the file straight from slskd's downloads folder and <strong>Add to library</strong> copies it into a collection. If that folder sits inside one of your collections, finished files are picked up automatically.</li>
+            <li><strong>Off</strong> (slskd on another machine): the files land in slskd's downloads folder over there. Share that folder on your network (SMB, NFS) and add the share as a music source in Viboplr's Collections; search and downloading work the same either way.</li>
+          </ul>
+        </td>
+      </tr>
+    </table>
+
+    <h3 class="connect-sub">Docker on another machine</h3>
+    <p>The Docker tab's command works unchanged on a NAS or server; run it there. Two things differ from the same-computer case:</p>
+    <ul class="plain">
+      <li><strong>Reachability.</strong> Port <code>5030</code> must be open from your computer to that machine — the <code>-p 5030:5030</code> in the command publishes it on the host; a firewall on the host may still need to allow it. Port <code>50300</code> is the Soulseek listen port and wants forwarding on your router, not on the host, so other users can reach you.</li>
+      <li><strong>Where the music ends up.</strong> Downloads land in <code>~/slskd/downloads</code> on that machine (the folder mounted as <code>/app</code>). Export it as a network share, mount it on your computer, and add the mount as a collection. Then turn <strong>slskd runs on this computer</strong> off in the plugin.</li>
+    </ul>
+    <p class="small">NAS app stores (Unraid, TrueNAS, Synology) often carry slskd as a one-click install; the address and key fields work the same — read the address off the NAS's app page and put the key in its config.</p>
+
+    <h3 class="connect-sub">What the status line means</h3>
+    <ul class="plain">
+      <li><strong>Not set up</strong> — the address or the key is empty.</li>
+      <li><strong>slskd isn't reachable</strong> — nothing answered at the address. slskd isn't running, the address is wrong, or the port isn't open from here.</li>
+      <li><strong>slskd rejected the API key</strong> — slskd answered but the key doesn't match its <code>slskd.yml</code>. Check for a copy-paste tail or a wrong indentation under <code>api_keys</code>.</li>
+      <li><strong>slskd isn't signed in to Soulseek</strong> — the key works but slskd can't log in: check the Soulseek username and password in <code>slskd.yml</code>. The account is created the first time a username and password are used, so a typo here creates a new account instead of failing.</li>
+      <li><strong>Ready</strong> — search away.</li>
+    </ul>
   </section>
 
   <footer>
@@ -274,6 +281,10 @@ docker run -d --name slskd --restart unless-stopped \
   }
   tabs.forEach(function (t) { t.addEventListener("click", function () { select(t.dataset.os); }); });
   select(params.os || detectOs());
+
+  // Keep the key when hopping to the other page.
+  var about = document.getElementById("nav-about");
+  if (about && location.hash) about.href = "what-is-this.html" + location.hash;
 })();
 </script>
 </body>

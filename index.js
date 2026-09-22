@@ -1456,7 +1456,9 @@ function findTrackedByRef(ref) {
 // launched from here — the user owns slskd.
 // ---------------------------------------------------------------------------
 
-var SETUP_GUIDE_URL = "https://outcast1000.github.io/viboplr-slskd/";
+var PAGES_URL = "https://outcast1000.github.io/viboplr-slskd/";
+var WHAT_IS_THIS_URL = PAGES_URL + "what-is-this.html";
+var SETUP_GUIDE_URL = PAGES_URL;
 var SETUP_DEFAULT_URL = "http://localhost:5030";
 
 // 40 hex chars. Math.random is the only source the plugin sandbox offers (no
@@ -1469,25 +1471,25 @@ function randomApiKey() {
   return out;
 }
 
-// The key rides in the fragment so the page can fill it into the yml snippet
-// without it ever reaching GitHub's servers.
+// The key rides in the fragment so the setup page can fill it into the yml
+// snippet without it ever reaching GitHub's servers. The about page carries
+// the fragment along to the setup page.
 function setupGuideUrl(apiKey) {
   return SETUP_GUIDE_URL + "#key=" + encodeURIComponent(apiKey || "");
 }
+function whatIsThisUrl(apiKey) {
+  return WHAT_IS_THIS_URL + "#key=" + encodeURIComponent(apiKey || "");
+}
 
-function setupBlock(apiKey) {
-  return {
-    type: "section",
-    title: "Set up slskd",
-    children: [
-      { type: "text", content: "The guide opens in your browser: where to download slskd, how to run it the first time, the exact lines to paste into its <code>slskd.yml</code> (with your key already in them), and how to start it at login. Come back and press Connect when it's running." },
-      { type: "toolbar", buttons: [
-        { label: "Open setup guide", action: "setup-open-guide", variant: "accent" },
-        { label: "Connect to " + SETUP_DEFAULT_URL, action: "setup-connect", variant: "secondary" },
-        { label: "Generate a new key", action: "setup-new-key", variant: "secondary" }
-      ], status: "Your API key: " + apiKey }
-    ]
-  };
+// One line of buttons. "What is this?" opens the about page (what Soulseek and
+// slskd are, why you run slskd yourself), which leads on to the setup guide;
+// everything else lives there, so the view stays out of the way of someone who
+// already has slskd running.
+function setupBar() {
+  return { type: "toolbar", buttons: [
+    { label: "What is this?", action: "setup-open-about", variant: "accent" },
+    { label: "Connect to " + SETUP_DEFAULT_URL, action: "setup-connect", variant: "secondary" }
+  ] };
 }
 
 // ---------------------------------------------------------------------------
@@ -1500,7 +1502,7 @@ function setupView() {
 
   if (st === "unconfigured") {
     children.push({ type: "text", content: "Search and download from Soulseek", className: "plugin-heading" });
-    children.push({ type: "text", content: "Viboplr can't talk to Soulseek directly, so this plugin drives slskd — a free, open-source Soulseek daemon that you install and run yourself. It's a ten-minute job; the guide walks through it for Windows, macOS and Docker, and the API key is already generated for you. Already running slskd somewhere (Docker, a NAS)? Skip to the Connection section." });
+    children.push({ type: "text", content: "Needs slskd, a small Soulseek daemon you run yourself.", className: "plugin-muted" });
   } else if (st === "unreachable") {
     children.push({ type: "text", content: "slskd isn't reachable", className: "plugin-heading" });
     children.push({ type: "text", content: "Nothing answered at " + (settings.url || "(no address set)") + ". Check that slskd is running and the address is right." + (readiness.detail ? " (" + readiness.detail + ")" : "") });
@@ -1516,10 +1518,7 @@ function setupView() {
     children.push({ type: "loading", message: "slskd is connecting to Soulseek…" });
   }
 
-  if (showGuide) {
-    children.push({ type: "spacer" });
-    children.push(setupBlock(settings.apiKey));
-  }
+  if (showGuide) children.push(setupBar());
   children.push({ type: "spacer" });
   children.push(connectionSection());
   return { type: "layout", direction: "vertical", children: children };
@@ -2147,15 +2146,13 @@ function registerActions() {
 
   // Setup. Nothing here touches the user's machine: it opens the guide page
   // with the key in the fragment, mints a new key, or connects.
+  api.ui.onAction("setup-open-about", function () {
+    ensureSetupKey();
+    api.network.openUrl(whatIsThisUrl(settings.apiKey)).catch(console.error);
+  });
   api.ui.onAction("setup-open-guide", function () {
     ensureSetupKey();
     api.network.openUrl(setupGuideUrl(settings.apiKey)).catch(console.error);
-  });
-  api.ui.onAction("setup-new-key", function () {
-    settings.apiKey = "";
-    ensureSetupKey();
-    render();
-    renderSettings();
   });
   api.ui.onAction("setup-connect", function () {
     if (!settings.url) settings.url = SETUP_DEFAULT_URL;
@@ -2491,7 +2488,8 @@ return {
   _detectTier: detectTier,
   _randomApiKey: randomApiKey,
   _setupGuideUrl: setupGuideUrl,
-  _setupBlock: setupBlock,
+  _whatIsThisUrl: whatIsThisUrl,
+  _setupBar: setupBar,
   _hostOf: hostOf,
   _searchQueryForTarget: searchQueryForTarget,
   _nextReadiness: nextReadiness,

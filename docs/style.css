@@ -1,0 +1,67 @@
+  :root {
+    --bg: #ffffff; --bg-alt: #f8f9fa; --text: #1a1a2e; --muted: #5a5a72; --light: #8888a0; --border: #e8e8f0;
+    --accent-start: #FF6B6B; --accent-end: #E91E8A;
+    --gradient: linear-gradient(135deg, var(--accent-start), var(--accent-end));
+    --display: 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    --body: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', system-ui, sans-serif;
+    --mono: 'SF Mono', 'Fira Code', 'Cascadia Code', Consolas, monospace;
+    --radius: 12px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0d0d14; --bg-alt: #15151f; --text: #f0f0f6; --muted: #a8a8bc; --light: #7a7a90; --border: #26263a; }
+  }
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  [hidden] { display: none !important; }
+  html { -webkit-text-size-adjust: 100%; scroll-behavior: smooth; }
+  body { font-family: var(--body); color: var(--text); background: var(--bg); line-height: 1.6; padding: 0 16px 64px; }
+  a { color: var(--accent-end); }
+  .wrap { max-width: 820px; margin: 0 auto; }
+  header { padding: 40px 0 24px; }
+  .brand { font-family: var(--display); font-weight: 700; font-size: 1.1rem; letter-spacing: -0.01em; }
+  .gradient-text { background: var(--gradient); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
+  h1 { font-family: var(--display); font-weight: 700; font-size: clamp(1.8rem, 4vw, 2.6rem); line-height: 1.15; margin: 12px 0 10px; letter-spacing: -0.02em; }
+  .lead { color: var(--muted); font-size: 1.05rem; max-width: 640px; }
+  .notice { margin-top: 20px; padding: 14px 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-alt); font-size: 0.95rem; }
+  .notice.warn { border-color: #f0b35a; }
+  .keyrow { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 12px; }
+  .key { font-family: var(--mono); font-size: 0.9rem; word-break: break-all; padding: 6px 10px; border-radius: 8px; background: var(--bg); border: 1px solid var(--border); }
+  .tabs { display: flex; gap: 6px; margin: 32px 0 20px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  .tab { appearance: none; border: 0; background: none; font: inherit; font-family: var(--display); font-weight: 600; color: var(--muted); padding: 10px 14px; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+  .tab[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent-end); }
+  .panel[hidden] { display: none; }
+  ol.steps { list-style: none; counter-reset: step; display: flex; flex-direction: column; gap: 22px; }
+  ol.steps > li { counter-increment: step; position: relative; padding-left: 48px; }
+  ol.steps > li::before { content: counter(step); position: absolute; left: 0; top: 0; width: 32px; height: 32px; border-radius: 50%; background: var(--gradient); color: #fff; font-family: var(--display); font-weight: 700; display: grid; place-items: center; font-size: 0.95rem; }
+  ol.steps h2 { font-family: var(--display); font-weight: 600; font-size: 1.15rem; margin: 2px 0 6px; }
+  ol.steps p { color: var(--muted); margin: 0 0 8px; }
+  code { font-family: var(--mono); font-size: 0.9em; background: var(--bg-alt); border: 1px solid var(--border); border-radius: 5px; padding: 1px 5px; }
+  .snippet { position: relative; margin: 10px 0 4px; }
+  .snippet pre { font-family: var(--mono); font-size: 0.85rem; line-height: 1.5; background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; padding-right: 84px; overflow: auto; white-space: pre; }
+  .copy { position: absolute; top: 10px; right: 10px; appearance: none; border: 1px solid var(--border); background: var(--bg); color: var(--text); font: inherit; font-size: 0.8rem; font-weight: 600; padding: 5px 10px; border-radius: 8px; cursor: pointer; }
+  .copy:hover { border-color: var(--accent-end); }
+  .btn { display: inline-block; font: inherit; font-family: var(--display); font-weight: 600; color: #fff; background: var(--gradient); border: 0; border-radius: 999px; padding: 10px 18px; text-decoration: none; cursor: pointer; }
+  .btn.secondary { background: none; color: var(--text); border: 1px solid var(--border); }
+  .small { font-size: 0.85rem; color: var(--light); }
+  footer { margin-top: 48px; padding-top: 20px; border-top: 1px solid var(--border); color: var(--light); font-size: 0.85rem; }
+  .placeholder { color: var(--accent-end); font-weight: 600; }
+
+  /* --- about page --- */
+  .nav { display: flex; gap: 14px; margin-top: 8px; font-size: 0.95rem; }
+  .nav a { color: var(--muted); text-decoration: none; font-weight: 600; font-family: var(--display); }
+  .nav a[aria-current="page"], .nav a:hover { color: var(--text); }
+  .prose h2 { font-family: var(--display); font-weight: 600; font-size: 1.25rem; margin: 28px 0 8px; letter-spacing: -0.01em; }
+  .prose p, .prose li { color: var(--muted); }
+  .prose ul { padding-left: 22px; display: flex; flex-direction: column; gap: 6px; margin: 6px 0; }
+  .cta { margin: 32px 0 0; display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+
+  /* --- connection section --- */
+  .connect { margin-top: 56px; padding-top: 28px; border-top: 1px solid var(--border); }
+  .connect-title { font-family: var(--display); font-weight: 700; font-size: 1.6rem; letter-spacing: -0.02em; margin-bottom: 8px; }
+  .connect-sub { font-family: var(--display); font-weight: 600; font-size: 1.15rem; margin: 26px 0 8px; }
+  .connect p, .connect li { color: var(--muted); }
+  .connect ul { padding-left: 20px; display: flex; flex-direction: column; gap: 6px; margin: 6px 0; }
+  .fields { width: 100%; border-collapse: collapse; margin-top: 18px; }
+  .fields th, .fields td { text-align: left; vertical-align: top; padding: 14px 0; border-top: 1px solid var(--border); }
+  .fields th { width: 190px; padding-right: 16px; font-family: var(--display); font-weight: 600; color: var(--text); font-size: 0.98rem; }
+  .fields td p { margin: 0 0 6px; }
+  @media (max-width: 640px) { .fields th, .fields td { display: block; width: auto; } .fields td { border-top: 0; padding-top: 0; } }

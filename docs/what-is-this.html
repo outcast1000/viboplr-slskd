@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>What is this? · Viboplr Soulseek plugin</title>
+<meta name="description" content="What the Viboplr Soulseek plugin does, what slskd is, why you run it yourself, and what you need before it works.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand"><span class="gradient-text">Viboplr</span> · Soulseek plugin</div>
+    <nav class="nav"><a href="what-is-this.html" aria-current="page">What is this?</a><a href="index.html" id="nav-setup">Set up slskd</a></nav>
+    <h1>What is this?</h1>
+    <p class="lead">The Soulseek plugin lets you search the Soulseek network and download from it inside Viboplr. It needs one thing you don't have yet: a small program called <strong>slskd</strong>, running on your computer.</p>
+  </header>
+
+  <div class="prose">
+    <h2>Soulseek, in one paragraph</h2>
+    <p>Soulseek is a music-sharing network that has been running since 2001. People share folders from their own collections and download directly from each other; it is where you find the live recording, the out-of-print pressing, the demo that never made it to streaming. There is no catalogue and no company in the middle — just other listeners.</p>
+
+    <h2>Why there is a second program</h2>
+    <p>Soulseek speaks its own protocol, not the web's. Viboplr's plugins are deliberately kept to plain web requests so a plugin can never reach into your machine, which means Viboplr can't talk to Soulseek directly. <a href="https://github.com/slskd/slskd" target="_blank" rel="noopener">slskd</a> is a free, open-source Soulseek client that runs quietly in the background and offers a local web interface. The plugin talks to that. slskd does the Soulseek part; Viboplr does the music part.</p>
+
+    <h2>Why you install it, not Viboplr</h2>
+    <p>slskd is your program: its settings, its downloads folder, its connection to the network, and the account you sign in with are all yours. Viboplr never downloads, installs or launches it, and never touches its configuration. The <a href="index.html" id="setup-link">setup guide</a> walks you through doing it yourself — it takes about ten minutes — and once it is running the plugin connects to it over a key that only the two of them know.</p>
+
+    <h2>What the plugin does once it's connected</h2>
+    <ul>
+      <li><strong>Search</strong> the network from Viboplr. Results are ranked by quality first (lossless, then bitrate) and then by who can actually send soonest.</li>
+      <li><strong>Grab whole folders</strong> — most people share complete albums, so one click queues the album.</li>
+      <li><strong>Right-click → Search on Soulseek</strong> on any track, album or artist in your library.</li>
+      <li><strong>Watch downloads</strong> with progress and your place in the other user's queue; retry or pick another source when one fails.</li>
+      <li><strong>Play finished files</strong> straight away, and get them into your library — automatically if slskd's downloads folder sits inside one of your collections, or with one click otherwise.</li>
+    </ul>
+
+    <h2>What you need</h2>
+    <ul>
+      <li><strong>slskd</strong>, installed and running — the setup guide covers Windows, macOS and Docker.</li>
+      <li><strong>A Soulseek account</strong>. You pick a username and password when you first sign in; there is no registration form. Put them in slskd's settings, as the guide shows.</li>
+      <li><strong>Something to share</strong>, ideally. Soulseek is give-and-take: users who share nothing are often refused or queued last. Sharing what you downloaded through Soulseek is the usual, polite minimum.</li>
+    </ul>
+
+    <h2>Good to know</h2>
+    <ul>
+      <li>Downloads come from other people's computers, so speed and availability depend on them. A file can sit in someone's queue for a while.</li>
+      <li>slskd keeps running after you quit Viboplr, which is what lets a long download finish on its own. Stop it from its own window or from the login item the guide sets up, whenever you like.</li>
+      <li>What you share and download on Soulseek is your responsibility. slskd and this plugin are tools; neither Viboplr nor the plugin publish, host or select any content.</li>
+    </ul>
+  </div>
+
+  <div class="cta">
+    <a class="btn" href="index.html" id="setup-btn">Set up slskd</a>
+    <a class="btn secondary" href="https://github.com/outcast1000/viboplr-slskd" target="_blank" rel="noopener">Plugin source</a>
+  </div>
+
+  <footer>
+    slskd is a separate open-source project: <a href="https://github.com/slskd/slskd" target="_blank" rel="noopener">github.com/slskd/slskd</a>. Soulseek is a network run by <a href="https://www.slsknet.org/" target="_blank" rel="noopener">slsknet.org</a>; neither is affiliated with Viboplr.
+  </footer>
+</div>
+<script>
+// The plugin puts your API key in the URL fragment so the setup page can fill
+// it into the config snippet. Carry it along to every link into that page.
+(function () {
+  if (!location.hash) return;
+  ["nav-setup", "setup-link", "setup-btn"].forEach(function (id) {
+    var a = document.getElementById(id);
+    if (a) a.href = "index.html" + location.hash;
+  });
+})();
+</script>
+</body>
+</html>

@@ -22,11 +22,14 @@ test("the guide URL carries the key in the fragment, never the query", () => {
   assert.ok(plugin._setupGuideUrl("a&b=c").endsWith("#key=a%26b%3Dc"));
 });
 
-test("the setup block offers the guide, connect and a new key, and shows the key", () => {
-  const b = plugin._setupBlock("k".repeat(40));
-  assert.equal(b.type, "section");
-  const bar = b.children.find((c) => c.type === "toolbar");
-  assert.deepEqual(bar.buttons.map((x) => x.action), ["setup-open-guide", "setup-connect", "setup-new-key"]);
-  assert.ok(bar.status.includes("k".repeat(40)));
+test("the about page URL carries the key the same way", () => {
+  assert.equal(plugin._whatIsThisUrl("abc"), "https://outcast1000.github.io/viboplr-slskd/what-is-this.html#key=abc");
+});
+
+test("the setup bar is two buttons: the guide and connect", () => {
+  const bar = plugin._setupBar();
+  assert.equal(bar.type, "toolbar");
+  assert.deepEqual(bar.buttons.map((x) => x.action), ["setup-open-about", "setup-connect"]);
+  assert.equal(bar.buttons[0].label, "What is this?");
   assert.equal(bar.buttons[1].label, "Connect to http://localhost:5030");
 });

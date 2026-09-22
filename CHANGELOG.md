@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.3.1
+
+- **A quieter empty view.** While slskd isn't connected the view is one line
+  and two buttons — **What is this?** and **Connect** —
+  above the unchanged Connection section. The paragraph, the visible API key
+  and the "Generate a new key" button are gone; the key still travels to the
+  guide page in the URL, and the Connection section's API key field can be
+  edited as before.
+- **"What is this?" is its own page** (`docs/what-is-this.html`): what Soulseek
+  and slskd are, why you install slskd yourself, what the plugin does once
+  connected, what you need, and what to expect — leading on to the setup guide
+  with the key carried along. The two pages share `docs/style.css`.
+- **The setup page explains the Connection fields** — the address (same
+  computer vs. a NAS / server / Docker on another machine, http vs https), the
+  API key, the "slskd runs on this computer" toggle and what it changes for
+  finished downloads, a Docker-elsewhere checklist (port reachability, sharing
+  the downloads folder back), and what each status line means.
+
 ## 0.3.0
 
 **A real setup guide.** Installing slskd — especially on Windows, where it is a
