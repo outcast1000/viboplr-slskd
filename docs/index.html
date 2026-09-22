@@ -49,8 +49,11 @@
       </li>
       <li>
         <h2>Configure</h2>
-        <p>Paste <code>%LOCALAPPDATA%\slskd\slskd.yml</code> into the Explorer address bar, or open it from Notepad. Add the lines below (indentation matters — two spaces per level). Replace the two <span class="placeholder">Soulseek placeholders</span> with your own account; the key is already yours. If the file already has an uncommented <code>soulseek:</code> or <code>web:</code> section, add the lines inside it instead of repeating the heading.</p>
-        <div class="snippet"><pre data-yml></pre><button class="copy" data-copy>Copy</button></div>
+        <p>Paste <code>%LOCALAPPDATA%\slskd\slskd.yml</code> into the Explorer address bar, or open it from Notepad. Add the lines below (indentation matters — two spaces per level). Replace the two <span class="placeholder">Soulseek placeholders</span> with your own account; the key is already yours. If the file already has an uncommented <code>soulseek:</code>, <code>shares:</code> or <code>web:</code> section, add the lines inside it instead of repeating the heading.</p>
+        <p><strong>Shared folders.</strong> Soulseek is a sharing network, and many users won't send files to someone who shares nothing. Tick the folders to share; the config below follows. Other users can only download from them, never change them. slskd scans them at every start, so a large library takes a few minutes the first time.</p>
+        <div class="shares" data-shares data-placeholder="D:\Music"></div>
+        <p><strong>HTTPS off.</strong> The last two lines switch off slskd's built-in HTTPS, which has a bug on Windows. The plugin talks to slskd over plain <code>http</code> on this computer, so nothing is lost.</p>
+        <div class="snippet"><pre data-yml="windows"></pre><button class="copy" data-copy>Copy</button></div>
       </li>
       <li>
         <h2>Start it again</h2>
@@ -90,8 +93,10 @@ chmod +x ~/slskd/slskd
       </li>
       <li>
         <h2>Configure</h2>
-        <p><code>open -e ~/.local/share/slskd/slskd.yml</code> opens the file in TextEdit. Add the lines below (indentation matters — two spaces per level). Replace the two <span class="placeholder">Soulseek placeholders</span> with your own account; the key is already yours. If the file already has an uncommented <code>soulseek:</code> or <code>web:</code> section, add the lines inside it instead of repeating the heading.</p>
-        <div class="snippet"><pre data-yml></pre><button class="copy" data-copy>Copy</button></div>
+        <p><code>open -e ~/.local/share/slskd/slskd.yml</code> opens the file in TextEdit. Add the lines below (indentation matters — two spaces per level). Replace the two <span class="placeholder">Soulseek placeholders</span> with your own account; the key is already yours. If the file already has an uncommented <code>soulseek:</code>, <code>shares:</code> or <code>web:</code> section, add the lines inside it instead of repeating the heading.</p>
+        <p><strong>Shared folders.</strong> Soulseek is a sharing network, and many users won't send files to someone who shares nothing. Tick the folders to share; the config below follows. Other users can only download from them, never change them. slskd scans them at every start, so a large library takes a few minutes the first time.</p>
+        <div class="shares" data-shares data-placeholder="/Users/you/Music"></div>
+        <div class="snippet"><pre data-yml="macos"></pre><button class="copy" data-copy>Copy</button></div>
       </li>
       <li>
         <h2>Start it again</h2>
@@ -125,18 +130,19 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.slskd.plist</pre><bu
     <ol class="steps">
       <li>
         <h2>Start the container</h2>
-        <p>One command, on the machine that will run it. slskd's settings and downloads are kept in <code>~/slskd</code> on the host.</p>
+        <p>One command, on the machine that will run it. slskd's settings and downloads are kept in <code>~/slskd</code> on the host. <code>~/Music</code> is the folder you share with other Soulseek users — change it to where your music lives. The container sees it as <code>/music</code>, read-only, and that is the path the config below shares.</p>
         <div class="snippet"><pre>mkdir -p ~/slskd
 docker run -d --name slskd --restart unless-stopped \
   -p 5030:5030 -p 50300:50300 \
   -v ~/slskd:/app \
+  -v ~/Music:/music:ro \
   --user $(id -u):$(id -g) \
   slskd/slskd:latest</pre><button class="copy" data-copy>Copy</button></div>
       </li>
       <li>
         <h2>Configure</h2>
-        <p>The first start creates <code>~/slskd/slskd.yml</code>. Add the lines below (indentation matters — two spaces per level). Replace the two <span class="placeholder">Soulseek placeholders</span> with your own account; the key is already yours. If the file already has an uncommented <code>soulseek:</code> or <code>web:</code> section, add the lines inside it instead of repeating the heading. Then <code>docker restart slskd</code>.</p>
-        <div class="snippet"><pre data-yml></pre><button class="copy" data-copy>Copy</button></div>
+        <p>The first start creates <code>~/slskd/slskd.yml</code>. Add the lines below (indentation matters — two spaces per level). Replace the two <span class="placeholder">Soulseek placeholders</span> with your own account; the key is already yours. If the file already has an uncommented <code>soulseek:</code>, <code>shares:</code> or <code>web:</code> section, add the lines inside it instead of repeating the heading. Then <code>docker restart slskd</code>.</p>
+        <div class="snippet"><pre data-yml="docker"></pre><button class="copy" data-copy>Copy</button></div>
       </li>
       <li>
         <h2>Connect</h2>
@@ -159,7 +165,7 @@ docker run -d --name slskd --restart unless-stopped \
           <ul>
             <li><strong>Same computer</strong> (the Windows and macOS guides above, or Docker on this machine): <code>http://localhost:5030</code>. The <strong>Connect</strong> button fills this in for you.</li>
             <li><strong>Another machine</strong> — Docker on a NAS, a home server, a Raspberry Pi: that machine's name or IP and the port, for example <code>http://nas.local:5030</code> or <code>http://192.168.1.20:5030</code>. It must be reachable from the computer running Viboplr — if you can open the address in a browser there and see slskd's login page, the plugin can reach it too.</li>
-            <li><strong>HTTPS</strong>: slskd also serves <code>https://…:5031</code> with a self-signed certificate. If you point the plugin at that, turn on <strong>Allow self-signed certificate</strong>; plain <code>http</code> on a home network is fine and simpler.</li>
+            <li><strong>HTTPS</strong>: slskd also serves <code>https://…:5031</code> with a self-signed certificate (not on Windows, where the config above switches it off). If you point the plugin at that, turn on <strong>Allow self-signed certificate</strong>; plain <code>http</code> on a home network is fine and simpler.</li>
           </ul>
         </td>
       </tr>
@@ -221,29 +227,97 @@ docker run -d --name slskd --restart unless-stopped \
     (window.crypto || window.msCrypto).getRandomValues(bytes);
     return Array.prototype.map.call(bytes, function (b) { return ("0" + b.toString(16)).slice(-2); }).join("");
   }
-  function ymlFor(key) {
-    return [
+  // Single-quoted YAML: backslashes stay literal (Windows paths), and a quote
+  // is escaped by doubling it.
+  function yamlQuote(s) { return "'" + String(s).replace(/'/g, "''") + "'"; }
+  // Per tab: Docker shares the /music mount its run command sets up; Windows
+  // also switches off slskd's HTTPS, which has a bug there.
+  function ymlFor(key, os) {
+    var dirs = os === "docker" ? ["/music"] : shares.filter(function (s) { return s.on; }).map(function (s) { return yamlQuote(s.path); });
+    var lines = [
       "soulseek:",
       "  username: YOUR_SOULSEEK_USERNAME",
-      "  password: YOUR_SOULSEEK_PASSWORD",
+      "  password: YOUR_SOULSEEK_PASSWORD"
+    ];
+    if (dirs.length) {
+      lines.push("shares:", "  directories:");
+      dirs.forEach(function (d) { lines.push("    - " + d); });
+    }
+    lines.push(
       "web:",
       "  authentication:",
       "    api_keys:",
       "      viboplr:",
       "        key: " + key,
       "        role: readwrite"
-    ].join("\n");
+    );
+    if (os === "windows") lines.push("  https:", "    disabled: true");
+    return lines.join("\n");
   }
   var params = fragmentParams();
   var key = /^[A-Za-z0-9_-]{16,255}$/.test(params.key || "") ? params.key : null;
   var fromPlugin = !!key;
   if (!key) key = randomKey();
 
+  // --- Shared folders: the plugin's local collections (#share=, one path per
+  // line), ticked by default; more can be typed in. One list for every tab.
+  var shares = (params.share || "").split("\n").filter(Boolean).map(function (p) { return { path: p, on: true, fromPlugin: true }; });
+
+  function renderYml() {
+    document.querySelectorAll("pre[data-yml]").forEach(function (pre) { pre.textContent = ymlFor(key, pre.dataset.yml); });
+  }
+  function el(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text != null) n.textContent = text;
+    return n;
+  }
+  function renderShares() {
+    document.querySelectorAll("[data-shares]").forEach(function (box) {
+      box.textContent = "";
+      shares.forEach(function (s) {
+        var label = el("label", "share");
+        var cb = el("input");
+        cb.type = "checkbox";
+        cb.checked = s.on;
+        cb.addEventListener("change", function () { s.on = cb.checked; renderShares(); renderYml(); });
+        label.appendChild(cb);
+        label.appendChild(el("code", null, s.path));
+        if (s.fromPlugin) label.appendChild(el("span", "share-tag", "Viboplr collection"));
+        box.appendChild(label);
+      });
+      var add = el("form", "share-add");
+      var input = el("input");
+      input.type = "text";
+      input.placeholder = box.dataset.placeholder || "";
+      input.setAttribute("aria-label", "Folder to share");
+      var btn = el("button", "btn secondary", "Add folder");
+      btn.type = "submit";
+      add.appendChild(input);
+      add.appendChild(btn);
+      add.addEventListener("submit", function (e) {
+        e.preventDefault();
+        var p = input.value.trim();
+        if (!p) return;
+        var existing = shares.filter(function (s) { return s.path === p; })[0];
+        if (existing) existing.on = true; else shares.push({ path: p, on: true, fromPlugin: false });
+        renderShares();
+        renderYml();
+      });
+      box.appendChild(add);
+      var note = shares.length
+        ? (shares.some(function (s) { return s.on; }) ? "" : "Nothing ticked: the config shares nothing.")
+        : (fromPlugin ? "You have no local collections in Viboplr yet. Type a folder to share." : "Open this page from the plugin to list your Viboplr collections here, or type a folder to share.");
+      if (note) box.appendChild(el("p", "small", note));
+    });
+  }
+
   function applyKey(k) {
     key = k;
     document.getElementById("key").textContent = k;
-    document.querySelectorAll("pre[data-yml]").forEach(function (pre) { pre.textContent = ymlFor(k); });
+    renderYml();
   }
+  renderShares();
   applyKey(key);
   if (!fromPlugin) {
     document.getElementById("keysource").textContent = "Every Soulseek plugin install uses its own key; slskd must be given the same one.";

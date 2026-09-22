@@ -42,6 +42,15 @@
   .btn { display: inline-block; font: inherit; font-family: var(--display); font-weight: 600; color: #fff; background: var(--gradient); border: 0; border-radius: 999px; padding: 10px 18px; text-decoration: none; cursor: pointer; }
   .btn.secondary { background: none; color: var(--text); border: 1px solid var(--border); }
   .small { font-size: 0.85rem; color: var(--light); }
+  .shares { display: flex; flex-direction: column; gap: 6px; margin: 4px 0 14px; padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-alt); }
+  .share { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; cursor: pointer; }
+  .share input { accent-color: var(--accent-end); width: 16px; height: 16px; flex: none; }
+  .share code { word-break: break-all; background: var(--bg); }
+  .share-tag { font-size: 0.75rem; color: var(--light); }
+  .share-add { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+  .share-add input { flex: 1 1 200px; min-width: 0; font: inherit; font-family: var(--mono); font-size: 0.85rem; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 7px 10px; }
+  .share-add .btn { padding: 7px 14px; }
+  .shares .small { margin: 0; }
   footer { margin-top: 48px; padding-top: 20px; border-top: 1px solid var(--border); color: var(--light); font-size: 0.85rem; }
   .placeholder { color: var(--accent-end); font-weight: 600; }
 

@@ -108,8 +108,11 @@ test("matchLabel and fallbackTotals read the way the tab shows them", () => {
 // successive polls, and a Files API that lists the finished file.
 function fallbackHost(opts) {
   const o = opts || {};
-  const calls = { batches: [], deletes: [], searches: 0 };
+  const calls = { batches: [], deletes: [], searches: 0, stops: 0 };
   let transferPolls = 0;
+  // `slowSearch`: a popular query slskd keeps collecting for (its timeout is
+  // an inactivity one) — InProgress until stopped, bodies only after the stop.
+  let stopped = false;
   let batch = null;
   const states = o.states || ["Queued, Remotely", "InProgress", "Completed, Succeeded"];
   const file = { filename: "Music\\Radiohead\\OK Computer\\03 - Karma Police.mp3", size: 9000000, length: 264, bitRate: 320 };
@@ -119,7 +122,9 @@ function fallbackHost(opts) {
       const json = (v, status) => ({ status: status || 200, text: async () => JSON.stringify(v) });
       const method = (init && init.method) || "GET";
       if (url.includes("/api/v0/searches") && method === "POST") { calls.searches++; return json({ id: "s1" }); }
+      if (url.includes("/api/v0/searches/s1") && method === "PUT") { calls.stops++; stopped = true; return json({}); }
       if (url.includes("/responses")) {
+        if (o.slowSearch && !stopped) return json([]);
         return json([
           { username: "peer", hasFreeUploadSlot: true, queueLength: 0, uploadSpeed: 2000000, files: [file,
             { filename: "Music\\Radiohead\\OK Computer\\02 - Paranoid Android.mp3", size: 9500000, length: 383, bitRate: 320 }] },
@@ -127,7 +132,10 @@ function fallbackHost(opts) {
             { filename: "Radiohead - Karma Police.mp3", size: 8000000, length: 264, bitRate: 192 }] }
         ]);
       }
-      if (url.includes("/api/v0/searches/s1")) return json({ id: "s1", state: "Completed, ResponseLimitReached", responseCount: 2, fileCount: 3 });
+      if (url.includes("/api/v0/searches/s1")) {
+        if (o.slowSearch && !stopped) return json({ id: "s1", state: "InProgress", responseCount: 2, fileCount: 3 });
+        return json({ id: "s1", state: o.slowSearch ? "Completed, Cancelled" : "Completed, ResponseLimitReached", responseCount: 2, fileCount: 3 });
+      }
       if (url.includes("/api/v0/transfers/downloads/batches") && method === "POST") {
         batch = JSON.parse(init.body);
         calls.batches.push(batch);
@@ -198,6 +206,92 @@ test("a track with no source is searched, fetched into the fallback folder, loca
     const again = await resolve("karma police", "radiohead", null, null, {});
     assert.equal(again.url, out.url);
     assert.equal(calls.searches, 1, "no second search for a song already fetched");
+  } finally {
+    plugin.deactivate();
+  }
+});
+
+test("a search slskd is still running at the fallback's deadline is stopped and its responses used, not discarded", async () => {
+  const plugin = loadPlugin();
+  plugin._setFallbackSearchMs(1500);
+  const { h, calls } = fallbackHost({ slowSearch: true });
+  await plugin.activate(h.api);
+  try {
+    const out = await h.resolvers["meta:" + plugin._FALLBACK_ID]("Karma Police", "Radiohead", null, 264, {});
+    assert.ok(out, "resolved from the responses collected before the deadline");
+    assert.equal(calls.stops, 1, "the search was stopped so slskd's one search slot frees up");
+    assert.equal(calls.batches.length, 1);
+    assert.equal(calls.batches[0].username, "peer");
+  } finally {
+    plugin.deactivate();
+  }
+});
+
+test("the Fallback tab is a read-out — picked file, matches as text, no lists to act on — and kept files live under Downloads", async () => {
+  const plugin = loadPlugin();
+  const { h } = fallbackHost();
+  await plugin.activate(h.api);
+  try {
+    await h.resolvers["meta:" + plugin._FALLBACK_ID]("Karma Police", "Radiohead", null, 264, {});
+    const lastView = () => h.calls.views[h.calls.views.length - 1].data;
+    const nodes = (n, out = []) => {
+      if (!n || typeof n !== "object") return out;
+      out.push(n);
+      for (const k of ["children", "items"]) if (Array.isArray(n[k])) n[k].forEach((c) => nodes(c, out));
+      return out;
+    };
+
+    h.actions["main-tab"]({ tabId: "fallback" });
+    const fb = nodes(lastView());
+    assert.ok(!fb.some((n) => n.type === "track-row-list"), "no row list: no artwork, no row actions");
+    const texts = fb.filter((n) => n.type === "text").map((n) => n.content);
+    assert.ok(texts.some((t) => /^Picked: 03 - Karma Police\.mp3 {2}— {2}played$/.test(t)), "the picked file and what became of it: " + texts.join(" | "));
+    assert.ok(texts.some((t) => t.startsWith("✓ ") && t.includes("03 - Karma Police.mp3")), "the played candidate is marked");
+    assert.ok(!texts.some((t) => /Kept files|Delete all/.test(t)));
+
+    h.actions["main-tab"]({ tabId: "transfers" });
+    const dl = nodes(lastView());
+    assert.ok(dl.some((n) => n.type === "toolbar" && n.title === "Fetched by the playback fallback"));
+    const kept = dl.filter((n) => n.type === "track-row-list").pop();
+    assert.deepEqual(kept.actions.map((a) => a.id), ["play-kept", "import-kept", "delete-kept"]);
+  } finally {
+    plugin.deactivate();
+  }
+});
+
+test("a sharer slskd can't reach is removed from slskd's list, not left behind as Failed", async () => {
+  const plugin = loadPlugin();
+  const removed = [];
+  let errored = null;
+  const file = "Music\\Radiohead\\OK Computer\\03 - Karma Police.mp3";
+  const h = require("./harness/host.js").fakeHost({
+    fetch: async (url, init) => {
+      const json = (v, status) => ({ status: status || 200, text: async () => JSON.stringify(v) });
+      const method = (init && init.method) || "GET";
+      if (url.includes("/api/v0/searches") && method === "POST") return json({ id: "s1" });
+      if (url.includes("/responses")) return json([{ username: "unreachable", hasFreeUploadSlot: true, queueLength: 0, uploadSpeed: 1, files: [{ filename: file, size: 9000000, length: 264, bitRate: 320 }] }]);
+      if (url.includes("/api/v0/searches/s1")) return json({ id: "s1", state: "Completed", responseCount: 1, fileCount: 1 });
+      if (url.includes("/api/v0/transfers/downloads/batches") && method === "POST") {
+        // slskd records the attempt, then answers with the connection error.
+        errored = { id: "t9", username: "unreachable", filename: file, size: 9000000, state: "Completed, Errored" };
+        return json("Failed to connect to user unreachable", 500);
+      }
+      if (url.endsWith("/api/v0/transfers/downloads") && method === "GET") {
+        return json(errored ? [{ username: "unreachable", directories: [{ files: [errored] }] }] : []);
+      }
+      if (url.includes("/api/v0/transfers/downloads/unreachable/t9") && method === "DELETE") {
+        removed.push(url);
+        errored = null;
+        return { status: 204, text: async () => "" };
+      }
+      return undefined;
+    }
+  });
+  await plugin.activate(h.api);
+  try {
+    assert.equal(await h.resolvers["meta:" + plugin._FALLBACK_ID]("Karma Police", "Radiohead", null, 264, {}), null);
+    assert.equal(removed.length, 1, "the failed attempt was removed");
+    assert.ok(removed[0].endsWith("?remove=true"));
   } finally {
     plugin.deactivate();
   }

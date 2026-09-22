@@ -140,7 +140,7 @@ var completionsSeeded = false;
 var tagsPending = {};     // resolvedPath -> in-flight readAudioTags promise
 // Files the playback fallback fetched, keyed by normalized song identity
 // (`fallbackKey`) → { ref (tracked key), title, artist, query, at, size, state:
-// "pending" | "kept", path, lastUsedAt }. Persisted; the Fallback tab lists and
+// "pending" | "kept", path, lastUsedAt }. Persisted; the Downloads tab lists and
 // deletes exactly these.
 var fallback = {};
 
@@ -1187,6 +1187,16 @@ function sleep(ms) {
 // counts stream live (SearchService.cs:296-300) while response BODIES land only
 // at completion (:311, :361), so a caller can show a real counter meanwhile.
 //
+// `until` (optional, epoch ms) is a deadline that means "answer by then with
+// whatever has arrived" — NOT staleness. slskd's search timeout is an
+// *inactivity* timeout, so a popular query keeps collecting responses for 35-40s;
+// a caller on a budget (the playback fallback) must cut it short and still get
+// the responses, which a stale predicate would throw away. The cut is the same
+// as the SEARCH_CAP_MS one: stop the search (so its bodies land) and rank what
+// slskd holds. A result cut short carries `partial: true`. Resolves `null`
+// without searching when the deadline passed while this search sat queued
+// behind another in `searchChain`.
+//
 // THE POLL IS DELIBERATELY LEAN. `?includeResponses=true` was on every poll,
 // which is why a broad search was so expensive: measured against slskd 0.26.0,
 // the counts-only body is ~254 bytes while the same search's bodies are 2.6 MB,
@@ -1196,17 +1206,24 @@ function sleep(ms) {
 //
 // Serialized through `searchChain`: slskd holds a one-slot semaphore on
 // POST /searches and answers 429 to a second caller, so two searches (the view
-// and an assistant tool, say) must queue rather than collide.
-function performSearch(query, prefs, onProgress, isStale) {
-  var run = function () { return performSearchNow(query, prefs, onProgress, isStale); };
+// and an assistant tool, say) must queue rather than collide. For the same
+// reason a search nobody wants any more is stopped, not just abandoned — left
+// running it would hold that slot for the next caller's whole search.
+function performSearch(query, prefs, onProgress, isStale, until) {
+  var run = function () { return performSearchNow(query, prefs, onProgress, isStale, until); };
   var next = searchChain.then(run, run);
   searchChain = next.catch(function () { /* keep the chain alive for the next caller */ });
   return next;
 }
 
-async function performSearchNow(query, prefs, onProgress, isStale) {
+async function performSearchNow(query, prefs, onProgress, isStale, until) {
   var stale = isStale || function () { return false; };
   if (stale()) return null;
+  var capAt = Date.now() + SEARCH_CAP_MS;
+  if (until != null) {
+    if (Date.now() >= until) return null;
+    capAt = Math.min(capAt, until);
+  }
 
   var res;
   try {
@@ -1219,13 +1236,12 @@ async function performSearchNow(query, prefs, onProgress, isStale) {
     throw new Error(errorText(res, "slskd rejected the search (HTTP " + res.status + ")."));
   }
   var id = res.json.id;
+  var startedAt = Date.now();
 
-  var waited = 0;
   var last = null;
-  while (waited < SEARCH_CAP_MS) {
-    await sleep(SEARCH_POLL_MS);
-    if (stale()) return null;
-    waited += SEARCH_POLL_MS;
+  while (Date.now() < capAt) {
+    await sleep(Math.max(0, Math.min(SEARCH_POLL_MS, capAt - Date.now())));
+    if (stale()) { await stopSearch(id); return null; }
 
     var poll;
     try {
@@ -1233,7 +1249,7 @@ async function performSearchNow(query, prefs, onProgress, isStale) {
     } catch (e) {
       continue;
     }
-    if (stale()) return null;
+    if (stale()) { await stopSearch(id); return null; }
     if (!poll.json) continue;
     last = poll.json;
 
@@ -1245,14 +1261,27 @@ async function performSearchNow(query, prefs, onProgress, isStale) {
     }
   }
 
-  // Past the cap: whatever slskd holds now is the answer. Stop the search so
-  // its slot frees up for the next one, but don't wait on that.
-  slskd("PUT", "/api/v0/searches/" + encodeURIComponent(id))
-    .catch(function (e) { console.error("slskd: couldn't stop a timed-out search:", e); });
+  // Past the cap: whatever slskd holds now is the answer. Stop the search first
+  // — that is what makes its response bodies land — then read them.
+  await stopSearch(id);
   var partial = await fetchResponses(id, stale);
   if (partial === null) return null;
-  if (partial.length) return rankResults(partial, prefs || {});
-  throw new Error("Search timed out after " + Math.round(SEARCH_CAP_MS / 1000) + " seconds.");
+  if (partial.length) {
+    var ranked = rankResults(partial, prefs || {});
+    ranked.partial = true;
+    return ranked;
+  }
+  throw new Error("Search timed out after " + Math.round((Date.now() - startedAt) / 1000) + " seconds.");
+}
+
+// Stop a search slskd is still running (PUT /searches/{id}). Best-effort: a
+// failure only means the search runs to its own timeout.
+async function stopSearch(id) {
+  try {
+    await slskd("PUT", "/api/v0/searches/" + encodeURIComponent(id));
+  } catch (e) {
+    console.error("slskd: couldn't stop a search:", e);
+  }
 }
 
 // The one heavy read of a search: its response bodies, fetched after the search
@@ -1658,7 +1687,7 @@ function findTrackedByRef(ref) {
 // downloading and answers the NEXT request for the same song instantly.
 //
 // Every file fetched this way is remembered in `fallback` (keyed by the
-// normalized song identity), which is what lets the Fallback tab list and
+// normalized song identity), which is what lets the Downloads tab list and
 // delete exactly these files and none of the user's own downloads.
 var lastResolve = null;     // the most recent fallback attempt, for the Fallback tab (session only)
 var fallbackBusy = false;
@@ -1668,7 +1697,7 @@ function nowMs() { return Date.now(); }
 function startResolveRecord(title, artist, durationSecs, query) {
   lastResolve = {
     at: nowMs(), title: title, artist: artist || null, durationSecs: durationSecs != null ? durationSecs : null,
-    query: query, steps: [], candidates: [], chosen: null, tried: [], outcome: "running", message: null, path: null
+    query: query, steps: [], candidates: [], picked: null, chosen: null, tried: [], outcome: "running", message: null, path: null
   };
   renderIfFallback();
   return lastResolve;
@@ -1775,6 +1804,21 @@ async function dropStalled(t) {
   }
 }
 
+// A sharer slskd couldn't even reach ("Failed to connect to user …") fails the
+// enqueue, but slskd may still have recorded the attempt as a failed download.
+// Every other dropped attempt is removed (dropStalled), so this one must be
+// too, or it sits in the Downloads tab as "Failed" until removed by hand.
+async function dropIfListed(key) {
+  try {
+    transfers = (await fetchTransfers()) || transfers;
+  } catch (e) {
+    console.error("slskd: couldn't re-read transfers after a failed enqueue:", e);
+    return;
+  }
+  var t = transferByKey(key);
+  if (t) await dropStalled(t);
+}
+
 function fallbackAnswer(path) {
   return { url: fileUrlForPlayback(path), label: FALLBACK_LABEL };
 }
@@ -1845,22 +1889,24 @@ async function resolveFallback(title, artistName, albumName, durationSecs, opts)
     var settleSearch = resolveStep(rec, "search Soulseek for “" + query + "”");
     var ranked;
     try {
-      ranked = await performSearch(query, viewPrefs({ knownDurationSecs: durationSecs }), null,
-        function () { return nowMs() > searchDeadline; });
+      // A deadline, not a stale check: at it the search is stopped and what
+      // slskd collected so far is ranked, rather than thrown away.
+      ranked = await performSearch(query, viewPrefs({ knownDurationSecs: durationSecs }), null, null, searchDeadline);
     } catch (e) {
       settleSearch((e && e.message) || String(e), "error");
       finishResolve(rec, "failed", (e && e.message) || "search failed");
       return null;
     }
     if (ranked === null) {
-      settleSearch("no answer within " + Math.round(FALLBACK_SEARCH_MS / 1000) + "s", "warn");
-      finishResolve(rec, "no-match", "Soulseek did not answer in time");
+      settleSearch("another search held slskd until the time ran out", "warn");
+      finishResolve(rec, "no-match", "slskd was busy with another search");
       return null;
     }
     var preferred = parsePreferredFormats(settings.preferredFormats);
     var matches = rankFallback(ranked, title, artistName, preferred);
     rec.candidates = matches.slice(0, FALLBACK_VIEW_CANDIDATES);
-    settleSearch(ranked.length + " downloadable file" + (ranked.length === 1 ? "" : "s") + ", " + matches.length + " that match", matches.length ? "info" : "warn");
+    settleSearch(ranked.length + " downloadable file" + (ranked.length === 1 ? "" : "s") + ", " + matches.length + " that match" +
+      (ranked.partial ? " (cut at " + Math.round(FALLBACK_SEARCH_MS / 1000) + "s while slskd was still searching)" : ""), matches.length ? "info" : "warn");
     if (!matches.length) {
       finishResolve(rec, "no-match", ranked.length ? "nothing on Soulseek matched the title and artist closely enough" : "nothing on Soulseek matched");
       return null;
@@ -1880,12 +1926,16 @@ async function resolveFallback(title, artistName, albumName, durationSecs, opts)
         var out = await enqueueBatch(c.username, [c], (artistName ? artistName + " - " : "") + title, FALLBACK_SUBDIR);
         if (!out.queued.length) {
           settleFetch("slskd refused it" + (out.failures[0] && out.failures[0].message ? " — " + out.failures[0].message : ""), "warn");
+          await dropIfListed(key);
           continue;
         }
       } catch (e) {
         settleFetch((e && e.message) || String(e), "error");
+        await dropIfListed(key);
         continue;
       }
+      rec.picked = c;
+      renderIfFallback();
       var trackedRec = tracked[key];
       if (trackedRec) trackedRec.fallback = true;
       fallback[fkey] = { ref: key, title: title, artist: artistName || null, query: query, at: nowMs(), size: c.size || null, state: "pending", path: null };
@@ -2026,11 +2076,26 @@ function randomApiKey() {
 // The key rides in the fragment so the setup page can fill it into the yml
 // snippet without it ever reaching GitHub's servers. The about page carries
 // the fragment along to the setup page.
-function setupGuideUrl(apiKey) {
-  return SETUP_GUIDE_URL + "#key=" + encodeURIComponent(apiKey || "");
+//
+// `collections` (the host's local collections) ride along the same way, as
+// `share=` — newline-joined paths — so the guide can offer them as the shared
+// folders to pick from. Same fragment rule: the paths reach the page's own
+// script and never a server.
+function guideFragment(apiKey, collections) {
+  var out = "#key=" + encodeURIComponent(apiKey || "");
+  var paths = [];
+  for (var i = 0; collections && i < collections.length; i++) {
+    var p = collections[i] && collections[i].path;
+    if (p && paths.indexOf(p) < 0) paths.push(p);
+  }
+  if (paths.length) out += "&share=" + encodeURIComponent(paths.join("\n"));
+  return out;
 }
-function whatIsThisUrl(apiKey) {
-  return WHAT_IS_THIS_URL + "#key=" + encodeURIComponent(apiKey || "");
+function setupGuideUrl(apiKey, collections) {
+  return SETUP_GUIDE_URL + guideFragment(apiKey, collections);
+}
+function whatIsThisUrl(apiKey, collections) {
+  return WHAT_IS_THIS_URL + guideFragment(apiKey, collections);
 }
 
 // One line of buttons. "What is this?" opens the about page (what Soulseek and
@@ -2333,7 +2398,7 @@ function transfersTab() {
   var children = [];
   if (!transfers.length) {
     children.push({ type: "text", content: "No downloads yet.", className: "plugin-muted" });
-    return { type: "layout", direction: "vertical", children: children };
+    return { type: "layout", direction: "vertical", children: children.concat(keptSection()) };
   }
 
   if (tier === "remote") {
@@ -2375,36 +2440,66 @@ function transfersTab() {
       { id: "remove-transfer", label: "Remove", icon: "🗑" }
     ]
   });
-  return { type: "layout", direction: "vertical", children: children };
+  return { type: "layout", direction: "vertical", children: children.concat(keptSection()) };
 }
 
 
-// The Fallback tab: what the last automatic resolve did, step by step, and the
-// files kept from every resolve so far. Mirrors the yt-dlp plugin's "Last
-// resolve" panel, with the kept files alongside because they are the other
-// half of the same story — what the fallback fetched, and how to be rid of it.
-var FALLBACK_COLUMNS = [{ id: "match", label: "Match", width: 90, sortable: false }].concat(RESULT_COLUMNS);
+// The Fallback tab: what the last automatic resolve did, step by step — the
+// file it picked and every file it weighed. Mirrors the yt-dlp plugin's "Last
+// resolve" panel. The files it kept are listed under Downloads (keptSection),
+// with the rest of what slskd fetched.
+//
+// The facts of one candidate on one line: the Fallback tab is a read-out of
+// what the resolver saw and did, not a second search view, so its files are
+// text — no artwork, no row actions, nothing to click. (A track-row-list would
+// fetch cover art for every row and offer Download on each, which is the Search
+// tab's job.)
+function candidateFacts(c) {
+  var cells = resultCells(c);
+  var bits = [];
+  if (cells.quality) bits.push(cells.quality);
+  if (cells.size) bits.push(cells.size);
+  if (cells.duration) bits.push(cells.duration);
+  if (cells.availability) bits.push(cells.availability);
+  return bits.join(" · ");
+}
 
-function fallbackCandidateRows(rec) {
+function sameCandidate(a, b) {
+  return !!(a && b && a.username === b.username && a.filename === b.filename);
+}
+
+// ✓ played · ↓ downloading now · ✗ tried and dropped.
+function candidateMark(rec, c) {
+  if (sameCandidate(rec.chosen, c)) return rec.outcome === "played" ? "✓" : "↓";
+  if (rec.outcome === "running" && sameCandidate(rec.picked, c)) return "↓";
+  if (rec.tried.indexOf(c.username + KEY_SEP + c.filename) >= 0) return "✗";
+  return "  ";
+}
+
+function candidateLines(rec) {
   return rec.candidates.map(function (c) {
-    var key = c.username + KEY_SEP + c.filename;
-    var meta = parseTrackMeta(c.filename);
-    var chosen = rec.chosen && rec.chosen.username === c.username && rec.chosen.filename === c.filename;
-    var tried = rec.tried.indexOf(key) >= 0;
-    var cells = resultCells(c);
-    cells.match = matchLabel(c.match);
     return {
-      id: "f:" + key,
-      title: (chosen ? "✓ " : (tried ? "✗ " : "")) + resultLabel(c),
-      subtitle: resultSource(c),
-      cells: cells,
-      durationSecs: c.length != null ? c.length : null,
-      action: "download-file",
-      artistName: meta.artist,
-      albumTitle: meta.album,
-      kind: "audio"
+      type: "text",
+      className: "plugin-muted",
+      content: candidateMark(rec, c) + " " + matchLabel(c.match) + "  " + resultLabel(c) + "  ·  " + candidateFacts(c) + "  ·  " + resultSource(c)
     };
   });
+}
+
+// The file the resolver went for: the one it played, or the one it is (or was
+// last) downloading. Null before any download was started.
+function pickedLine(rec) {
+  var c = rec.chosen || rec.picked;
+  if (!c) return null;
+  var state;
+  if (rec.outcome === "played") state = "played";
+  else if (rec.outcome === "running") state = rec.progress != null ? "downloading " + Math.round(rec.progress * 100) + "%" : "waiting for the sharer";
+  else if (rec.outcome === "timeout" && rec.chosen) state = "still downloading — used next time";
+  else state = "dropped";
+  return [
+    { type: "text", content: "Picked: " + resultLabel(c) + "  —  " + state },
+    { type: "text", className: "plugin-muted", content: candidateFacts(c) + "  ·  " + resultSource(c) }
+  ];
 }
 
 function keptRows() {
@@ -2464,68 +2559,74 @@ function fallbackTab() {
   children.push({ type: "text", className: "plugin-muted",
     content: "When a track has no playable source of its own, Viboplr asks its fallback sources in turn. This one searches Soulseek for the song, " +
       "fetches the best match from a sharer with a free slot, and plays it once it lands — all within the minute the host allows. " +
-      "Turn it on or off, and order it against other sources, in Settings → Providers → Playback fallback." });
+      "Turn it on or off, and order it against other sources, in Settings → Providers → Playback fallback. The files it fetched are under Downloads." });
 
   children.push({ type: "toolbar", title: "Last resolve",
     buttons: lastResolve ? [{ label: "Clear", action: "clear-resolve", icon: "✕" }] : [] });
   if (!lastResolve) {
     children.push({ type: "text", className: "plugin-muted",
       content: "No fallback resolve yet this session. Play a track that has no source of its own — a library row whose file is gone, a track from a streaming plugin that can't reach it — and what happened appears here." });
-  } else {
-    var lr = lastResolve;
-    children.push({ type: "text", content: "“" + lr.title + "”" + (lr.artist ? " — " + lr.artist : "") +
-      (lr.durationSecs != null ? "  ·  " + formatDurationSecs(lr.durationSecs) : "") });
-    children.push({ type: "text", className: "plugin-muted", content: "Searched for “" + lr.query + "”" });
-    for (var i = 0; i < lr.steps.length; i++) {
-      var s = lr.steps[i];
-      var line = (i + 1) + ". " + s.label + (s.outcome ? " → " + s.outcome : "…") + (s.ms != null ? " (" + Math.round(s.ms / 100) / 10 + "s)" : "");
-      children.push({ type: "text", content: line, className: s.level === "error" ? "plugin-error" : "plugin-muted" });
-    }
-    if (lr.outcome === "running" && lr.progress != null) {
-      children.push({ type: "progress-bar", value: Math.round(lr.progress * 100), max: 100, label: "Downloading " + Math.round(lr.progress * 100) + "%" });
-    } else if (lr.outcome === "running") {
-      children.push({ type: "loading", message: "Working…" });
-    }
-    children.push({ type: "text", content: outcomeLine(lr), className: lr.outcome === "failed" ? "plugin-error" : undefined });
-    if (lr.candidates.length) {
-      children.push({ type: "text", className: "plugin-muted",
-        content: lr.candidates.length + " matching file" + (lr.candidates.length === 1 ? "" : "s") + ", best first. ✓ is the one that played, ✗ the ones that were tried and dropped." });
-      children.push({
-        type: "track-row-list",
-        items: fallbackCandidateRows(lr),
-        showHeader: true,
-        selectable: true,
-        openOnClick: "title",
-        actions: [{ id: "download-file", label: "Download", icon: "⬇" }],
-        columns: FALLBACK_COLUMNS
-      });
-    }
+    return { type: "layout", direction: "vertical", children: children };
   }
 
-  var totals = fallbackTotals(fallback);
-  var keys = Object.keys(fallback);
-  children.push({ type: "toolbar", title: "Kept files",
-    status: keys.length ? (totals.count + (totals.count === 1 ? " file" : " files") + " · " + formatBytes(totals.bytes)) : undefined,
-    buttons: keys.length ? [{ label: "Delete all", action: "delete-all-kept", icon: "🗑" }] : [] });
-  if (!keys.length) {
-    children.push({ type: "text", className: "plugin-muted", content: "Nothing fetched by the fallback yet. Files it fetches stay in slskd's downloads folder, listed here, until you delete them." });
-  } else {
+  var lr = lastResolve;
+  children.push({ type: "text", content: "“" + lr.title + "”" + (lr.artist ? " — " + lr.artist : "") +
+    (lr.durationSecs != null ? "  ·  " + formatDurationSecs(lr.durationSecs) : "") });
+  children.push({ type: "text", className: "plugin-muted", content: "Searched for “" + lr.query + "”" });
+  for (var i = 0; i < lr.steps.length; i++) {
+    var s = lr.steps[i];
+    var line = (i + 1) + ". " + s.label + (s.outcome ? " → " + s.outcome : "…") + (s.ms != null ? " (" + Math.round(s.ms / 100) / 10 + "s)" : "");
+    children.push({ type: "text", content: line, className: s.level === "error" ? "plugin-error" : "plugin-muted" });
+  }
+  if (lr.outcome === "running" && lr.progress != null) {
+    children.push({ type: "progress-bar", value: Math.round(lr.progress * 100), max: 100, label: "Downloading " + Math.round(lr.progress * 100) + "%" });
+  } else if (lr.outcome === "running") {
+    children.push({ type: "loading", message: "Working…" });
+  }
+  children.push({ type: "text", content: outcomeLine(lr), className: lr.outcome === "failed" ? "plugin-error" : undefined });
+
+  var picked = pickedLine(lr);
+  if (picked) {
+    children.push({ type: "toolbar", title: "Picked file" });
+    children = children.concat(picked);
+  }
+
+  if (lr.candidates.length) {
+    children.push({ type: "toolbar", title: "Matching files",
+      status: lr.candidates.length + (lr.candidates.length === 1 ? " file" : " files") + ", best first" });
     children.push({ type: "text", className: "plugin-muted",
-      content: "These stay in slskd's downloads folder so the same song plays instantly next time. Delete removes the file from disk through slskd" +
-        (downloadsCollection() ? "; they are already part of your library through the collection that folder sits in." : ".") });
-    children.push({
-      type: "track-row-list",
-      items: keptRows(),
-      selectable: true,
-      showHeader: true,
-      actions: [
-        { id: "play-kept", label: "Play", icon: "▶" },
-        { id: "import-kept", label: "Add to library…", icon: "＋" },
-        { id: "delete-kept", label: "Delete file", icon: "🗑" }
-      ]
-    });
+      content: "✓ played · ↓ downloading · ✗ tried and dropped. Match is how closely the file name fits the title and artist." });
+    children = children.concat(candidateLines(lr));
   }
   return { type: "layout", direction: "vertical", children: children };
+}
+
+// Under Downloads: the files the playback fallback fetched. They are the
+// plugin's own record (slskd's transfer list may have forgotten them), kept so
+// the same song plays instantly next time, and deletable from disk here.
+function keptSection() {
+  var totals = fallbackTotals(fallback);
+  var keys = Object.keys(fallback);
+  if (!keys.length) return [];
+  var out = [];
+  out.push({ type: "toolbar", title: "Fetched by the playback fallback",
+    status: totals.count + (totals.count === 1 ? " file" : " files") + " · " + formatBytes(totals.bytes),
+    buttons: [{ label: "Delete all", action: "delete-all-kept", icon: "🗑" }] });
+  out.push({ type: "text", className: "plugin-muted",
+    content: "These stay in slskd's downloads folder so the same song plays instantly next time. Delete removes the file from disk through slskd" +
+      (downloadsCollection() ? "; they are already part of your library through the collection that folder sits in." : ".") });
+  out.push({
+    type: "track-row-list",
+    items: keptRows(),
+    selectable: true,
+    showHeader: true,
+    actions: [
+      { id: "play-kept", label: "Play", icon: "▶" },
+      { id: "import-kept", label: "Add to library…", icon: "＋" },
+      { id: "delete-kept", label: "Delete file", icon: "🗑" }
+    ]
+  });
+  return out;
 }
 
 function fallbackSettingsSection() {
@@ -2536,7 +2637,7 @@ function fallbackSettingsSection() {
         "Enable it and set its order among the other sources in Settings → Providers → Playback fallback. Without a preferred-formats setting the fallback favours high-bitrate lossy files over lossless — they arrive in a fraction of the time." },
     { type: "settings-row", label: "Files kept by the fallback",
       description: totals.count
-        ? totals.count + (totals.count === 1 ? " file" : " files") + " · " + formatBytes(totals.bytes) + ", in slskd's downloads folder under “" + DEST_ROOT + "/" + FALLBACK_SUBDIR + "”. The Fallback tab lists each one."
+        ? totals.count + (totals.count === 1 ? " file" : " files") + " · " + formatBytes(totals.bytes) + ", in slskd's downloads folder under “" + DEST_ROOT + "/" + FALLBACK_SUBDIR + "”. The Downloads tab lists each one."
         : "None yet. Fetched files stay in slskd's downloads folder, under “" + DEST_ROOT + "/" + FALLBACK_SUBDIR + "”, so a song plays instantly the next time." },
     { type: "toolbar", buttons: [
       { label: "Show in Soulseek", action: "open-fallback", variant: "secondary" }
@@ -2552,14 +2653,13 @@ function render() {
     api.ui.setViewData(VIEW_ID, setupView(), { scrollKey: "setup" });
     return;
   }
-  var keptCount = Object.keys(fallback).length;
   var mainTab = activeTab === "transfers" || activeTab === "fallback" ? activeTab : "search";
   var body = [{
     type: "tabs",
     tabs: [
       { id: "search", label: "Search" },
       { id: "transfers", label: "Downloads", count: transfers.length || undefined },
-      { id: "fallback", label: "Fallback", count: keptCount || undefined }
+      { id: "fallback", label: "Fallback" }
     ],
     activeTab: mainTab,
     action: "main-tab"
@@ -2639,15 +2739,6 @@ function candidateByRef(ref) {
   for (var i = 0; i < search.results.length; i++) {
     var c = search.results[i];
     if (c.username + KEY_SEP + c.filename === raw) return c;
-  }
-  // The Fallback tab's candidate rows aren't in the search list, but their
-  // Download button should still work.
-  var lr = lastResolve;
-  if (lr && lr.candidates) {
-    for (var j = 0; j < lr.candidates.length; j++) {
-      var fc = lr.candidates[j];
-      if (fc.username + KEY_SEP + fc.filename === raw) return fc;
-    }
   }
   return null;
 }
@@ -2922,13 +3013,17 @@ function registerActions() {
 
   // Setup. Nothing here touches the user's machine: it opens the guide page
   // with the key in the fragment, mints a new key, or connects.
-  api.ui.onAction("setup-open-about", function () {
+  // Collections are otherwise loaded only once slskd is ready — which during
+  // setup it is not — so these fetch them first for the shared-folder picker.
+  api.ui.onAction("setup-open-about", async function () {
     ensureSetupKey();
-    api.network.openUrl(whatIsThisUrl(settings.apiKey)).catch(console.error);
+    await loadCollections();
+    api.network.openUrl(whatIsThisUrl(settings.apiKey, localCollections)).catch(console.error);
   });
-  api.ui.onAction("setup-open-guide", function () {
+  api.ui.onAction("setup-open-guide", async function () {
     ensureSetupKey();
-    api.network.openUrl(setupGuideUrl(settings.apiKey)).catch(console.error);
+    await loadCollections();
+    api.network.openUrl(setupGuideUrl(settings.apiKey, localCollections)).catch(console.error);
   });
   api.ui.onAction("setup-connect", function () {
     if (!settings.url) settings.url = SETUP_DEFAULT_URL;
@@ -3313,5 +3408,6 @@ return {
   _fallbackQualityRank: fallbackQualityRank,
   _matchLabel: matchLabel,
   _fallbackTotals: fallbackTotals,
-  _keptKeys: keptKeys
+  _keptKeys: keptKeys,
+  _setFallbackSearchMs: function (ms) { FALLBACK_SEARCH_MS = ms; }
 };

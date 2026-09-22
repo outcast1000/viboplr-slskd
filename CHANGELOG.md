@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.5.0
+
+- **The playback fallback no longer throws its search away.** slskd ends a
+  search only after a stretch with no new answers, so a popular song keeps
+  collecting for 35-40 s — past the fallback's 20 s, where the whole search was
+  discarded as "no answer in time" even with hundreds of responses in hand. At
+  the deadline the search is now stopped and what slskd collected is ranked and
+  used. A search nobody wants any more is also stopped in slskd rather than
+  abandoned, so it no longer holds slskd's single search slot for the next one.
+- **Fallback tab is a read-out.** A **Picked file** block shows the file the
+  resolver went for and what became of it (played / downloading with progress /
+  still downloading for next time / dropped). The matching files are plain text
+  lines — match, name, quality, size, length, availability, sharer — marked
+  ✓ played, ↓ downloading, ✗ tried and dropped: no artwork, nothing to click.
+- **Kept files moved to Downloads**, as "Fetched by the playback fallback" below
+  slskd's own transfers, with Play, Add to library, Delete file and Delete all.
+- **No stray "Failed" rows.** A sharer slskd couldn't even connect to is now
+  removed from slskd's list like every other dropped attempt, instead of staying
+  in Downloads as Failed until removed by hand.
+- **Setup guide: shared folders.** The guide lists your Viboplr local
+  collections (passed in the link's fragment, never to a server) as checkboxes
+  and writes the ticked ones into the `shares:` block; more can be typed in.
+  Docker mounts a music folder read-only at `/music` and shares that.
+- **Setup guide: HTTPS off on Windows.** The Windows config adds
+  `web.https.disabled: true`, working around slskd's HTTPS bug there; the plugin
+  talks plain `http` on the same computer.
+
 ## 0.4.0
 
 - **Playback fallback.** The plugin is now a stream resolver: when a track has

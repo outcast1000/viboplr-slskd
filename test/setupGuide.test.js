@@ -33,3 +33,21 @@ test("the setup bar is two buttons: the guide and connect", () => {
   assert.equal(bar.buttons[0].label, "What is this?");
   assert.equal(bar.buttons[1].label, "Connect to http://localhost:5030");
 });
+
+test("local collections ride in the fragment as newline-joined share paths, deduped", () => {
+  const u = plugin._setupGuideUrl("abc", [
+    { id: 1, name: "Music", path: "D:\\music" },
+    { id: 2, name: "Dup", path: "D:\\music" },
+    { id: 3, name: "No path" },
+    { id: 4, name: "Rock", path: "E:\\Rock & Roll" }
+  ]);
+  assert.ok(!u.includes("?"), "still fragment-only");
+  const frag = u.slice(u.indexOf("#") + 1);
+  const params = Object.fromEntries(frag.split("&").map((kv) => kv.split("=").map(decodeURIComponent)));
+  assert.equal(params.key, "abc");
+  assert.deepEqual(params.share.split("\n"), ["D:\\music", "E:\\Rock & Roll"]);
+  // The about page forwards its fragment to the guide, so it carries them too.
+  assert.ok(plugin._whatIsThisUrl("abc", [{ path: "/m" }]).endsWith("#key=abc&share=%2Fm"));
+  // No collections, no share param.
+  assert.equal(plugin._setupGuideUrl("abc", []), "https://outcast1000.github.io/viboplr-slskd/#key=abc");
+});

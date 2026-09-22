@@ -98,9 +98,11 @@ waiting:
    artist.
 
 The **Fallback tab** in the Soulseek view shows the last resolve step by step —
-the query, every matching file with its match score, which one was tried (✗)
-and which one played (✓), and how long each step took — and lists the **kept
-files** with Play, Add to library and **Delete file**. Delete is the one place
+the query, how long each step took, the **picked file** and what became of it,
+and every matching file with its match score, marked ✓ played, ↓ downloading or
+✗ tried and dropped. It is a read-out: no artwork, nothing to click. The files
+the fallback **kept** are listed on the **Downloads** tab, below slskd's own
+transfers, with Play, Add to library and **Delete file**. Delete is the one place
 the plugin removes anything from disk, and it does so through slskd's own Files
 API, which slskd gates behind `remote_file_management: true` under `flags:` in
 `slskd.yml` (or `SLSKD_REMOTE_FILE_MANAGEMENT=true`); without it the plugin
@@ -151,7 +153,7 @@ assistant-queued file is tracked, located and imported identically.
   picked, not the fallback's best guess.
 - **Delete your files.** Remove on the Downloads tab drops a row from slskd's
   list; the file stays on disk. Only files the *fallback* fetched can be
-  deleted, from the Fallback tab, and only when you ask.
+  deleted, from the Downloads tab, and only when you ask.
 - **Manage your shares.** Do that in slskd.
 
 ## Sharing
