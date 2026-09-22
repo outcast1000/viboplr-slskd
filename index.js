@@ -22,6 +22,13 @@
 //    and slskd's destination layout is a user-configurable token pattern. We
 //    instead pick our own `Options.Destination` at enqueue time and read back the
 //    real filename via the Files API.
+//  - THE PLAYBACK FALLBACK IS BUDGETED, NOT UNBOUNDED. As a stream resolver the
+//    plugin gets the host's 60s like everyone else, so it runs one bounded
+//    search, fetches the best match from a sharer with a free slot, and moves on
+//    from one that doesn't start. What lands in time plays; what doesn't keeps
+//    downloading and answers the next request for the same song instantly. The
+//    files it fetches are indexed (`fallback`) so the user can delete exactly
+//    those, through slskd's Files API — see "Playback fallback" below.
 //  - Sandbox: no fetch, no WebSocket, no Map/Set, no btoa. Base64 is hand-rolled;
 //    polling replaces SignalR.
 
@@ -80,6 +87,21 @@ var TRANSFER_POLL_FAST_MS = 3000;
 var TRANSFER_POLL_SLOW_MS = 30000;
 var READINESS_POLL_MS = 60000;
 
+// Playback fallback (the `slskd-fallback` stream resolver). The host gives a
+// resolver 60s; everything below is carved out of that.
+var FALLBACK_ID = "slskd-fallback";
+var FALLBACK_LABEL = "Soulseek";
+var FALLBACK_SUBDIR = "fallback";            // DEST_ROOT/fallback/<seq>-<label>
+var FALLBACK_BUDGET_MS = 55000;              // answer (or give up) before the host does
+var FALLBACK_SEARCH_MS = 20000;              // the search's share of the budget
+var FALLBACK_START_MS = 12000;               // a transfer not moving by then is a queued one
+var FALLBACK_MIN_REMAINING_MS = 10000;       // don't start a sharer with less than this left
+var FALLBACK_POLL_MS = 1000;
+var FALLBACK_MAX_TRIES = 3;
+var FALLBACK_MIN_TITLE_MATCH = 0.6;          // share of the title's words the filename must carry
+var FALLBACK_MIN_ARTIST_MATCH = 0.5;         // share of the artist's words the path must carry
+var FALLBACK_VIEW_CANDIDATES = 25;
+
 var B64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 // ---------------------------------------------------------------------------
@@ -116,6 +138,11 @@ var localCollections = []; // host's local collections, for "did this land in th
 var knownDone = {};       // transfer keys already seen finished (completion detection)
 var completionsSeeded = false;
 var tagsPending = {};     // resolvedPath -> in-flight readAudioTags promise
+// Files the playback fallback fetched, keyed by normalized song identity
+// (`fallbackKey`) → { ref (tracked key), title, artist, query, at, size, state:
+// "pending" | "kept", path, lastUsedAt }. Persisted; the Fallback tab lists and
+// deletes exactly these.
+var fallback = {};
 
 // slskd runs ONE search at a time (POST /searches answers 429 while another is
 // in flight), so every search — the view's, a context-menu one, an assistant
@@ -724,6 +751,12 @@ function rowIds(data) {
   return out;
 }
 
+// Kept-file row ids carry a "k:" prefix so they can't collide with a transfer
+// key in a list that reuses the transfer actions.
+function keptKeys(data) {
+  return rowIds(data).map(function (id) { return id.indexOf("k:") === 0 ? id.slice(2) : id; });
+}
+
 function transferPhase(stateString) {
   var s = stateString || "";
   if (hasFlag(s, "Succeeded")) return "succeeded";
@@ -753,8 +786,8 @@ function sanitizeSegment(s) {
 // Standard base64 can contain '/', which would break the {base64Subdirectory}
 // route segment. We control the destination, so pick one that encodes cleanly;
 // callers fall back to a filtered root listing if none does.
-function safeDestination(seq, label) {
-  var stem = DEST_ROOT + "/" + seq + (label ? "-" + sanitizeSegment(label) : "");
+function safeDestination(seq, label, subdir) {
+  var stem = DEST_ROOT + "/" + (subdir ? sanitizeSegment(subdir) + "/" : "") + seq + (label ? "-" + sanitizeSegment(label) : "");
   for (var n = 0; n < 32; n++) {
     var dest = stem + (n ? "-" + n : "");
     var b64 = b64encode(dest);
@@ -809,6 +842,173 @@ function availabilityLabel(c) {
   if (c.hasFreeUploadSlot) return "free slot";
   if (!c.queueLength) return "queued";
   return "queue " + c.queueLength;
+}
+
+
+// ---------------------------------------------------------------------------
+// Playback fallback — pure helpers
+// ---------------------------------------------------------------------------
+// Lowercase, diacritics stripped, punctuation to spaces. `normalize` is a
+// String method, so it is available in the sandbox where TextEncoder is not.
+function normalizeText(s) {
+  var out = String(s == null ? "" : s);
+  if (typeof out.normalize === "function") out = out.normalize("NFD");
+  return out
+    .replace(/[̀-ͯ]/g, "")
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// Words that describe an edition rather than the song. Dropped from both the
+// query and the match, so "Karma Police (Remastered 2009)" finds a file called
+// "Karma Police" and is not marked down for lacking the word "remastered".
+var EDITION_WORDS = ["remaster", "remastered", "remastering", "version", "edit", "mono", "stereo",
+  "deluxe", "explicit", "clean", "album", "single", "radio", "original", "digital", "bonus", "track",
+  "anniversary", "edition", "reissue", "hd", "hq"];
+var STOP_WORDS = ["the", "a", "an", "of", "and", "feat", "ft", "featuring", "vs", "with"];
+// A file whose name says one of these when the requested title does not is a
+// different recording of the song, not a copy of it.
+var VARIANT_WORDS = ["live", "remix", "instrumental", "karaoke", "acoustic", "demo", "cover",
+  "acapella", "rehearsal", "unplugged", "mix", "dub", "reprise", "medley", "tribute"];
+
+function wordList(s, drop) {
+  var words = normalizeText(s).split(" ");
+  var out = [];
+  for (var i = 0; i < words.length; i++) {
+    var w = words[i];
+    if (!w) continue;
+    if (drop && /^\d{4}$/.test(w)) continue;
+    if (drop && drop.indexOf(w) >= 0) continue;
+    out.push(w);
+  }
+  return out;
+}
+
+// The words of a title that identify the song: edition words, stop words and
+// bare years are noise, but a title that is nothing but noise keeps its words
+// rather than matching everything.
+function titleWords(title) {
+  var strict = wordList(title, EDITION_WORDS.concat(STOP_WORDS));
+  return strict.length ? strict : wordList(title, null);
+}
+
+function artistWords(artist) {
+  var strict = wordList(artist, STOP_WORDS);
+  return strict.length ? strict : wordList(artist, null);
+}
+
+// Identity of a request, for the kept-file index: what the host's `sameSong`
+// keys on (title + artist), normalized the same way the matcher reads names.
+function fallbackKey(title, artist) {
+  return titleWords(title).join(" ") + "|" + artistWords(artist).join(" ");
+}
+
+// What to ask Soulseek for. Soulseek matches on file and folder names, and a
+// name rarely carries the edition suffix a catalogue title does — so the
+// parenthetical goes, and the artist comes first the way folders are laid out.
+function fallbackQuery(title, artist) {
+  var t = String(title || "").replace(/\s*[\(\[][^\)\]]*[\)\]]\s*/g, " ");
+  var words = artistWords(artist).concat(titleWords(t));
+  if (!words.length) words = wordList(title, null);
+  return words.join(" ");
+}
+
+function coverage(wanted, haystack) {
+  if (!wanted.length) return 1;
+  var hit = 0;
+  for (var i = 0; i < wanted.length; i++) {
+    if (haystack.indexOf(wanted[i]) >= 0) hit++;
+  }
+  return hit / wanted.length;
+}
+
+// How well one search result answers a request. `title` is matched against the
+// file's own name, `artist` against the whole remote path (the artist is
+// usually the folder, not the file). Variant words the request didn't ask for
+// cost a fixed penalty each; extra words beyond that are free, because a
+// filename carries a track number, a bitrate, a year.
+function scoreFallbackCandidate(c, want) {
+  var stem = basenameRemote(c.filename).replace(/\.[A-Za-z0-9]{1,5}$/, "");
+  var stemWords = wordList(stem, null);
+  var pathWords = wordList(String(c.filename || "").replace(/\\/g, " "), null);
+  var titleScore = coverage(want.title, stemWords);
+  var artistScore = want.artist.length ? Math.max(coverage(want.artist, pathWords), coverage(want.artist, stemWords)) : 1;
+  var penalty = 0;
+  var asked = want.title.concat(want.artist);
+  for (var i = 0; i < VARIANT_WORDS.length; i++) {
+    var v = VARIANT_WORDS[i];
+    if (stemWords.indexOf(v) >= 0 && asked.indexOf(v) < 0) penalty += 0.3;
+  }
+  var score = titleScore * 0.65 + artistScore * 0.35 - penalty;
+  return { title: titleScore, artist: artistScore, penalty: penalty, score: score };
+}
+
+// The fallback waits for the file with the user listening to silence, so a
+// fast, sure transfer beats a better one. Without a stated format preference,
+// high-bitrate lossy comes before lossless (a fifth of the bytes for the same
+// song); with one, the user's order stands as it does everywhere else.
+function fallbackQualityRank(c, preferred) {
+  if (preferred && preferred.length) return c.formatRank * 10 + c.qualityTier;
+  if (c.qualityTier === T_HIGH) return 0;
+  if (c.qualityTier === T_UNKNOWN) return 1;
+  if (c.qualityTier === T_LOSSLESS) return 2;
+  if (c.qualityTier === T_MEDIUM) return 3;
+  return 4;
+}
+
+// Ranked search results → the ones that are this song, best first. Every
+// candidate carries its `match` so the Fallback tab can show why it placed
+// where it did; the ones below the bar are dropped, not demoted.
+function rankFallback(candidates, title, artist, preferred) {
+  var want = { title: titleWords(title), artist: artistWords(artist) };
+  var out = [];
+  for (var i = 0; i < (candidates || []).length; i++) {
+    var c = candidates[i];
+    var m = scoreFallbackCandidate(c, want);
+    if (m.title < FALLBACK_MIN_TITLE_MATCH) continue;
+    if (want.artist.length && m.artist < FALLBACK_MIN_ARTIST_MATCH) continue;
+    if (m.score <= 0) continue;
+    var copy = {};
+    for (var k in c) if (Object.prototype.hasOwnProperty.call(c, k)) copy[k] = c[k];
+    copy.match = m;
+    copy.fallbackRank = fallbackQualityRank(c, preferred);
+    out.push(copy);
+  }
+  out.sort(function (a, b) {
+    // Tenth-of-a-point buckets: a one-word difference in a long title should
+    // not outrank a free upload slot.
+    var sa = Math.round(a.match.score * 10), sb = Math.round(b.match.score * 10);
+    if (sa !== sb) return sb - sa;
+    if (a.availabilityTier !== b.availabilityTier) return a.availabilityTier - b.availabilityTier;
+    if (a.fallbackRank !== b.fallbackRank) return a.fallbackRank - b.fallbackRank;
+    if (a.uploadSpeed !== b.uploadSpeed) return b.uploadSpeed - a.uploadSpeed;
+    if (a.queueLength !== b.queueLength) return a.queueLength - b.queueLength;
+    if (a.size !== b.size) return a.size - b.size;
+    return a.filename < b.filename ? -1 : (a.filename > b.filename ? 1 : 0);
+  });
+  return out;
+}
+
+function matchLabel(m) {
+  if (!m) return "";
+  var s = Math.round(Math.max(0, Math.min(1, m.score)) * 100) + "%";
+  if (m.penalty) s += " · variant";
+  return s;
+}
+
+function fallbackTotals(index) {
+  var n = 0, bytes = 0;
+  var keys = Object.keys(index || {});
+  for (var i = 0; i < keys.length; i++) {
+    var e = index[keys[i]];
+    if (!e || e.state !== "kept") continue;
+    n++;
+    bytes += e.size || 0;
+  }
+  return { count: n, bytes: bytes };
 }
 
 // ---------------------------------------------------------------------------
@@ -1132,18 +1332,18 @@ async function runSearch(query, extra) {
 // ---------------------------------------------------------------------------
 // Transfers
 // ---------------------------------------------------------------------------
-async function nextBatch(label) {
+async function nextBatch(label, subdir) {
   settings.batchSeq = (settings.batchSeq || 0) + 1;
   await api.storage.set("batchSeq", settings.batchSeq);
-  return safeDestination(settings.batchSeq, label);
+  return safeDestination(settings.batchSeq, label, subdir);
 }
 
 // The one place a download is started — the view's buttons, Retry, and the
 // assistant's `download` tool all come through here, so an assistant-queued
 // file is tracked, located and imported exactly like a clicked one. Throws
 // with a readable message; the caller decides how to surface it.
-async function enqueueBatch(username, files, label) {
-  var batch = await nextBatch(label);
+async function enqueueBatch(username, files, label, subdir) {
+  var batch = await nextBatch(label, subdir);
   var payload = {
     username: username,
     files: files.map(function (f) { return { filename: f.filename, size: f.size }; }),
@@ -1444,6 +1644,358 @@ async function currentPath(ref, rec) {
 
 function findTrackedByRef(ref) {
   return tracked[ref] || null;
+}
+
+// ---------------------------------------------------------------------------
+// Playback fallback — the stream resolver
+// ---------------------------------------------------------------------------
+// The host asks every stream resolver, in the user's order, for a track that
+// has no playable source of its own, and gives each one 60 seconds. Soulseek
+// sends whole files and a stranger's queue can be hours long, so this resolver
+// works to a budget: one bounded search, then the best-matching file from a
+// sharer with a free slot, abandoned for the next one when it hasn't started
+// moving. What finishes inside the budget plays; what doesn't keeps
+// downloading and answers the NEXT request for the same song instantly.
+//
+// Every file fetched this way is remembered in `fallback` (keyed by the
+// normalized song identity), which is what lets the Fallback tab list and
+// delete exactly these files and none of the user's own downloads.
+var lastResolve = null;     // the most recent fallback attempt, for the Fallback tab (session only)
+var fallbackBusy = false;
+
+function nowMs() { return Date.now(); }
+
+function startResolveRecord(title, artist, durationSecs, query) {
+  lastResolve = {
+    at: nowMs(), title: title, artist: artist || null, durationSecs: durationSecs != null ? durationSecs : null,
+    query: query, steps: [], candidates: [], chosen: null, tried: [], outcome: "running", message: null, path: null
+  };
+  renderIfFallback();
+  return lastResolve;
+}
+
+function resolveStep(rec, label) {
+  var step = { label: label, outcome: null, level: "info", ms: null, startedAt: nowMs() };
+  rec.steps.push(step);
+  renderIfFallback();
+  return function settle(outcome, level) {
+    step.outcome = outcome;
+    step.level = level || "info";
+    step.ms = nowMs() - step.startedAt;
+    api.log(step.level === "error" ? "error" : (step.level === "warn" ? "warn" : "info"),
+      "fallback: " + label + " → " + outcome + " (" + Math.round(step.ms / 100) / 10 + "s)", "slskd");
+    renderIfFallback();
+  };
+}
+
+function finishResolve(rec, outcome, message, path) {
+  rec.outcome = outcome;
+  rec.message = message || null;
+  rec.path = path || null;
+  rec.totalMs = nowMs() - rec.at;
+  api.log(outcome === "played" || outcome === "cached" ? "info" : "warn",
+    "fallback: " + outcome + (message ? " — " + message : "") + " (total " + Math.round(rec.totalMs / 100) / 10 + "s)", "slskd");
+  render();
+}
+
+function renderIfFallback() {
+  if (activeTab === "fallback") render();
+}
+
+async function saveFallbackIndex() {
+  try {
+    await api.storage.set("fallback", fallback);
+  } catch (e) {
+    console.error("slskd: couldn't save the fallback index:", e);
+  }
+}
+
+// Where a kept file is now, checked against a FRESH listing every time: the
+// host's chain only advances when a resolver fails during resolve, so a path
+// that no longer exists must be discovered here, not by the player.
+async function relocateKept(entry) {
+  var rec = tracked[entry.ref];
+  if (!rec) return null;
+  rec.resolvedPath = null;
+  try {
+    return await resolveTransferPath(transferByKey(entry.ref) || transferFromRecord(entry.ref, rec), rec);
+  } catch (e) {
+    console.error("slskd: couldn't relocate a fallback file:", e);
+    return null;
+  }
+}
+
+// Watch one transfer until it finishes, fails, stalls or the budget runs out.
+// "Stalled" is a transfer that has not started moving `FALLBACK_START_MS` after
+// it was queued — the sharer's slot was not free after all — and is what makes
+// trying the next candidate worthwhile.
+async function waitForTransfer(key, deadline, onTick) {
+  var since = nowMs();
+  var started = false;
+  var unseen = 0;
+  while (nowMs() < deadline) {
+    await sleep(FALLBACK_POLL_MS);
+    var flat = null;
+    try { flat = await fetchTransfers(); } catch (e) { flat = null; }
+    if (!flat) continue;
+    transfers = flat;
+    var t = transferByKey(key);
+    if (!t) {
+      // slskd lists a transfer the moment it accepts the enqueue; a few misses
+      // are a race, a run of them means it was dropped.
+      if (++unseen >= 5) return { state: "gone" };
+      continue;
+    }
+    unseen = 0;
+    var phase = transferPhase(t.state);
+    if (phase === "succeeded") return { state: "done", transfer: t };
+    if (phase === "failed" || phase === "cancelled") return { state: phase, transfer: t };
+    if (phase === "downloading") started = true;
+    if (onTick) onTick(t, phase);
+    if (!started && nowMs() - since > FALLBACK_START_MS) return { state: "stalled", transfer: t };
+  }
+  return { state: "timeout", transfer: transferByKey(key) };
+}
+
+// The listing can lag the state flip by a moment, as search bodies do.
+async function locateFinished(transfer, rec) {
+  for (var n = 0; n < 4; n++) {
+    var path = await resolveTransferPath(transfer, rec);
+    if (path) return path;
+    await sleep(500);
+  }
+  return null;
+}
+
+async function dropStalled(t) {
+  try {
+    await cancelTransfer(t, true);
+  } catch (e) {
+    console.error("slskd: couldn't drop a stalled fallback transfer:", e);
+  }
+}
+
+function fallbackAnswer(path) {
+  return { url: fileUrlForPlayback(path), label: FALLBACK_LABEL };
+}
+
+async function resolveFallback(title, artistName, albumName, durationSecs, opts) {
+  if (opts && opts.preferVideo) return null;           // audio only; the video pass is not ours
+  if (readiness.state !== "ready" || tier !== "local") return null;
+  if (!title) return null;
+  if (fallbackBusy) {
+    api.log("info", "fallback: skipped “" + title + "” — another fallback is still running", "slskd");
+    return null;
+  }
+  fallbackBusy = true;
+  var deadline = nowMs() + FALLBACK_BUDGET_MS;
+  var query = fallbackQuery(title, artistName);
+  var fkey = fallbackKey(title, artistName);
+  var rec = startResolveRecord(title, artistName, durationSecs, query);
+  try {
+    // 1. Something we already fetched for this song?
+    var kept = fallback[fkey];
+    if (kept) {
+      var settleKept = resolveStep(rec, "look for a copy fetched earlier");
+      var path0 = await relocateKept(kept);
+      if (path0) {
+        kept.state = "kept";
+        kept.path = path0;
+        kept.lastUsedAt = nowMs();
+        await saveFallbackIndex();
+        settleKept("found " + path0);
+        finishResolve(rec, "cached", "played the copy fetched earlier", path0);
+        return fallbackAnswer(path0);
+      }
+      // Still on its way from a previous, timed-out attempt?
+      var live = null;
+      try { transfers = (await fetchTransfers()) || transfers; } catch (e) { /* the wait below re-reads */ }
+      live = transferByKey(kept.ref);
+      var livePhase = live ? transferPhase(live.state) : null;
+      if (live && (livePhase === "downloading" || livePhase === "starting" || livePhase === "queued" || livePhase === "requested")) {
+        settleKept("still downloading from the earlier attempt — waiting on it");
+        var settleWait0 = resolveStep(rec, "wait for the earlier download");
+        var w0 = await waitForTransfer(kept.ref, deadline, null);
+        if (w0.state === "done") {
+          var p1 = await locateFinished(w0.transfer, tracked[kept.ref]);
+          if (p1) {
+            kept.state = "kept"; kept.path = p1; kept.size = w0.transfer.size || kept.size || null; kept.lastUsedAt = nowMs();
+            await saveFallbackIndex();
+            settleWait0("finished");
+            finishResolve(rec, "played", "finished the earlier download", p1);
+            return fallbackAnswer(p1);
+          }
+          settleWait0("finished but the file could not be located", "warn");
+        } else if (w0.state === "timeout") {
+          settleWait0("still not finished — it keeps downloading for next time", "warn");
+          finishResolve(rec, "timeout", "the earlier download is still running; it will be used next time");
+          return null;
+        } else {
+          settleWait0(w0.state, "warn");
+        }
+      } else {
+        settleKept("gone — searching again", "warn");
+      }
+      delete fallback[fkey];
+      await saveFallbackIndex();
+    }
+
+    // 2. Search, bounded well inside the budget so a download can still fit.
+    var searchDeadline = Math.min(deadline, nowMs() + FALLBACK_SEARCH_MS);
+    var settleSearch = resolveStep(rec, "search Soulseek for “" + query + "”");
+    var ranked;
+    try {
+      ranked = await performSearch(query, viewPrefs({ knownDurationSecs: durationSecs }), null,
+        function () { return nowMs() > searchDeadline; });
+    } catch (e) {
+      settleSearch((e && e.message) || String(e), "error");
+      finishResolve(rec, "failed", (e && e.message) || "search failed");
+      return null;
+    }
+    if (ranked === null) {
+      settleSearch("no answer within " + Math.round(FALLBACK_SEARCH_MS / 1000) + "s", "warn");
+      finishResolve(rec, "no-match", "Soulseek did not answer in time");
+      return null;
+    }
+    var preferred = parsePreferredFormats(settings.preferredFormats);
+    var matches = rankFallback(ranked, title, artistName, preferred);
+    rec.candidates = matches.slice(0, FALLBACK_VIEW_CANDIDATES);
+    settleSearch(ranked.length + " downloadable file" + (ranked.length === 1 ? "" : "s") + ", " + matches.length + " that match", matches.length ? "info" : "warn");
+    if (!matches.length) {
+      finishResolve(rec, "no-match", ranked.length ? "nothing on Soulseek matched the title and artist closely enough" : "nothing on Soulseek matched");
+      return null;
+    }
+
+    // 3. Fetch, best candidate first, moving on when one doesn't start.
+    for (var i = 0; i < matches.length && i < FALLBACK_MAX_TRIES; i++) {
+      if (deadline - nowMs() < FALLBACK_MIN_REMAINING_MS) {
+        finishResolve(rec, "timeout", "not enough of the budget left to try another sharer");
+        return null;
+      }
+      var c = matches[i];
+      var key = c.username + KEY_SEP + c.filename;
+      rec.tried.push(key);
+      var settleFetch = resolveStep(rec, "download from " + c.username + " (" + basenameRemote(c.filename) + ", " + formatBytes(c.size) + ")");
+      try {
+        var out = await enqueueBatch(c.username, [c], (artistName ? artistName + " - " : "") + title, FALLBACK_SUBDIR);
+        if (!out.queued.length) {
+          settleFetch("slskd refused it" + (out.failures[0] && out.failures[0].message ? " — " + out.failures[0].message : ""), "warn");
+          continue;
+        }
+      } catch (e) {
+        settleFetch((e && e.message) || String(e), "error");
+        continue;
+      }
+      var trackedRec = tracked[key];
+      if (trackedRec) trackedRec.fallback = true;
+      fallback[fkey] = { ref: key, title: title, artist: artistName || null, query: query, at: nowMs(), size: c.size || null, state: "pending", path: null };
+      await saveFallbackIndex();
+      await api.storage.set("tracked", tracked);
+
+      var w = await waitForTransfer(key, deadline, function (t) {
+        var pct = transferProgress(t);
+        rec.progress = pct;
+        renderIfFallback();
+      });
+      rec.progress = null;
+      if (w.state === "done") {
+        var path = await locateFinished(w.transfer, tracked[key]);
+        if (!path) {
+          settleFetch("finished, but the file could not be located in slskd's downloads folder", "error");
+          finishResolve(rec, "failed", "the download finished but its file could not be located");
+          return null;
+        }
+        fallback[fkey].state = "kept";
+        fallback[fkey].path = path;
+        fallback[fkey].size = w.transfer.size || c.size || null;
+        fallback[fkey].lastUsedAt = nowMs();
+        await saveFallbackIndex();
+        rec.chosen = c;
+        settleFetch("finished");
+        finishResolve(rec, "played", null, path);
+        schedulePoll(true);
+        return fallbackAnswer(path);
+      }
+      if (w.state === "timeout") {
+        rec.chosen = c;
+        settleFetch("out of time while downloading — it keeps going and is used next time", "warn");
+        finishResolve(rec, "timeout", "the download did not finish within the budget; it continues in the background");
+        schedulePoll(true);
+        return null;
+      }
+      // stalled / failed / cancelled / gone: clear it and try the next sharer.
+      if (w.transfer) await dropStalled(w.transfer);
+      delete fallback[fkey];
+      await saveFallbackIndex();
+      settleFetch(w.state === "stalled" ? "did not start within " + Math.round(FALLBACK_START_MS / 1000) + "s — trying the next sharer" : w.state, "warn");
+    }
+    finishResolve(rec, "failed", "no sharer delivered the file in time");
+    return null;
+  } catch (e) {
+    console.error("slskd: fallback resolve failed:", e);
+    finishResolve(rec, "failed", (e && e.message) || String(e));
+    return null;
+  } finally {
+    fallbackBusy = false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Playback fallback — kept files and their removal
+// ---------------------------------------------------------------------------
+// Files this plugin fetched on the user's behalf are the one kind it is willing
+// to delete, and only when asked. Deletion goes through slskd's own Files API:
+// the daemon owns that folder, and the plugin sandbox can only remove files in
+// its own data directory anyway. slskd gates that API behind
+// `remote_file_management`, so a refusal is explained rather than swallowed.
+var REMOTE_FILE_MANAGEMENT_HINT = "slskd refused to delete the file. Deleting through its API needs " +
+  "`flags: { remote_file_management: true }` in slskd.yml (or SLSKD_REMOTE_FILE_MANAGEMENT=true); restart slskd after changing it.";
+
+async function deleteFallbackFile(fkey) {
+  var entry = fallback[fkey];
+  if (!entry) return;
+  var rec = tracked[entry.ref];
+  if (rec && rec.b64) {
+    var res = await slskd("DELETE", "/api/v0/files/downloads/directories/" + rec.b64);
+    if (res.status === 403) throw new Error(REMOTE_FILE_MANAGEMENT_HINT);
+    if (!((res.status >= 200 && res.status < 300) || res.status === 404)) {
+      throw new Error(errorText(res, "slskd couldn't delete that file (HTTP " + res.status + ")."));
+    }
+  } else if (rec) {
+    throw new Error("That file's folder can't be addressed through slskd's API; delete it from slskd's downloads folder by hand.");
+  }
+  var t = transferByKey(entry.ref);
+  if (t) {
+    try { await cancelTransfer(t, true); } catch (e) { console.error("slskd: couldn't drop the transfer record:", e); }
+  }
+  delete tracked[entry.ref];
+  delete fallback[fkey];
+  await api.storage.set("tracked", tracked);
+  await saveFallbackIndex();
+}
+
+async function deleteFallbackFiles(keys) {
+  var failed = [];
+  var firstError = null;
+  for (var i = 0; i < keys.length; i++) {
+    try {
+      await deleteFallbackFile(keys[i]);
+    } catch (e) {
+      failed.push(keys[i]);
+      if (!firstError) firstError = e;
+      console.error("slskd: couldn't delete fallback file " + keys[i] + ":", e);
+    }
+  }
+  render();
+  renderSettings();
+  schedulePoll(true);
+  if (firstError) {
+    api.ui.showNotification(failed.length === keys.length
+      ? ((firstError && firstError.message) || "Couldn't delete the files.")
+      : "Deleted " + (keys.length - failed.length) + " of " + keys.length + " — " + ((firstError && firstError.message) || "some couldn't be deleted."));
+  } else if (keys.length) {
+    api.ui.showNotification(keys.length === 1 ? "Deleted 1 fallback file." : "Deleted " + keys.length + " fallback files.");
+  }
 }
 
 
@@ -1826,6 +2378,173 @@ function transfersTab() {
   return { type: "layout", direction: "vertical", children: children };
 }
 
+
+// The Fallback tab: what the last automatic resolve did, step by step, and the
+// files kept from every resolve so far. Mirrors the yt-dlp plugin's "Last
+// resolve" panel, with the kept files alongside because they are the other
+// half of the same story — what the fallback fetched, and how to be rid of it.
+var FALLBACK_COLUMNS = [{ id: "match", label: "Match", width: 90, sortable: false }].concat(RESULT_COLUMNS);
+
+function fallbackCandidateRows(rec) {
+  return rec.candidates.map(function (c) {
+    var key = c.username + KEY_SEP + c.filename;
+    var meta = parseTrackMeta(c.filename);
+    var chosen = rec.chosen && rec.chosen.username === c.username && rec.chosen.filename === c.filename;
+    var tried = rec.tried.indexOf(key) >= 0;
+    var cells = resultCells(c);
+    cells.match = matchLabel(c.match);
+    return {
+      id: "f:" + key,
+      title: (chosen ? "✓ " : (tried ? "✗ " : "")) + resultLabel(c),
+      subtitle: resultSource(c),
+      cells: cells,
+      durationSecs: c.length != null ? c.length : null,
+      action: "download-file",
+      artistName: meta.artist,
+      albumTitle: meta.album,
+      kind: "audio"
+    };
+  });
+}
+
+function keptRows() {
+  var keys = Object.keys(fallback);
+  var rows = [];
+  for (var i = 0; i < keys.length; i++) {
+    var e = fallback[keys[i]];
+    if (!e) continue;
+    var rec = tracked[e.ref];
+    var parts = splitKey(e.ref);
+    var bits = [];
+    if (e.state === "kept") {
+      bits.push(formatBytes(e.size));
+      if (parts) bits.push("from " + parts.username);
+      if (rec && rec.resolvedPath) bits.push(rec.resolvedPath);
+    } else {
+      bits.push("still downloading");
+      if (parts) bits.push("from " + parts.username);
+    }
+    var meta = (rec && rec.meta) || {};
+    var playable = e.state === "kept" && rec && rec.resolvedPath;
+    rows.push({
+      id: "k:" + keys[i],
+      title: e.title + (e.artist ? " — " + e.artist : ""),
+      subtitle: bits.join("  ·  "),
+      artistName: e.artist || meta.artist || null,
+      albumTitle: meta.album || null,
+      durationSecs: rec && rec.length != null ? rec.length : null,
+      path: playable ? SCHEME + "://" + e.ref : null,
+      kind: "audio",
+      actions: playable ? ["play-kept", "import-kept", "delete-kept"] : ["delete-kept"],
+      action: playable ? "play-kept" : undefined,
+      sortAt: e.lastUsedAt || e.at || 0
+    });
+  }
+  rows.sort(function (a, b) { return b.sortAt - a.sortAt; });
+  return rows;
+}
+
+function outcomeLine(rec) {
+  var label = {
+    running: "Working…",
+    played: "Played the file it fetched",
+    cached: "Played a copy fetched earlier",
+    timeout: "Ran out of time",
+    "no-match": "Nothing matched",
+    failed: "Failed"
+  }[rec.outcome] || rec.outcome;
+  var bits = [label];
+  if (rec.message) bits.push(rec.message);
+  if (rec.totalMs != null) bits.push(Math.round(rec.totalMs / 100) / 10 + "s");
+  return bits.join("  ·  ");
+}
+
+function fallbackTab() {
+  var children = [];
+  children.push({ type: "text", className: "plugin-muted",
+    content: "When a track has no playable source of its own, Viboplr asks its fallback sources in turn. This one searches Soulseek for the song, " +
+      "fetches the best match from a sharer with a free slot, and plays it once it lands — all within the minute the host allows. " +
+      "Turn it on or off, and order it against other sources, in Settings → Providers → Playback fallback." });
+
+  children.push({ type: "toolbar", title: "Last resolve",
+    buttons: lastResolve ? [{ label: "Clear", action: "clear-resolve", icon: "✕" }] : [] });
+  if (!lastResolve) {
+    children.push({ type: "text", className: "plugin-muted",
+      content: "No fallback resolve yet this session. Play a track that has no source of its own — a library row whose file is gone, a track from a streaming plugin that can't reach it — and what happened appears here." });
+  } else {
+    var lr = lastResolve;
+    children.push({ type: "text", content: "“" + lr.title + "”" + (lr.artist ? " — " + lr.artist : "") +
+      (lr.durationSecs != null ? "  ·  " + formatDurationSecs(lr.durationSecs) : "") });
+    children.push({ type: "text", className: "plugin-muted", content: "Searched for “" + lr.query + "”" });
+    for (var i = 0; i < lr.steps.length; i++) {
+      var s = lr.steps[i];
+      var line = (i + 1) + ". " + s.label + (s.outcome ? " → " + s.outcome : "…") + (s.ms != null ? " (" + Math.round(s.ms / 100) / 10 + "s)" : "");
+      children.push({ type: "text", content: line, className: s.level === "error" ? "plugin-error" : "plugin-muted" });
+    }
+    if (lr.outcome === "running" && lr.progress != null) {
+      children.push({ type: "progress-bar", value: Math.round(lr.progress * 100), max: 100, label: "Downloading " + Math.round(lr.progress * 100) + "%" });
+    } else if (lr.outcome === "running") {
+      children.push({ type: "loading", message: "Working…" });
+    }
+    children.push({ type: "text", content: outcomeLine(lr), className: lr.outcome === "failed" ? "plugin-error" : undefined });
+    if (lr.candidates.length) {
+      children.push({ type: "text", className: "plugin-muted",
+        content: lr.candidates.length + " matching file" + (lr.candidates.length === 1 ? "" : "s") + ", best first. ✓ is the one that played, ✗ the ones that were tried and dropped." });
+      children.push({
+        type: "track-row-list",
+        items: fallbackCandidateRows(lr),
+        showHeader: true,
+        selectable: true,
+        openOnClick: "title",
+        actions: [{ id: "download-file", label: "Download", icon: "⬇" }],
+        columns: FALLBACK_COLUMNS
+      });
+    }
+  }
+
+  var totals = fallbackTotals(fallback);
+  var keys = Object.keys(fallback);
+  children.push({ type: "toolbar", title: "Kept files",
+    status: keys.length ? (totals.count + (totals.count === 1 ? " file" : " files") + " · " + formatBytes(totals.bytes)) : undefined,
+    buttons: keys.length ? [{ label: "Delete all", action: "delete-all-kept", icon: "🗑" }] : [] });
+  if (!keys.length) {
+    children.push({ type: "text", className: "plugin-muted", content: "Nothing fetched by the fallback yet. Files it fetches stay in slskd's downloads folder, listed here, until you delete them." });
+  } else {
+    children.push({ type: "text", className: "plugin-muted",
+      content: "These stay in slskd's downloads folder so the same song plays instantly next time. Delete removes the file from disk through slskd" +
+        (downloadsCollection() ? "; they are already part of your library through the collection that folder sits in." : ".") });
+    children.push({
+      type: "track-row-list",
+      items: keptRows(),
+      selectable: true,
+      showHeader: true,
+      actions: [
+        { id: "play-kept", label: "Play", icon: "▶" },
+        { id: "import-kept", label: "Add to library…", icon: "＋" },
+        { id: "delete-kept", label: "Delete file", icon: "🗑" }
+      ]
+    });
+  }
+  return { type: "layout", direction: "vertical", children: children };
+}
+
+function fallbackSettingsSection() {
+  var totals = fallbackTotals(fallback);
+  var children = [
+    { type: "text", className: "plugin-muted",
+      content: "When a track has no playable source, Viboplr can fetch it from Soulseek: one bounded search, then the best-matching file from a sharer with a free slot, played as soon as it lands. " +
+        "Enable it and set its order among the other sources in Settings → Providers → Playback fallback. Without a preferred-formats setting the fallback favours high-bitrate lossy files over lossless — they arrive in a fraction of the time." },
+    { type: "settings-row", label: "Files kept by the fallback",
+      description: totals.count
+        ? totals.count + (totals.count === 1 ? " file" : " files") + " · " + formatBytes(totals.bytes) + ", in slskd's downloads folder under “" + DEST_ROOT + "/" + FALLBACK_SUBDIR + "”. The Fallback tab lists each one."
+        : "None yet. Fetched files stay in slskd's downloads folder, under “" + DEST_ROOT + "/" + FALLBACK_SUBDIR + "”, so a song plays instantly the next time." },
+    { type: "toolbar", buttons: [
+      { label: "Show in Soulseek", action: "open-fallback", variant: "secondary" }
+    ].concat(totals.count ? [{ label: "Delete all kept files", action: "delete-all-kept", variant: "secondary", icon: "🗑" }] : []) }
+  ];
+  return { type: "section", title: "Playback fallback", children: children };
+}
+
 function render() {
   if (!api) return;
   if (readiness.state === "unconfigured") ensureSetupKey();
@@ -1833,18 +2552,21 @@ function render() {
     api.ui.setViewData(VIEW_ID, setupView(), { scrollKey: "setup" });
     return;
   }
+  var keptCount = Object.keys(fallback).length;
+  var mainTab = activeTab === "transfers" || activeTab === "fallback" ? activeTab : "search";
   var body = [{
     type: "tabs",
     tabs: [
       { id: "search", label: "Search" },
-      { id: "transfers", label: "Downloads", count: transfers.length || undefined }
+      { id: "transfers", label: "Downloads", count: transfers.length || undefined },
+      { id: "fallback", label: "Fallback", count: keptCount || undefined }
     ],
-    activeTab: activeTab === "transfers" ? "transfers" : "search",
+    activeTab: mainTab,
     action: "main-tab"
   }];
-  body.push(activeTab === "transfers" ? transfersTab() : searchTab());
+  body.push(mainTab === "transfers" ? transfersTab() : (mainTab === "fallback" ? fallbackTab() : searchTab()));
   api.ui.setViewData(VIEW_ID, { type: "layout", direction: "vertical", children: body },
-    { scrollKey: activeTab === "transfers" ? "transfers" : "search:" + search.query });
+    { scrollKey: mainTab === "search" ? "search:" + search.query : mainTab });
 }
 
 function renderSettings() {
@@ -1866,6 +2588,8 @@ function renderSettings() {
         description: downloadsDir || "Read from slskd once connected." }
     ]
   });
+
+  children.push(fallbackSettingsSection());
 
   if (readiness.state === "ready" && tier === "local" && downloadsDir) {
     var col = downloadsCollection();
@@ -1915,6 +2639,15 @@ function candidateByRef(ref) {
   for (var i = 0; i < search.results.length; i++) {
     var c = search.results[i];
     if (c.username + KEY_SEP + c.filename === raw) return c;
+  }
+  // The Fallback tab's candidate rows aren't in the search list, but their
+  // Download button should still work.
+  var lr = lastResolve;
+  if (lr && lr.candidates) {
+    for (var j = 0; j < lr.candidates.length; j++) {
+      var fc = lr.candidates[j];
+      if (fc.username + KEY_SEP + fc.filename === raw) return fc;
+    }
   }
   return null;
 }
@@ -1998,9 +2731,52 @@ function registerActions() {
   });
 
   api.ui.onAction("main-tab", function (data) {
-    activeTab = (data && data.tabId) === "transfers" ? "transfers" : "search";
+    var id = data && data.tabId;
+    activeTab = id === "transfers" || id === "fallback" ? id : "search";
     render();
     schedulePoll(activeTab === "transfers");
+  });
+
+  // ---- the Fallback tab ----
+  api.ui.onAction("clear-resolve", function () {
+    lastResolve = null;
+    render();
+  });
+
+  api.ui.onAction("open-fallback", function () {
+    activeTab = "fallback";
+    render();
+    api.ui.navigateToView(VIEW_ID);
+  });
+
+  api.ui.onAction("play-kept", function (data) {
+    var keys = keptKeys(data);
+    for (var i = 0; i < keys.length; i++) {
+      var e = fallback[keys[i]];
+      if (e && e.state === "kept") { playTransfer(e.ref); return; }
+    }
+  });
+
+  api.ui.onAction("import-kept", function (data) {
+    var refs = [];
+    var keys = keptKeys(data);
+    for (var i = 0; i < keys.length; i++) {
+      var e = fallback[keys[i]];
+      if (e && e.state === "kept") refs.push(e.ref);
+    }
+    openImport(refs);
+  });
+
+  api.ui.onAction("delete-kept", function (data) {
+    var keys = keptKeys(data).filter(function (k) { return !!fallback[k]; });
+    if (!keys.length) return;
+    deleteFallbackFiles(keys).catch(function (e) { console.error("slskd: deleting fallback files failed:", e); });
+  });
+
+  api.ui.onAction("delete-all-kept", function () {
+    var keys = Object.keys(fallback);
+    if (!keys.length) return;
+    deleteFallbackFiles(keys).catch(function (e) { console.error("slskd: deleting fallback files failed:", e); });
   });
 
   api.ui.onAction("result-mode", function (data) {
@@ -2384,6 +3160,8 @@ async function loadSettings() {
     sharesWarned = !!w;
     var t = await api.storage.get("tracked");
     if (t && typeof t === "object") tracked = t;
+    var fb = await api.storage.get("fallback");
+    if (fb && typeof fb === "object") fallback = fb;
   } catch (e) {
     console.error("slskd: couldn't read stored state:", e);
   }
@@ -2407,11 +3185,19 @@ async function activate(hostApi) {
     return path ? fileUrlForPlayback(path) : null;
   });
 
+  // The playback fallback: the host asks by metadata when a track has no
+  // playable source of its own. Budgeted — see "Playback fallback" above.
+  if (typeof api.playback.onStreamResolve === "function") {
+    api.playback.onStreamResolve(FALLBACK_ID, function (title, artistName, albumName, durationSecs, opts) {
+      return resolveFallback(title, artistName, albumName, durationSecs, opts);
+    });
+  }
+
   // The download modal's provider for slsk:// — "Download…" on any of our rows
   // and the Add to library button both land here. The transfer already
   // finished, so this resolve is an instant local copy, well inside any budget.
-  // No metadata-based resolver, deliberately: that would put an unbounded
-  // Soulseek wait into the host's automatic fallback for every unplayable track.
+  // There is still no metadata-based DOWNLOAD provider: a download the user
+  // asked for by hand deserves a picked file, not the fallback's best guess.
   api.downloads.onResolveByUri(PROVIDER_ID, async function (uri) {
     var ref = String(uri || "").replace(/^slsk:\/\//, "");
     var rec = findTrackedByRef(ref);
@@ -2461,6 +3247,8 @@ function deactivate() {
   toolResults = {};
   knownDone = {};
   completionsSeeded = false;
+  lastResolve = null;
+  fallbackBusy = false;
   api = null;
 }
 
@@ -2515,5 +3303,15 @@ return {
   _extOf: extOf,
   _formatBytes: formatBytes,
   _formatDurationSecs: formatDurationSecs,
-  _flattenListing: flattenListing
+  _flattenListing: flattenListing,
+  _FALLBACK_ID: FALLBACK_ID,
+  _normalizeText: normalizeText,
+  _fallbackKey: fallbackKey,
+  _fallbackQuery: fallbackQuery,
+  _scoreFallbackCandidate: scoreFallbackCandidate,
+  _rankFallback: rankFallback,
+  _fallbackQualityRank: fallbackQualityRank,
+  _matchLabel: matchLabel,
+  _fallbackTotals: fallbackTotals,
+  _keptKeys: keptKeys
 };

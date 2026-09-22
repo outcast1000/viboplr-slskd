@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.4.0
+
+- **Playback fallback.** The plugin is now a stream resolver: when a track has
+  no playable source of its own, Viboplr can ask Soulseek for it (Settings →
+  Providers → Playback fallback). One bounded search (20 s), a match that
+  requires the title in the filename and the artist in the path and marks down
+  live / remix / instrumental / cover variants, then the best file from a
+  sharer with a free slot — dropped for the next sharer if it hasn't started in
+  12 s, up to three. Everything fits in the host's 60 s; what doesn't finish
+  keeps downloading and answers the next request for that song instantly.
+  Without a preferred-formats setting the fallback favours high-bitrate lossy
+  over lossless, since it arrives in a fraction of the time. Audio only; needs
+  slskd on this computer.
+- **Fallback tab** in the Soulseek view: the last resolve step by step (query,
+  every matching file with its match score, ✓ the one that played, ✗ the ones
+  tried and dropped, timings), plus the **kept files** the fallback has fetched
+  so far, with Play, Add to library and **Delete file** (also a Delete all).
+  Fetched files live under `viboplr/fallback/` in slskd's downloads folder and
+  are remembered by normalized title + artist.
+- **Deleting kept files** goes through slskd's Files API, which slskd gates
+  behind `remote_file_management: true`; a refusal says exactly that instead of
+  failing quietly. Settings → Soulseek gains a **Playback fallback** section
+  with the count and size of kept files and the same delete.
+- Tests: the fake host moved to `test/harness/host.js` and is shared by the
+  transfers and fallback suites.
+
 ## 0.3.1
 
 - **A quieter empty view.** While slskd isn't connected the view is one line

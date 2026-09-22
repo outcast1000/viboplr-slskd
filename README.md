@@ -56,6 +56,12 @@ each with the fix.
   anything finished. Finished rows are ordinary tracks — right-click menu,
   drag-to-queue, Download… all work.
 - **Play** a finished download straight from slskd's folder.
+- **Playback fallback.** When a track has no playable source of its own — a
+  library row whose file is gone, a streaming plugin's track it can't reach —
+  Viboplr asks its fallback sources in turn, and this plugin can be one of them
+  (Settings → Providers → Playback fallback). It runs one bounded search,
+  fetches the best-matching file from a sharer with a free slot, and plays it
+  the moment it lands. See [Playback fallback](#playback-fallback).
 - **Into your library, two ways.** If slskd's downloads folder is inside one of
   your collections, finished files are picked up automatically (the plugin
   rescans that collection as they land). Otherwise **Add to library…** copies one
@@ -66,6 +72,45 @@ each with the fix.
   field, over the filename guess.
 - **AI assistants** can drive it through Viboplr's assistant API: `status`,
   `search`, `download`, `list_downloads`.
+
+## Playback fallback
+
+The host gives every fallback source 60 seconds, and Soulseek sends whole files
+from strangers' queues — so the fallback works to a budget rather than
+waiting:
+
+1. **One search** (up to 20 s), for `artist title` with edition suffixes such as
+   "(Remastered 2009)" dropped, because filenames rarely carry them.
+2. **Match**, not just rank. A result must carry most of the title's words in its
+   filename and the artist's words somewhere in its path; a *live*, *remix*,
+   *instrumental* or *cover* the request didn't ask for is marked down. Among
+   the matches, a sharer with a free upload slot comes first — the user is
+   listening to silence — and without a preferred-formats setting a high-bitrate
+   lossy file beats a lossless one, which is a fifth of the bytes for the same
+   song.
+3. **Fetch**, moving on. The best match is queued into
+   `<downloads>/viboplr/fallback/…`; if it hasn't started moving in 12 s the
+   slot wasn't free after all, so it is dropped and the next sharer tried (up
+   to three).
+4. **What lands in time plays.** What doesn't keeps downloading in the
+   background and answers the *next* request for that song instantly — the
+   plugin remembers every file the fallback fetched, by normalized title +
+   artist.
+
+The **Fallback tab** in the Soulseek view shows the last resolve step by step —
+the query, every matching file with its match score, which one was tried (✗)
+and which one played (✓), and how long each step took — and lists the **kept
+files** with Play, Add to library and **Delete file**. Delete is the one place
+the plugin removes anything from disk, and it does so through slskd's own Files
+API, which slskd gates behind `remote_file_management: true` under `flags:` in
+`slskd.yml` (or `SLSKD_REMOTE_FILE_MANAGEMENT=true`); without it the plugin
+tells you what to enable rather than failing quietly. Settings → Soulseek →
+Playback fallback shows the count and size of kept files and offers the same
+delete.
+
+Only audio: the fallback stays out of the host's "prefer video" pass. And it
+needs slskd on this computer — a `file://` path on another machine is no use to
+the player.
 
 ## Where slskd runs matters
 
@@ -100,11 +145,13 @@ assistant-queued file is tracked, located and imported identically.
 
 - **Stream before the download finishes.** Soulseek sends whole files, and you can
   sit in a stranger's queue for a long time. It's "download, then play."
-- **Automatically find tracks on Soulseek in the background.** Soulseek waits are
-  unbounded, so the plugin never inserts itself into Viboplr's automatic playback
-  or download fallback chains. You always start a search yourself (or an
-  assistant does, deliberately).
-- **Delete files.** Remove drops a row from slskd's list; the file stays on disk.
+- **Download on your behalf without a bound.** The playback fallback is the one
+  automatic path, and it is budgeted (see above). There is no metadata-based
+  *download* provider: a download you ask for by hand deserves a file you
+  picked, not the fallback's best guess.
+- **Delete your files.** Remove on the Downloads tab drops a row from slskd's
+  list; the file stays on disk. Only files the *fallback* fetched can be
+  deleted, from the Fallback tab, and only when you ask.
 - **Manage your shares.** Do that in slskd.
 
 ## Sharing
@@ -133,7 +180,10 @@ until slskd reports it complete; a download is
 `POST /api/v0/transfers/downloads/batches` with a plugin-chosen `destination`
 subfolder, so the finished file can be found again through the Files API (slskd's
 transfer records carry only the *remote* filename). Progress is polled — slskd has
-no live feed for transfers.
+no live feed for transfers. The playback fallback is the same search and the
+same batch enqueue, registered as a host stream resolver
+(`api.playback.onStreamResolve`) and polled to a 55 s budget; kept files are
+deleted with `DELETE /api/v0/files/downloads/directories/{base64}`.
 
 Four traps every reader of that API hits, all handled here: flag enums arrive as
 comma-joined strings (`"Completed, Succeeded"`), `length` is seconds in search
