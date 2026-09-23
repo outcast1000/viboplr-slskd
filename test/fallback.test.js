@@ -146,7 +146,8 @@ function fallbackHost(opts) {
         const state = states[Math.min(transferPolls++, states.length - 1)];
         return json([{ username: batch.username, directories: [{ files: [{
           id: "t1", username: batch.username, filename: batch.files[0].filename, size: batch.files[0].size,
-          state, bytesTransferred: state === "InProgress" ? 4000000 : (state.includes("Succeeded") ? 9000000 : 0)
+          state, bytesTransferred: state === "InProgress" ? 4000000 : (state.includes("Succeeded") ? 9000000 : 0),
+          averageSpeed: state === "InProgress" ? 1000000 : 0, placeInQueue: state.startsWith("Queued") ? 3 : null
         }] }] }]);
       }
       if (url.includes("/api/v0/files/downloads/directories/") && method === "GET") {
@@ -364,4 +365,31 @@ test("Delete removes the kept file through slskd's Files API and forgets it; a 4
   } finally {
     plugin2.deactivate();
   }
+});
+
+test("while the fallback waits, the tab shows the transfer the way the Downloads tab would: queue position, then progress with speed and time left", async () => {
+  const plugin = loadPlugin();
+  const { h } = fallbackHost();
+  await plugin.activate(h.api);
+  try {
+    h.actions["main-tab"]({ tabId: "fallback" });
+    const before = h.calls.views.length;
+    await h.resolvers["meta:" + plugin._FALLBACK_ID]("Karma Police", "Radiohead", null, 264, {});
+    const during = h.calls.views.slice(before).map((v) => JSON.stringify(v.data)).join("\n");
+    assert.ok(during.includes("Waiting in peer's queue"), "the queued phase was shown");
+    assert.ok(during.includes("position 3"), "with the position in it");
+    assert.ok(during.includes("Downloading 44%"), "then the download with its percentage");
+    assert.ok(during.includes("about 0:05 left"), "and the time left from the reported speed");
+    const last = JSON.stringify(h.calls.views[h.calls.views.length - 1].data);
+    assert.ok(!last.includes("Downloading 44%"), "live detail is cleared once the resolve settles");
+  } finally {
+    plugin.deactivate();
+  }
+});
+
+test("transferEta is bytes left over the average speed, and null without one", () => {
+  assert.equal(p._transferEta({ size: 9000000, bytesTransferred: 4000000, averageSpeed: 1000000 }), 5);
+  assert.equal(p._transferEta({ size: 9000000, bytesTransferred: 9500000, averageSpeed: 1000000 }), 0);
+  assert.equal(p._transferEta({ size: 9000000, bytesTransferred: 0, averageSpeed: 0 }), null);
+  assert.equal(p._transferEta(null), null);
 });

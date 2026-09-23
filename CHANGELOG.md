@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.1
+
+- **The Fallback tab says what it is waiting for.** While a fallback resolve
+  runs, the Picked file line and the progress bar show the transfer the way the
+  Downloads tab would — "Waiting in peer's queue · position 3", then
+  "Downloading 44% · 4 MB of 9 MB · ↓ 1 MB/s · about 0:05 left" — instead of a
+  bare percentage. The time left is bytes remaining over slskd's reported
+  average speed, and is omitted when there is none.
+
 ## 0.5.0
 
 - **The playback fallback no longer throws its search away.** slskd ends a

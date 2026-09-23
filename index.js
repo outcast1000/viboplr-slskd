@@ -1823,6 +1823,36 @@ function fallbackAnswer(path) {
   return { url: fileUrlForPlayback(path), label: FALLBACK_LABEL };
 }
 
+// While a fallback transfer runs, the tab shows the same line the Downloads
+// tab would — "Waiting in peer's queue · position 3", "Downloading 40% · 3.6 MB
+// of 9 MB · ↓ 1.2 MB/s" — so a long wait has a stated reason. `eta` is our
+// own: bytes left over the reported average speed.
+function liveTransferTick(rec, key) {
+  return function (t) {
+    rec.progress = transferProgress(t);
+    rec.live = transferSubtitle(t, tracked[key], tier);
+    rec.eta = transferEta(t);
+    renderIfFallback();
+  };
+}
+
+function transferEta(t) {
+  if (!t || !t.size || !t.averageSpeed) return null;
+  var left = t.size - (t.bytesTransferred || 0);
+  if (left <= 0) return 0;
+  return Math.round(left / t.averageSpeed);
+}
+
+function clearLive(rec) {
+  rec.progress = null;
+  rec.live = null;
+  rec.eta = null;
+}
+
+function liveLine(rec) {
+  return rec.live + (rec.eta ? "  ·  about " + formatDurationSecs(rec.eta) + " left" : "");
+}
+
 async function resolveFallback(title, artistName, albumName, durationSecs, opts) {
   if (opts && opts.preferVideo) return null;           // audio only; the video pass is not ours
   if (readiness.state !== "ready" || tier !== "local") return null;
@@ -1859,7 +1889,8 @@ async function resolveFallback(title, artistName, albumName, durationSecs, opts)
       if (live && (livePhase === "downloading" || livePhase === "starting" || livePhase === "queued" || livePhase === "requested")) {
         settleKept("still downloading from the earlier attempt — waiting on it");
         var settleWait0 = resolveStep(rec, "wait for the earlier download");
-        var w0 = await waitForTransfer(kept.ref, deadline, null);
+        var w0 = await waitForTransfer(kept.ref, deadline, liveTransferTick(rec, kept.ref));
+        clearLive(rec);
         if (w0.state === "done") {
           var p1 = await locateFinished(w0.transfer, tracked[kept.ref]);
           if (p1) {
@@ -1942,12 +1973,8 @@ async function resolveFallback(title, artistName, albumName, durationSecs, opts)
       await saveFallbackIndex();
       await api.storage.set("tracked", tracked);
 
-      var w = await waitForTransfer(key, deadline, function (t) {
-        var pct = transferProgress(t);
-        rec.progress = pct;
-        renderIfFallback();
-      });
-      rec.progress = null;
+      var w = await waitForTransfer(key, deadline, liveTransferTick(rec, key));
+      clearLive(rec);
       if (w.state === "done") {
         var path = await locateFinished(w.transfer, tracked[key]);
         if (!path) {
@@ -2493,7 +2520,7 @@ function pickedLine(rec) {
   if (!c) return null;
   var state;
   if (rec.outcome === "played") state = "played";
-  else if (rec.outcome === "running") state = rec.progress != null ? "downloading " + Math.round(rec.progress * 100) + "%" : "waiting for the sharer";
+  else if (rec.outcome === "running") state = rec.live ? liveLine(rec) : "waiting for the sharer";
   else if (rec.outcome === "timeout" && rec.chosen) state = "still downloading — used next time";
   else state = "dropped";
   return [
@@ -2578,8 +2605,12 @@ function fallbackTab() {
     var line = (i + 1) + ". " + s.label + (s.outcome ? " → " + s.outcome : "…") + (s.ms != null ? " (" + Math.round(s.ms / 100) / 10 + "s)" : "");
     children.push({ type: "text", content: line, className: s.level === "error" ? "plugin-error" : "plugin-muted" });
   }
-  if (lr.outcome === "running" && lr.progress != null) {
-    children.push({ type: "progress-bar", value: Math.round(lr.progress * 100), max: 100, label: "Downloading " + Math.round(lr.progress * 100) + "%" });
+  if (lr.outcome === "running" && lr.live) {
+    if (lr.progress != null) {
+      children.push({ type: "progress-bar", value: Math.round(lr.progress * 100), max: 100, label: liveLine(lr) });
+    } else {
+      children.push({ type: "loading", message: liveLine(lr) });
+    }
   } else if (lr.outcome === "running") {
     children.push({ type: "loading", message: "Working…" });
   }
@@ -3408,6 +3439,7 @@ return {
   _fallbackQualityRank: fallbackQualityRank,
   _matchLabel: matchLabel,
   _fallbackTotals: fallbackTotals,
+  _transferEta: transferEta,
   _keptKeys: keptKeys,
   _setFallbackSearchMs: function (ms) { FALLBACK_SEARCH_MS = ms; }
 };
