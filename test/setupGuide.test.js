@@ -51,3 +51,11 @@ test("local collections ride in the fragment as newline-joined share paths, dedu
   // No collections, no share param.
   assert.equal(plugin._setupGuideUrl("abc", []), "https://outcast1000.github.io/viboplr-slskd/#key=abc");
 });
+
+test("the Connection section always offers the guide, whatever state the plugin is in", () => {
+  const sec = plugin._connectionSection();
+  const bar = sec.children.find((c) => c.type === "toolbar");
+  assert.deepEqual(bar.buttons.map((x) => x.action), ["test-connection", "setup-open-guide"]);
+  const key = sec.children.find((c) => c.label === "API key");
+  assert.match(key.description, /slskd\.yml/, "the key goes INTO slskd's file; it is not copied out of slskd");
+});

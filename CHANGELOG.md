@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.5.2
+
+- **macOS guide: the right settings folder.** slskd 0.26 on .NET 10 keeps its
+  files in `~/Library/Application Support/slskd`, not `~/.local/share/slskd` as
+  slskd's own README (and this guide) said. Every macOS path on the page now
+  points there, quoted where it goes through the shell; the Run it once step
+  tells you to read the location off the `Using application directory` log
+  line, so an older build still works out.
+- **macOS guide: Run it once, step by step.** The download step moves the
+  whole unzipped folder to `~/slskd` in one line and says why the `config`
+  folder must stay beside the binary. The run step explains the three
+  commands, names the `Application started` line to wait for, and adds a check
+  (`ls` the settings folder) with the two usual reasons it comes up empty. The
+  Configure step says a fresh `slskd.yml` is all comments, so the block is
+  pasted at the end — nothing to merge.
+- **The guide is reachable from every state.** "Open setup guide" now sits
+  next to Test connection in the Connection section (the sidebar view and
+  Settings → Soulseek), and on the "key rejected" and "not signed in" screens,
+  carrying the plugin's own key. Those two screens now say the fix is in
+  `slskd.yml` — the key goes into slskd's file, not out of its web UI, which is
+  what the old wording implied. The guide says where the button is.
+
 ## 0.5.1
 
 - **The Fallback tab says what it is waiting for.** While a fallback resolve

@@ -2142,7 +2142,12 @@ function setupBar() {
 function setupView() {
   var children = [];
   var st = readiness.state;
-  var showGuide = st === "unconfigured" || st === "unreachable";
+  // The full bar (about page + Connect) belongs to the states before slskd has
+  // answered. Once it answers and something is still wrong, the fix is in
+  // slskd's settings file, and the guide's Configure step is the one place
+  // that shows those lines with THIS plugin's key already filled in — so every
+  // not-ready state offers a way there.
+  var showBar = st === "unconfigured" || st === "unreachable";
 
   if (st === "unconfigured") {
     children.push({ type: "text", content: "Search and download from Soulseek", className: "plugin-heading" });
@@ -2153,16 +2158,20 @@ function setupView() {
     children.push({ type: "text", content: "If slskd uses HTTPS with its default self-signed certificate, turn on \"Allow self-signed certificate\" below.", className: "plugin-muted" });
   } else if (st === "unauthorized") {
     children.push({ type: "text", content: "slskd rejected the API key", className: "plugin-heading" });
-    children.push({ type: "text", content: "slskd is running, but it didn't accept the key. Copy it again from slskd under Settings → Options → Web." });
+    children.push({ type: "text", content: "slskd is running, but its settings file doesn't list the key below. Add it under web → authentication → api_keys in slskd.yml and restart slskd — the setup guide's Configure step shows the exact lines with this key already in them." });
+    children.push({ type: "button", label: "Open setup guide", action: "setup-open-guide", variant: "accent" });
   } else if (st === "disconnected") {
     children.push({ type: "text", content: "slskd isn't signed in to Soulseek", className: "plugin-heading" });
-    children.push({ type: "text", content: "slskd is running and the key works, but it isn't connected to the Soulseek network. Check the Soulseek username and password in slskd's own settings." });
-    children.push({ type: "button", label: "Open slskd", action: "open-slskd", variant: "secondary" });
+    children.push({ type: "text", content: "slskd is running and the key works, but it isn't connected to the Soulseek network. Check the Soulseek username and password under soulseek: in slskd.yml (the guide's Configure step) and restart slskd, or sign in from slskd's own page." });
+    children.push({ type: "toolbar", buttons: [
+      { label: "Open setup guide", action: "setup-open-guide", variant: "accent" },
+      { label: "Open slskd", action: "open-slskd", variant: "secondary" }
+    ] });
   } else if (st === "connecting") {
     children.push({ type: "loading", message: "slskd is connecting to Soulseek…" });
   }
 
-  if (showGuide) children.push(setupBar());
+  if (showBar) children.push(setupBar());
   children.push({ type: "spacer" });
   children.push(connectionSection());
   return { type: "layout", direction: "vertical", children: children };
@@ -2184,11 +2193,14 @@ function connectionSection() {
     children: [
       { type: "settings-row", label: "slskd address", description: "e.g. http://localhost:5030",
         control: { type: "text-input", placeholder: "http://localhost:5030", action: "set-url", value: settings.url } },
-      { type: "settings-row", label: "API key", description: "slskd → Settings → Options → Web",
+      { type: "settings-row", label: "API key", description: "Must appear in slskd.yml under web → authentication → api_keys. The setup guide writes it in for you.",
         control: { type: "text-input", placeholder: "API key", action: "set-key", password: true, value: settings.apiKey } },
       { type: "settings-row", label: "Allow self-signed certificate", description: "Needed if slskd serves HTTPS with its default certificate",
         control: { type: "toggle", label: "", action: "set-insecure", checked: !!settings.insecure } },
-      { type: "toolbar", buttons: [{ label: "Test connection", action: "test-connection", variant: "accent" }],
+      { type: "toolbar", buttons: [
+          { label: "Test connection", action: "test-connection", variant: "accent" },
+          { label: "Open setup guide", action: "setup-open-guide", variant: "secondary" }
+        ],
         status: statusLine(), statusVariant: readiness.state === "ready" ? "success" : (readiness.state === "connecting" || readiness.state === "unconfigured" ? "default" : "error") }
     ]
   };
@@ -3404,6 +3416,7 @@ return {
   _setupGuideUrl: setupGuideUrl,
   _whatIsThisUrl: whatIsThisUrl,
   _setupBar: setupBar,
+  _connectionSection: connectionSection,
   _hostOf: hostOf,
   _searchQueryForTarget: searchQueryForTarget,
   _nextReadiness: nextReadiness,

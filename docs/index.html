@@ -24,7 +24,7 @@
         <button class="copy" style="position:static" data-copy-target="key">Copy</button>
         <button class="btn secondary" id="newkey" type="button" hidden>Generate a key</button>
       </div>
-      <p class="small" id="keynote" hidden>You opened this page directly, so the key above was made here. Paste it into the plugin's <strong>API key</strong> field in Viboplr as well.</p>
+      <p class="small" id="keynote" hidden>You opened this page directly, so the key above was made here. Paste it into the plugin's <strong>API key</strong> field in Viboplr as well — or open this page from the plugin (Soulseek in the sidebar → <strong>Open setup guide</strong>) and it arrives with the plugin's own key filled in.</p>
     </div>
   </header>
 
@@ -80,20 +80,28 @@ $s.Save()</pre><button class="copy" data-copy>Copy</button></div>
     <ol class="steps">
       <li>
         <h2>Download</h2>
-        <p>Get <code>slskd-&lt;version&gt;-osx-arm64.zip</code> (Apple silicon) or <code>osx-x64.zip</code> (Intel) from the <a href="https://github.com/slskd/slskd/releases/latest" target="_blank" rel="noopener">releases page</a> and unzip it into a folder called <code>slskd</code> in your home folder.</p>
+        <p>Get <code>slskd-&lt;version&gt;-osx-arm64.zip</code> (Apple silicon) or <code>osx-x64.zip</code> (Intel) from the <a href="https://github.com/slskd/slskd/releases/latest" target="_blank" rel="noopener">releases page</a>. Unzipping it (Safari does this by itself) leaves a folder named after the file in Downloads. Move that <em>whole</em> folder to your home folder and call it <code>slskd</code> — Terminal does both in one line:</p>
+        <div class="snippet"><pre>mv ~/Downloads/slskd-*-osx-*/ ~/slskd</pre><button class="copy" data-copy>Copy</button></div>
+        <p class="small">Keep the folder's contents together. slskd writes its settings file from the <code>config</code> folder that sits beside it; move the <code>slskd</code> file out on its own and no settings file ever appears.</p>
         <a class="btn" href="https://github.com/slskd/slskd/releases/latest" target="_blank" rel="noopener">Open slskd releases</a>
       </li>
       <li>
         <h2>Run it once</h2>
-        <p>macOS blocks unsigned downloads, so the first start has to come from Terminal. These three commands clear the download flag, make it executable and start it. slskd creates <code>~/.local/share/slskd/slskd.yml</code>. Press Ctrl+C to stop it.</p>
+        <p>The first start has to come from Terminal (Spotlight → <strong>Terminal</strong>): macOS won't open an unsigned download from the Finder. Paste the three lines. The first clears the flag macOS puts on downloads (harmless if there is none), the second makes sure the program is executable, the third starts it.</p>
         <div class="snippet"><pre>xattr -dr com.apple.quarantine ~/slskd
 chmod +x ~/slskd/slskd
 ~/slskd/slskd</pre><button class="copy" data-copy>Copy</button></div>
-        <p>The first start asks to allow incoming connections (port 50300). Allow it — otherwise other Soulseek users can't reach you and downloads are slow to start.</p>
+        <p>Log lines scroll by. When one says <code>Application started</code>, slskd is running and has written its settings file. The line just above, <code>Using application directory …</code>, says where: on current builds that is <code>~/Library/Application Support/slskd</code> (older ones used <code>~/.local/share/slskd</code>; the rest of this page assumes the current one — swap the path if your log says otherwise). macOS may ask whether to allow incoming connections — allow it, or other Soulseek users can't reach you and downloads are slow to start. Then press <strong>Ctrl+C</strong> to stop it.</p>
+        <p>Check before going on:</p>
+        <div class="snippet"><pre>ls "$HOME/Library/Application Support/slskd"</pre><button class="copy" data-copy>Copy</button></div>
+        <p class="small">You should see <code>slskd.yml</code> next to <code>downloads</code> and <code>incomplete</code> (the quotes matter — the path has a space in it). If the folder isn't there, slskd never got as far as starting — run <code>~/slskd/slskd</code> again and read the first line marked <code>ERR</code>. The two usual causes: the <code>slskd</code> file was moved out of its folder (it needs <code>config</code> beside it), or something else already holds port 5030.</p>
       </li>
       <li>
         <h2>Configure</h2>
-        <p><code>open -e ~/.local/share/slskd/slskd.yml</code> opens the file in TextEdit. Add the lines below (indentation matters — two spaces per level). Replace the two <span class="placeholder">Soulseek placeholders</span> with your own account; the key is already yours. If the file already has an uncommented <code>soulseek:</code>, <code>shares:</code> or <code>web:</code> section, add the lines inside it instead of repeating the heading.</p>
+        <p>Open the file in TextEdit:</p>
+        <div class="snippet"><pre>open -e "$HOME/Library/Application Support/slskd/slskd.yml"</pre><button class="copy" data-copy>Copy</button></div>
+        <p>A fresh file is nothing but commented-out examples (every line starts with <code>#</code>), so there is nothing to merge: paste the block below at the very end and save. Replace the two <span class="placeholder">Soulseek placeholders</span> with your own account; the key is already yours. Indentation matters — two spaces per level, as shown.</p>
+        <p class="small">Editing a file you had already configured? Then add the lines inside its existing <code>soulseek:</code>, <code>shares:</code> or <code>web:</code> section instead of repeating the heading.</p>
         <p><strong>Shared folders.</strong> Soulseek is a sharing network, and many users won't send files to someone who shares nothing. Tick the folders to share; the config below follows. Other users can only download from them, never change them. slskd scans them at every start, so a large library takes a few minutes the first time.</p>
         <div class="shares" data-shares data-placeholder="/Users/you/Music"></div>
         <div class="snippet"><pre data-yml="macos"></pre><button class="copy" data-copy>Copy</button></div>
@@ -110,8 +118,8 @@ chmod +x ~/slskd/slskd
   &lt;key&gt;ProgramArguments&lt;/key&gt;&lt;array&gt;&lt;string&gt;${HOME}/slskd/slskd&lt;/string&gt;&lt;/array&gt;
   &lt;key&gt;RunAtLoad&lt;/key&gt;&lt;true/&gt;
   &lt;key&gt;KeepAlive&lt;/key&gt;&lt;true/&gt;
-  &lt;key&gt;StandardOutPath&lt;/key&gt;&lt;string&gt;${HOME}/.local/share/slskd/launchd.log&lt;/string&gt;
-  &lt;key&gt;StandardErrorPath&lt;/key&gt;&lt;string&gt;${HOME}/.local/share/slskd/launchd.log&lt;/string&gt;
+  &lt;key&gt;StandardOutPath&lt;/key&gt;&lt;string&gt;${HOME}/Library/Application Support/slskd/launchd.log&lt;/string&gt;
+  &lt;key&gt;StandardErrorPath&lt;/key&gt;&lt;string&gt;${HOME}/Library/Application Support/slskd/launchd.log&lt;/string&gt;
 &lt;/dict&gt;&lt;/plist&gt;
 EOF
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.slskd.plist</pre><button class="copy" data-copy>Copy</button></div>
@@ -119,7 +127,7 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.slskd.plist</pre><bu
       </li>
       <li>
         <h2>Connect</h2>
-        <p>Back in Viboplr, open <strong>Soulseek</strong> in the sidebar and press <strong>Connect</strong>. Finished downloads land in <code>~/.local/share/slskd/downloads</code>; add that folder as a music source in Collections and they join your library on their own. Field by field: <a href="#connect">finishing the connection</a>.</p>
+        <p>Back in Viboplr, open <strong>Soulseek</strong> in the sidebar and press <strong>Connect</strong>. Finished downloads land in <code>~/Library/Application Support/slskd/downloads</code>; add that folder as a music source in Collections and they join your library on their own. Field by field: <a href="#connect">finishing the connection</a>.</p>
         <p class="small">slskd's own web page is at <code>http://localhost:5030</code>, user <code>slskd</code> / password <code>slskd</code>. You don't need it for Viboplr, but change that password in <code>slskd.yml</code> (<code>web.authentication.username / password</code>) if other people use this computer.</p>
       </li>
     </ol>
@@ -307,7 +315,7 @@ docker run -d --name slskd --restart unless-stopped \
       box.appendChild(add);
       var note = shares.length
         ? (shares.some(function (s) { return s.on; }) ? "" : "Nothing ticked: the config shares nothing.")
-        : (fromPlugin ? "You have no local collections in Viboplr yet. Type a folder to share." : "Open this page from the plugin to list your Viboplr collections here, or type a folder to share.");
+        : (fromPlugin ? "You have no local collections in Viboplr yet. Type a folder to share." : "Open this page from the plugin (Viboplr → Soulseek in the sidebar → What is this?, or Open setup guide next to Test connection) to list your Viboplr collections here, or type a folder to share.");
       if (note) box.appendChild(el("p", "small", note));
     });
   }
