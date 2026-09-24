@@ -1,7 +1,7 @@
 {
   "id": "slskd",
   "name": "Soulseek",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "author": "Viboplr",
   "description": "Search and download from the Soulseek network via a slskd daemon: ranked results, whole-album grabs, live transfer progress, finished files that play and reach your library, and a playback fallback that fetches a missing track from Soulseek.",
   "minAppVersion": "1.0.34",
@@ -10,13 +10,15 @@
   "updateUrl": "https://github.com/outcast1000/viboplr-slskd/releases/latest/download/update.json",
   "icon": "M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0M11 15.4V7.9l5-1.3v2.3l-5 1.3M11 15.4a2 2 0 1 1-4 0 2 2 0 0 1 4 0",
   "apiUsage": [
-    { "api": "network.fetch", "reason": "Talk to your slskd daemon's REST API" },
+    { "api": "network.fetch", "reason": "Talk to your slskd daemon's REST API, and ask Roadie (if installed) whether it runs slskd" },
+    { "api": "network.onDeepLink", "reason": "Receive Roadie's answer after you allow Viboplr to connect to the slskd it manages" },
     { "api": "storage.set", "reason": "Remember the slskd address, API key, preferences and which downloads this plugin started" },
     { "api": "playback.onResolveStreamByUri", "reason": "Play finished Soulseek downloads straight from slskd's downloads folder" },
     { "api": "playback.onStreamResolve", "reason": "Fetch a track from Soulseek when it has no playable source of its own (the Playback fallback in Settings → Providers)" },
     { "api": "downloads.onResolveByUri", "reason": "Add a finished download to a collection through Viboplr's own download modal (tags and cover art written)" },
     { "api": "system.readAudioTags", "reason": "Read title, artist and album out of a finished file instead of guessing from its name" },
-    { "api": "collections.resync", "reason": "Rescan your library when a download finishes inside one of your collections" }
+    { "api": "collections.resync", "reason": "Rescan your library when a download finishes inside one of your collections" },
+    { "api": "library.getTracks", "reason": "Read your copy's quality before offering an upgrade, and an album's tracks to tell which ones you're missing" }
   ],
   "contributes": {
     "assistant": {
@@ -80,6 +82,16 @@
         "id": "slskd-search",
         "label": "Search on Soulseek…",
         "targets": ["track", "album", "artist"]
+      },
+      {
+        "id": "slskd-upgrade",
+        "label": "Upgrade with Soulseek…",
+        "targets": ["track"]
+      },
+      {
+        "id": "slskd-fill-album",
+        "label": "Fill missing tracks with Soulseek…",
+        "targets": ["album"]
       }
     ],
     "settingsPanel": {

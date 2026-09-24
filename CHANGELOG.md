@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.7.0
+
+- **Install slskd with Roadie.** When [Roadie](https://github.com/outcast1000/roadie), the
+  standalone tool manager, is running on this computer, the empty view offers *Install slskd with
+  Roadie* (or *Connect through Roadie* when Roadie already has it). The button opens a `roadie://`
+  link; Roadie asks you before installing and before letting Viboplr connect, then sends the
+  plugin back a `viboplr://plugin/slskd/roadie` link and the plugin reads the address and its own
+  API key from Roadie's loopback API. Without Roadie the view offers *Get Roadie* next to the
+  existing guide, and nothing else changes. Needs a Viboplr that can open `roadie://` links
+  (1.0.71 or newer); on an older Viboplr the button explains.
+- A connection that came from Roadie is marked `managedBy: roadie`: it follows Roadie's port if it
+  moves, is forgotten when Roadie reports slskd removed, and shows *slskd is stopped — Open Roadie*
+  instead of the generic "not reachable" text. Typing an address or key by hand ends the
+  management; a hand-typed connection is never overwritten, and Roadie merely being closed never
+  releases anything. Pinned by `test/roadie.test.js`.
+- **Upgrade with Soulseek…** (right-click a library track). Runs the usual
+  search for the track and shows only files that would be an upgrade over the
+  copy you have — a higher tier (lossless over lossy, high over medium) or the
+  same lossy tier at least 20% faster; a lossless copy is beaten only by more
+  bits or a higher sample rate. Results are held to the same length as your
+  copy, so a different version can't pose as a better one. Your copy's quality
+  is shown above the list (the bitrate is worked out from size and length, and
+  marked approximate). *Show everything found* lifts the filter and marks the
+  upgrades with ↑. The file you pick is tagged with the library's own title,
+  artist and album, and once it lands its Downloads row offers **Replace in
+  library…**, which opens Viboplr's download modal with the row to replace —
+  compare, then replace or keep both. (Needs a Viboplr that reads
+  `libraryTrackId` on that request; an older one runs the ordinary Add to
+  library copy instead.)
+- **Fill missing tracks with Soulseek…** (right-click an album). Searches for
+  the album and compares every folder found with the tracks you already have,
+  matching on title words the way the playback fallback does (edition words
+  ignored, a "live" or "remix" the library title lacks counts as a different
+  recording). Opens on Folders, hides folders with nothing new, and says per
+  folder how many files you lack and what they weigh; **Fill** downloads just
+  those, tagged with the library's album. The Files view is filtered the same
+  way. Both actions fall back to a plain Soulseek search, with a note saying
+  why, when the track isn't a local library file or the album has no tracks in
+  the library.
+
 ## 0.6.0
 
 - **Hedged fetch.** The best sharer is queued at once; if no byte has arrived

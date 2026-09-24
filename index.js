@@ -119,7 +119,8 @@ var settings = {
   insecure: false,        // accept slskd's self-signed cert
   preferredFormats: "",   // comma-separated, "" = no preference
   fallbackQuality: "fast", // "fast" (high-bitrate lossy first) | "best" (lossless first); preferredFormats overrides both
-  batchSeq: 0
+  batchSeq: 0,
+  managedBy: null         // null | "roadie" — the address/key came from Roadie and follow it
 };
 
 var readiness = { state: "unconfigured", detail: null, username: null, version: null, shareCount: null };
@@ -133,7 +134,10 @@ var activeTab = "search";
 // `matchCount` / `folderCount` are what the search actually produced;
 // `results` / `folders` are the capped slices the view renders. `sortColumn` is
 // null while the list is in ranked ("best match") order.
-var search = { query: "", id: null, running: false, responseCount: 0, fileCount: 0, matchCount: 0, folderCount: 0, results: [], folders: [], error: null, sortColumn: null, sortDir: "desc" };
+// `mode` is what a context-menu action asked the search to do beyond finding
+// files — see "Upgrade / fill-album modes" — and is dropped by the next plain
+// search.
+var search = { query: "", id: null, running: false, responseCount: 0, fileCount: 0, matchCount: 0, folderCount: 0, results: [], folders: [], error: null, sortColumn: null, sortDir: "desc", mode: null };
 var searchGen = 0;
 
 var transfers = [];       // raw slskd transfer records (downloads)
@@ -743,6 +747,9 @@ function transferRowActions(t, rec, currentTier) {
   if (phase === "succeeded") {
     if (currentTier === "local" && rec && rec.resolvedPath) {
       ids.push("play-transfer");
+      // A file fetched as an upgrade has one obvious destination — the library
+      // row it was fetched for — so that comes before the generic copy.
+      if (rec.upgrade) ids.push("replace-transfer");
       ids.push("import-transfer");
     }
     ids.push("remove-transfer");
@@ -970,6 +977,100 @@ function titleWords(title) {
 function artistWords(artist) {
   var strict = wordList(artist, STOP_WORDS);
   return strict.length ? strict : wordList(artist, null);
+}
+
+// ---------------------------------------------------------------------------
+// Upgrade / fill-album modes (context menu)
+// ---------------------------------------------------------------------------
+// Two context-menu actions run an ordinary search and then read its results
+// against the library: "Upgrade" hides everything that isn't better than the
+// copy in hand, "Fill missing tracks" hides everything the album already has.
+// Both stay interactive — the user still picks the file or folder — because a
+// download asked for by hand gets a file the user chose, never a best guess
+// (the same rule that keeps this plugin without a metadata download provider).
+
+// The library row described the way a search result describes itself. The host
+// stores a container and a size but no bitrate, so for a lossy file the rate is
+// the size spread over the duration — within a few percent of the nominal CBR
+// figure and a fair average for VBR, which is all "is this better?" needs.
+function libraryQuality(track) {
+  var t = track || {};
+  var ext = String(t.format || extOf(t.path || "") || "").toLowerCase().replace(/^\./, "");
+  var c = {
+    extension: ext,
+    bitRate: null,
+    bitDepth: null,
+    sampleRate: null,
+    isVariableBitRate: false,
+    size: t.file_size || null,
+    length: t.duration_secs != null ? t.duration_secs : null
+  };
+  if (LOSSLESS_EXTS.indexOf(ext) < 0 && t.file_size > 0 && t.duration_secs > 0) {
+    c.bitRate = Math.round((t.file_size * 8) / t.duration_secs / 1000);
+  }
+  c.qualityTier = qualityTier(c);
+  return c;
+}
+
+// A result counts as an upgrade when it is a higher tier, or the same lossy
+// tier at a clearly higher rate — a few percent is a re-encode of the same
+// source, not an upgrade. A lossless copy is beaten only by more bits or a
+// higher sample rate; the library doesn't know those for its own file, so CD
+// quality is assumed. A result that reports no quality at all can't be called
+// an upgrade over anything — the ranking gives such files the benefit of the
+// doubt, but "upgrade" is a claim, and it needs a figure to stand on.
+var UPGRADE_MIN_RATE_GAIN = 1.2;
+function isUpgradeOver(candidate, current) {
+  if (!candidate || !current) return false;
+  if (candidate.qualityTier === T_UNKNOWN) return false;
+  if (candidate.qualityTier < current.qualityTier) return true;
+  if (candidate.qualityTier > current.qualityTier) return false;
+  if (current.qualityTier === T_LOSSLESS) {
+    return (candidate.bitDepth || 16) > 16 || (candidate.sampleRate || 44100) > 48000;
+  }
+  if (candidate.bitRate == null || current.bitRate == null) return false;
+  return candidate.bitRate >= current.bitRate * UPGRADE_MIN_RATE_GAIN;
+}
+
+// Which owned track a Soulseek file is a copy of, or null. The filename's title
+// (track number and "Artist - " prefix stripped by parseTrackMeta) is matched on
+// words the way the fallback matches a request to a file, in BOTH directions so
+// "Song" doesn't claim "Song Part Two", and a variant word the owned title
+// lacks ("live", "remix") marks a different recording, not a copy.
+function ownedTrackFor(candidate, owned) {
+  var list = owned || [];
+  if (!candidate || !list.length) return null;
+  var fileWords = titleWords(parseTrackMeta(candidate.filename).title);
+  if (!fileWords.length) return null;
+  for (var i = 0; i < list.length; i++) {
+    var want = titleWords(list[i].title);
+    if (!want.length) continue;
+    if (coverage(want, fileWords) < FALLBACK_MIN_TITLE_MATCH) continue;
+    if (coverage(fileWords, want) < 0.5) continue;
+    var variant = false;
+    for (var v = 0; v < fileWords.length; v++) {
+      if (VARIANT_WORDS.indexOf(fileWords[v]) >= 0 && want.indexOf(fileWords[v]) < 0) { variant = true; break; }
+    }
+    if (variant) continue;
+    return list[i];
+  }
+  return null;
+}
+
+function missingFiles(files, owned) {
+  return (files || []).filter(function (c) { return !ownedTrackFor(c, owned); });
+}
+
+// Stamp every ranked result with the mode's verdict once, so the view's filters
+// and the folder cards read a flag instead of re-matching 20,000 filenames on
+// every render.
+function annotateForMode(ranked, mode) {
+  if (!mode) return;
+  for (var i = 0; i < ranked.length; i++) {
+    var c = ranked[i];
+    if (mode.kind === "upgrade") c.better = isUpgradeOver(c, mode.current);
+    else if (mode.kind === "fill") c.owned = !!ownedTrackFor(c, mode.owned);
+  }
 }
 
 // Identity of a request, for the kept-file index: what the host's `sameSong`
@@ -1218,6 +1319,16 @@ function notificationFor(state) {
 
 async function refreshReadiness() {
   var p = await probe();
+  // Not ready → look for Roadie. It may hold the connection we lack, or say
+  // that a managed slskd was removed. A changed connection is re-probed once.
+  if (p.kind !== "ok") {
+    try {
+      await probeRoadie();
+      if (await reconcileRoadie()) p = await probe();
+    } catch (e) {
+      console.error("slskd: Roadie probe failed:", e);
+    }
+  }
   var next = nextReadiness(p, readiness);
   readiness = {
     state: next.state,
@@ -1407,8 +1518,11 @@ function viewPrefs(extra) {
 async function runSearch(query, extra) {
   if (!query || readiness.state !== "ready") return;
   var gen = ++searchGen;
-  search = { query: query, id: null, running: true, responseCount: 0, fileCount: 0, matchCount: 0, folderCount: 0, results: [], folders: [], error: null, sortColumn: null, sortDir: "desc" };
-  activeTab = "search";
+  var mode = (extra && extra.mode) || null;
+  search = { query: query, id: null, running: true, responseCount: 0, fileCount: 0, matchCount: 0, folderCount: 0, results: [], folders: [], error: null, sortColumn: null, sortDir: "desc", mode: mode };
+  // Filling an album is a folder job — Soulseek users share whole albums — so
+  // that mode opens on the Folders view; everything else opens on Files.
+  activeTab = mode && mode.kind === "fill" ? "folders" : "search";
   render();
 
   var ranked;
@@ -1427,6 +1541,7 @@ async function runSearch(query, extra) {
     return;
   }
   if (gen !== searchGen || ranked === null) return;
+  annotateForMode(ranked, mode);
   // Group from the FULL ranked list, then cap: a folder that survives the cut
   // must keep every one of its files, or "download folder" would silently grab
   // part of an album.
@@ -1452,7 +1567,12 @@ async function nextBatch(label, subdir) {
 // assistant's `download` tool all come through here, so an assistant-queued
 // file is tracked, located and imported exactly like a clicked one. Throws
 // with a readable message; the caller decides how to surface it.
-async function enqueueBatch(username, files, label, subdir) {
+//
+// `recExtra` is what a context-menu mode knows that the filename doesn't:
+// `meta` (tag-shaped, from the library — merged under the parsed names so the
+// finished file is tagged and imported as the track it was fetched for) and
+// `upgrade` (the library row this file is meant to replace).
+async function enqueueBatch(username, files, label, subdir, recExtra) {
   var batch = await nextBatch(label, subdir);
   var payload = {
     username: username,
@@ -1477,17 +1597,21 @@ async function enqueueBatch(username, files, label, subdir) {
     if (failures[f] && failures[f].filename) failed[failures[f].filename] = failures[f].message || "refused";
   }
 
+  var extra = recExtra || {};
   var queued = [];
   for (var i = 0; i < files.length; i++) {
     if (failed[files[i].filename]) continue;
-    tracked[username + KEY_SEP + files[i].filename] = {
+    var parsed = parseTrackMeta(files[i].filename);
+    var rec = {
       destination: batch.destination,
       b64: batch.b64,
       resolvedPath: null,
-      meta: parseTrackMeta(files[i].filename),
+      meta: extra.meta ? mergeMeta(parsed, extra.meta) : parsed,
       size: files[i].size || null,
       length: files[i].length != null ? files[i].length : null
     };
+    if (extra.upgrade) rec.upgrade = extra.upgrade;
+    tracked[username + KEY_SEP + files[i].filename] = rec;
     queued.push(files[i]);
   }
   await api.storage.set("tracked", tracked);
@@ -1496,10 +1620,10 @@ async function enqueueBatch(username, files, label, subdir) {
 }
 
 // View-side wrapper: notification, switch to the Downloads tab.
-async function enqueueFiles(username, files, label) {
+async function enqueueFiles(username, files, label, recExtra) {
   var out;
   try {
-    out = await enqueueBatch(username, files, label);
+    out = await enqueueBatch(username, files, label, undefined, recExtra);
   } catch (e) {
     api.ui.showNotification((e && e.message) || "Couldn't start the download.");
     return false;
@@ -1687,9 +1811,17 @@ async function handleCompletions(finished) {
       if (c) byCollection[c.id] = c;
     }
   }
-  api.ui.showNotification(finished.length === 1
-    ? "Finished downloading: " + names[0]
-    : "Finished downloading " + finished.length + " files (" + names[0] + ", …)");
+  var upgradeRec = finished.length === 1 ? tracked[trackKeyOf(finished[0])] : null;
+  if (upgradeRec && upgradeRec.upgrade) {
+    // The file arrived for one purpose; say where the button is rather than
+    // opening the modal over whatever the user is doing now — a Soulseek
+    // transfer can land hours after it was asked for.
+    api.ui.showNotification("Upgrade for “" + names[0] + "” is ready — choose Replace in library on the Downloads tab.");
+  } else {
+    api.ui.showNotification(finished.length === 1
+      ? "Finished downloading: " + names[0]
+      : "Finished downloading " + finished.length + " files (" + names[0] + ", …)");
+  }
 
   if (!api.collections || typeof api.collections.resync !== "function") return;
   var ids = Object.keys(byCollection);
@@ -2421,6 +2553,167 @@ function setupBar() {
 }
 
 // ---------------------------------------------------------------------------
+// Roadie — the standalone tool manager that can install and run slskd for
+// the user (https://github.com/outcast1000/roadie). This plugin only
+// ADVERTISES it: it never installs or launches anything. Detection is a
+// loopback fetch of Roadie's public status API; the handoff is a roadie://
+// deep link the host is allowed to open; the connection comes back through a
+// scoped viboplr://plugin/slskd/roadie link, after which the plugin reads the
+// address and its own key from Roadie (the user approved that in Roadie).
+// ---------------------------------------------------------------------------
+
+var ROADIE_PORT = 47630;
+var ROADIE_PORT_RANGE = 10;
+var ROADIE_GET_URL = "https://github.com/outcast1000/roadie";
+var ROADIE_RETURN = "viboplr://plugin/slskd/roadie";
+var ROADIE_PROBE_MS = 1000;
+
+// { present, port, tool } — `tool` is Roadie's status for slskd, or null.
+var roadie = { present: false, port: null, tool: null };
+
+function roadieBase() {
+  return "http://127.0.0.1:" + (roadie.port || ROADIE_PORT);
+}
+
+async function roadieFetchJson(port, path) {
+  var res = await api.network.fetch("http://127.0.0.1:" + port + path, { timeoutMs: ROADIE_PROBE_MS });
+  if (!res || res.status < 200 || res.status >= 300) return null;
+  try { return JSON.parse(await res.text()); } catch (e) { return null; }
+}
+
+// Find Roadie on its fixed port range and read slskd's status. Cheap when it
+// is not there (one refused connection per port), so it runs on every
+// not-ready readiness pass.
+async function probeRoadie() {
+  var ports = roadie.port ? [roadie.port] : [];
+  for (var p = ROADIE_PORT; p < ROADIE_PORT + ROADIE_PORT_RANGE; p++) if (ports.indexOf(p) < 0) ports.push(p);
+  for (var i = 0; i < ports.length; i++) {
+    var health = null;
+    try { health = await roadieFetchJson(ports[i], "/v1/health"); } catch (e) { health = null; }
+    if (!health || health.app !== "roadie") continue;
+    roadie.present = true;
+    roadie.port = ports[i];
+    try { roadie.tool = await roadieFetchJson(ports[i], "/v1/tools/slskd"); } catch (e) { roadie.tool = null; }
+    return roadie;
+  }
+  roadie.present = false;
+  roadie.tool = null;
+  return roadie;
+}
+
+// Pure: what to do with Roadie's answer about slskd.
+//   "connect" — fetch the address + key from Roadie and use them
+//   "release" — Roadie says slskd is gone; forget the managed connection
+//   null      — leave the user's settings alone
+// A user-typed address (managedBy null with a url) is never overwritten, and
+// Roadie being closed (status null) never releases anything.
+function roadieAutoConfigAction(cfg, status) {
+  if (!status) return null;
+  var managed = cfg.managedBy === "roadie";
+  if (managed && status.installed === false) return "release";
+  if (!status.installed) return null;
+  var approved = Array.isArray(status.approvedConsumers) && status.approvedConsumers.indexOf("viboplr") >= 0;
+  if (!approved) return null;
+  if (managed) return status.url && cfg.url !== status.url ? "connect" : null;
+  if (!cfg.url) return "connect";
+  return null;
+}
+
+// GET /v1/tools/slskd/connection?consumer=viboplr → { url, apiKey } once the
+// user approved Viboplr in Roadie; 403 {reason:"consent-required"} before.
+async function fetchRoadieConnection() {
+  if (!roadie.present) await probeRoadie();
+  if (!roadie.present) return { ok: false, reason: "not-running" };
+  var res = await api.network.fetch(roadieBase() + "/v1/tools/slskd/connection?consumer=viboplr", { timeoutMs: 3000 });
+  var body = null;
+  try { body = JSON.parse(await res.text()); } catch (e) { body = null; }
+  if (res.status === 403) return { ok: false, reason: (body && body.reason) || "consent-required" };
+  if (res.status < 200 || res.status >= 300 || !body || !body.url) return { ok: false, reason: "HTTP " + res.status };
+  return { ok: true, url: body.url, apiKey: body.apiKey || "" };
+}
+
+async function adoptRoadieConnection(reason) {
+  var c = await fetchRoadieConnection();
+  if (!c.ok) {
+    if (c.reason === "consent-required") api.ui.showNotification("Roadie is waiting for you to allow Viboplr to connect to slskd — open Roadie to approve it.");
+    else if (c.reason !== "not-running") console.error("slskd: Roadie connection failed:", c.reason);
+    return false;
+  }
+  settings.url = c.url;
+  settings.apiKey = c.apiKey;
+  settings.insecure = false;
+  settings.managedBy = "roadie";
+  await Promise.all([
+    api.storage.set("url", settings.url),
+    api.storage.set("apiKey", settings.apiKey),
+    api.storage.set("insecure", false),
+    api.storage.set("managedBy", "roadie")
+  ]).catch(function (e) { console.error("slskd: couldn't save Roadie connection:", e); });
+  api.log("info", "connected to slskd through Roadie (" + reason + ") at " + c.url, "slskd");
+  downloadsDir = null;
+  return true;
+}
+
+async function releaseRoadieConnection() {
+  settings.url = "";
+  settings.apiKey = "";
+  settings.managedBy = null;
+  await Promise.all([
+    api.storage.set("url", ""),
+    api.storage.set("apiKey", ""),
+    api.storage.set("managedBy", null)
+  ]).catch(function (e) { console.error("slskd: couldn't clear Roadie connection:", e); });
+  api.log("info", "Roadie reports slskd removed — connection forgotten", "slskd");
+}
+
+// Apply `roadieAutoConfigAction` to the live state. Returns true when the
+// settings changed (the caller re-probes slskd).
+async function reconcileRoadie() {
+  var action = roadieAutoConfigAction(settings, roadie.tool);
+  if (action === "connect") return adoptRoadieConnection("auto");
+  if (action === "release") { await releaseRoadieConnection(); return true; }
+  return false;
+}
+
+// `viboplr://plugin/slskd/roadie?status=connected&tool=slskd` → parsed, or
+// null for anything that is not ours.
+function parseRoadieReturn(url) {
+  var u = String(url || "");
+  if (u.indexOf(ROADIE_RETURN) !== 0) return null;
+  var q = u.indexOf("?") >= 0 ? u.slice(u.indexOf("?") + 1) : "";
+  var out = { status: null, tool: null };
+  var parts = q.split("&");
+  for (var i = 0; i < parts.length; i++) {
+    var kv = parts[i].split("=");
+    if (kv[0] === "status") out.status = decodeURIComponent(kv[1] || "");
+    if (kv[0] === "tool") out.tool = decodeURIComponent(kv[1] || "");
+  }
+  return out;
+}
+
+function roadieLink(verb) {
+  return "roadie://" + verb + "/slskd?consumer=viboplr&return=" + encodeURIComponent(ROADIE_RETURN);
+}
+
+// The buttons the setup view shows for Roadie, given what we know about it.
+function roadieSetupButtons(state, cfg, r) {
+  var buttons = [];
+  if (r && r.present) {
+    var installed = r.tool && r.tool.installed;
+    if (cfg.managedBy === "roadie") {
+      if (state === "unreachable") buttons.push({ label: "Open Roadie", action: "roadie-open", variant: "accent" });
+    } else if (installed) {
+      buttons.push({ label: "Connect through Roadie", action: "roadie-connect", variant: "accent" });
+    } else {
+      buttons.push({ label: "Install slskd with Roadie", action: "roadie-install", variant: "accent" });
+    }
+  } else if (state === "unconfigured") {
+    buttons.push({ label: "Get Roadie (installs slskd for you)", action: "roadie-get", variant: "secondary" });
+  }
+  return buttons;
+}
+
+// ---------------------------------------------------------------------------
 // Views
 // ---------------------------------------------------------------------------
 function setupView() {
@@ -2436,6 +2729,9 @@ function setupView() {
   if (st === "unconfigured") {
     children.push({ type: "text", content: "Search and download from Soulseek", className: "plugin-heading" });
     children.push({ type: "text", content: "Needs slskd, a small Soulseek daemon you run yourself.", className: "plugin-muted" });
+  } else if (st === "unreachable" && settings.managedBy === "roadie") {
+    children.push({ type: "text", content: "slskd is stopped", className: "plugin-heading" });
+    children.push({ type: "text", content: "Roadie manages this slskd and it isn't running right now. Start it from Roadie." });
   } else if (st === "unreachable") {
     children.push({ type: "text", content: "slskd isn't reachable", className: "plugin-heading" });
     children.push({ type: "text", content: "Nothing answered at " + (settings.url || "(no address set)") + ". Check that slskd is running and the address is right." + (readiness.detail ? " (" + readiness.detail + ")" : "") });
@@ -2455,7 +2751,9 @@ function setupView() {
     children.push({ type: "loading", message: "slskd is connecting to Soulseek…" });
   }
 
-  if (showBar) children.push(setupBar());
+  var roadieButtons = roadieSetupButtons(st, settings, roadie);
+  if (roadieButtons.length) children.push({ type: "toolbar", buttons: roadieButtons });
+  if (showBar && settings.managedBy !== "roadie") children.push(setupBar());
   children.push({ type: "spacer" });
   children.push(connectionSection());
   return { type: "layout", direction: "vertical", children: children };
@@ -2551,6 +2849,9 @@ function resultCells(c) {
   var cells = {};
   var quality = qualityLabel(c);
   if (quality && quality !== "unknown") cells.quality = quality;
+  // With the upgrade filter lifted, the rows that would still be an upgrade
+  // keep their mark, so "show everything" doesn't mean re-judging each one.
+  if (search.mode && search.mode.kind === "upgrade" && search.mode.showAll && c.better) cells.quality = "↑ " + (cells.quality || quality);
   if (c.size) cells.size = formatBytes(c.size);
   if (c.length != null) cells.duration = formatDurationSecs(c.length);
   var rep = sharerLabel(sharers[c.username]);
@@ -2558,9 +2859,26 @@ function resultCells(c) {
   return cells;
 }
 
+// The rows the Files view shows: everything, or — in a mode, until the user asks
+// for all of it — only what the mode was started for.
+function visibleResults() {
+  var m = search.mode;
+  if (!m || m.showAll) return search.results;
+  if (m.kind === "upgrade") return search.results.filter(function (c) { return c.better; });
+  if (m.kind === "fill") return search.results.filter(function (c) { return !c.owned; });
+  return search.results;
+}
+
+function visibleFolders() {
+  var m = search.mode;
+  if (!m || m.kind !== "fill" || m.showAll) return search.folders;
+  return search.folders.filter(function (g) { return missingFiles(g.files, m.owned).length > 0; });
+}
+
 function sortedResults() {
-  if (!search.sortColumn) return search.results;
-  return sortCandidates(search.results, search.sortColumn, search.sortDir);
+  var list = visibleResults();
+  if (!search.sortColumn) return list;
+  return sortCandidates(list, search.sortColumn, search.sortDir);
 }
 
 function resultRows() {
@@ -2613,7 +2931,24 @@ function transferRows() {
 }
 
 function folderCards() {
-  return search.folders.map(function (g) {
+  var m = search.mode;
+  var fill = m && m.kind === "fill" ? m : null;
+  return visibleFolders().map(function (g) {
+    if (fill) {
+      // What the card offers is the folder's contribution to THIS album, not
+      // the folder: how many of its files you lack and what they weigh.
+      var missing = missingFiles(g.files, fill.owned);
+      var bytes = 0;
+      for (var i = 0; i < missing.length; i++) bytes += missing[i].size || 0;
+      return {
+        id: "d:" + g.key,
+        title: g.name,
+        subtitle: g.username + " · " + g.files.length + " files · " + (missing.length
+          ? missing.length + " you don't have · " + formatBytes(bytes)
+          : "you have all of these"),
+        action: "fill-folder"
+      };
+    }
     return {
       id: "d:" + g.key,
       title: g.name,
@@ -2623,9 +2958,53 @@ function folderCards() {
   });
 }
 
+// The line above a mode's results: what was asked for, what the library has,
+// and the way out of the filter. The plain search box stays above it — a new
+// search is how a mode ends.
+function modeHeader() {
+  var m = search.mode;
+  if (!m) return [];
+  var out = [];
+  if (m.kind === "upgrade") {
+    var cur = m.current;
+    var ext = (cur.extension || "").toUpperCase();
+    // The rate is derived from size ÷ duration (see libraryQuality), so it is
+    // shown as approximate rather than as a figure read off the file.
+    var have = cur.qualityTier === T_LOSSLESS ? qualityLabel(cur)
+      : (cur.bitRate ? ext + " ≈" + cur.bitRate + "kbps" : (ext || "unknown quality"));
+    if (cur.size) have += " · " + formatBytes(cur.size);
+    out.push({ type: "text", content: "Upgrading “" + m.title + "”" + (m.artist ? " by " + m.artist : "") +
+      " — your copy is " + have + ". " + (m.showAll ? "Showing every file found; better ones are marked." : "Showing only files that would be an upgrade."), className: "plugin-muted" });
+  } else if (m.kind === "fill") {
+    out.push({ type: "text", content: "Filling “" + m.albumTitle + "”" + (m.artistName ? " by " + m.artistName : "") +
+      " — you have " + m.owned.length + (m.owned.length === 1 ? " track" : " tracks") + " of it. " +
+      (m.showAll ? "Showing every file and folder found." : "Showing only files you don't have; Fill from a folder grabs just those."), className: "plugin-muted" });
+  }
+  out.push({ type: "button", label: m.showAll ? "Only what's missing" : "Show everything found", action: "mode-show-all", variant: "secondary" });
+  return out;
+}
+
+// What a download started from a mode carries into its tracked record — see
+// `enqueueBatch`'s `recExtra`.
+function modeRecExtra() {
+  var m = search.mode;
+  if (!m) return null;
+  if (m.kind === "upgrade") {
+    return {
+      upgrade: { trackId: m.trackId, title: m.title, artist: m.artist },
+      meta: { title: m.title, artist: m.artist, album: m.album, track_number: m.trackNumber }
+    };
+  }
+  if (m.kind === "fill") return { meta: { album: m.albumTitle, album_artist: m.artistName } };
+  return null;
+}
+
 // "Showing the best 1,000 of 20,431 files" — the cap has to be visible, or a
 // broad query silently looks like it found exactly 1,000 things.
 function truncationNote() {
+  // Under a mode's filter the shown count is the filter's doing, not the cap's,
+  // and "the best 3 of 20,431" would blame the wrong thing.
+  if (search.mode && !search.mode.showAll) return null;
   var shown = activeTab === "folders" ? search.folders.length : search.results.length;
   var total = activeTab === "folders" ? search.folderCount : search.matchCount;
   var noun = activeTab === "folders" ? "folders" : "files";
@@ -2645,6 +3024,8 @@ function searchTab() {
     buttonLabel: "Search",
     pasteButton: true
   });
+  var mode = search.mode;
+  children = children.concat(modeHeader());
 
   if (search.error) {
     children.push({ type: "text", content: search.error, className: "plugin-error" });
@@ -2671,10 +3052,27 @@ function searchTab() {
     return { type: "layout", direction: "vertical", children: children };
   }
 
-  children.push({ type: "tabs", tabs: [
-    { id: "files", label: "Files", count: search.results.length },
-    { id: "folders", label: "Folders", count: search.folders.length }
-  ], activeTab: activeTab === "folders" ? "folders" : "files", action: "result-mode" });
+  // The mode's filter can leave nothing — which is an answer in itself, and a
+  // different one from "Soulseek has nothing": the copy is already as good as
+  // what's out there, or the album is already complete.
+  // A single track's upgrade is a file job; the Folders view would only offer
+  // whole albums for a song, so it isn't shown in that mode.
+  var upgrading = mode && mode.kind === "upgrade";
+  if (upgrading && activeTab === "folders") activeTab = "search";
+  var files = visibleResults();
+  var folders = upgrading ? [] : visibleFolders();
+  if (mode && !mode.showAll && !files.length && !folders.length) {
+    children.push({ type: "text", className: "plugin-muted", content: upgrading
+      ? "Nothing better than your copy turned up among " + formatCount(search.matchCount) + " files. Show everything found to see them anyway."
+      : "Every file found is already in your library. Show everything found to browse the folders anyway." });
+    return { type: "layout", direction: "vertical", children: children };
+  }
+  if (!upgrading) {
+    children.push({ type: "tabs", tabs: [
+      { id: "files", label: "Files", count: files.length },
+      { id: "folders", label: "Folders", count: folders.length }
+    ], activeTab: activeTab === "folders" ? "folders" : "files", action: "result-mode" });
+  }
 
   var trimmed = truncationNote();
   if (trimmed) children.push({ type: "text", content: trimmed, className: "plugin-muted" });
@@ -2708,7 +3106,7 @@ function searchTab() {
       showHeader: true,
       selectable: true,
       openOnClick: "title",
-      actions: [{ id: "download-file", label: "Download", icon: "⬇" }],
+      actions: [{ id: "download-file", label: upgrading ? "Upgrade" : "Download", icon: "⬇" }],
       columns: RESULT_COLUMNS,
       sortBy: search.sortColumn || undefined,
       sortDir: search.sortColumn ? search.sortDir : undefined,
@@ -2757,6 +3155,7 @@ function transfersTab() {
     // do something to THAT transfer.
     actions: [
       { id: "play-transfer", label: "Play", icon: "▶" },
+      { id: "replace-transfer", label: "Replace in library…", icon: "⇪" },
       { id: "import-transfer", label: "Add to library…", icon: "＋" },
       { id: "retry-transfer", label: "Retry", icon: "↻" },
       { id: "another-source", label: "Another source", icon: "⇄" },
@@ -3063,7 +3462,7 @@ function renderSettings() {
 // A selection can span several sharers, but an enqueue is addressed to ONE peer
 // (slskd queues per user), so group first and send one batch each — sequentially,
 // because each batch claims the next destination folder number.
-async function downloadCandidates(list) {
+async function downloadCandidates(list, recExtra) {
   var byUser = {};
   var order = [];
   for (var i = 0; i < list.length; i++) {
@@ -3073,7 +3472,7 @@ async function downloadCandidates(list) {
   }
   for (var u = 0; u < order.length; u++) {
     var files = byUser[order[u]];
-    await enqueueFiles(order[u], files, basenameRemote(dirnameRemote(files[0].filename)));
+    await enqueueFiles(order[u], files, basenameRemote(dirnameRemote(files[0].filename)), recExtra);
   }
 }
 
@@ -3245,15 +3644,41 @@ function registerActions() {
       if (c) picked.push(c);
     }
     if (!picked.length) return;
-    downloadCandidates(picked)
+    downloadCandidates(picked, modeRecExtra())
       .catch(function (e) { console.error("slskd enqueue failed:", e); });
   });
 
   api.ui.onAction("download-folder", function (data) {
     var g = folderByRef(data && data.itemId);
     if (!g) return;
-    enqueueFiles(g.username, g.files, g.name)
+    enqueueFiles(g.username, g.files, g.name, modeRecExtra())
       .catch(function (e) { console.error("slskd folder enqueue failed:", e); });
+  });
+
+  // Fill mode's folder action: only the files the album lacks, from this one
+  // sharer. The whole folder is a click away on "Show everything found".
+  api.ui.onAction("fill-folder", function (data) {
+    var g = folderByRef(data && data.itemId);
+    var m = search.mode;
+    if (!g || !m || m.kind !== "fill") return;
+    var missing = missingFiles(g.files, m.owned);
+    if (!missing.length) {
+      api.ui.showNotification("You already have every track in that folder.");
+      return;
+    }
+    enqueueFiles(g.username, missing, g.name, modeRecExtra())
+      .catch(function (e) { console.error("slskd fill enqueue failed:", e); });
+  });
+
+  api.ui.onAction("mode-show-all", function () {
+    if (!search.mode) return;
+    search.mode.showAll = !search.mode.showAll;
+    render();
+  });
+
+  api.ui.onAction("replace-transfer", function (data) {
+    var keys = rowIds(data);
+    for (var i = 0; i < keys.length; i++) openReplace(keys[i]);
   });
 
   // A selection plays as ONE queue, in list order; a single row just plays.
@@ -3378,14 +3803,45 @@ function registerActions() {
     if (settings.url) api.network.openUrl(settings.url).catch(console.error);
   });
 
+  // Roadie. Opening a roadie:// link is all the plugin does; Roadie asks the
+  // user before installing, and before handing this plugin a key.
+  api.ui.onAction("roadie-get", function () {
+    api.network.openUrl(ROADIE_GET_URL).catch(console.error);
+  });
+  api.ui.onAction("roadie-install", function () {
+    api.network.openUrl(roadieLink("install")).catch(function (e) {
+      console.error("slskd: couldn't open Roadie:", e);
+      api.ui.showNotification("Couldn't open Roadie. Update Viboplr, or open Roadie yourself and install slskd there.");
+    });
+  });
+  api.ui.onAction("roadie-connect", function () {
+    // Already approved? Then no round trip through Roadie's window is needed.
+    adoptRoadieConnection("button").then(function (ok) {
+      if (ok) return refreshReadiness();
+      return api.network.openUrl(roadieLink("connect"));
+    }).catch(function (e) { console.error("slskd: Roadie connect failed:", e); });
+  });
+  api.ui.onAction("roadie-open", function () {
+    api.network.openUrl("roadie://open/slskd").catch(console.error);
+  });
+
   api.ui.onAction("test-connection", function () {
     refreshReadiness().catch(function (e) { console.error("slskd probe failed:", e); });
   });
 
-  api.ui.onAction("set-url", function (data) { saveSetting("url", (data && data.value) || ""); });
-  api.ui.onAction("set-url:submit", function (data) { saveSetting("url", (data && data.value) || ""); });
-  api.ui.onAction("set-key", function (data) { saveSetting("apiKey", (data && data.value) || ""); });
-  api.ui.onAction("set-key:submit", function (data) { saveSetting("apiKey", (data && data.value) || ""); });
+  // A typed address or key is the user's own: it ends Roadie's management of
+  // the connection, so nothing overwrites what they typed.
+  function userSetsConnection(key, value) {
+    if (settings.managedBy && value !== settings[key]) {
+      settings.managedBy = null;
+      api.storage.set("managedBy", null).catch(function (e) { console.error("slskd: couldn't save managedBy:", e); });
+    }
+    saveSetting(key, value);
+  }
+  api.ui.onAction("set-url", function (data) { userSetsConnection("url", (data && data.value) || ""); });
+  api.ui.onAction("set-url:submit", function (data) { userSetsConnection("url", (data && data.value) || ""); });
+  api.ui.onAction("set-key", function (data) { userSetsConnection("apiKey", (data && data.value) || ""); });
+  api.ui.onAction("set-key:submit", function (data) { userSetsConnection("apiKey", (data && data.value) || ""); });
   api.ui.onAction("set-formats", function (data) { saveSetting("preferredFormats", (data && data.value) || ""); });
   api.ui.onAction("set-fallback-quality", function (data) {
     var v = data && data.value;
@@ -3414,6 +3870,125 @@ function registerActions() {
     runSearch(q, known != null ? { knownDurationSecs: known } : null)
       .catch(function (e) { console.error("slskd context search failed:", e); });
   });
+
+  api.contextMenu.onAction("slskd-upgrade", function (target) {
+    startUpgrade(target).catch(function (e) { console.error("slskd upgrade failed:", e); });
+  });
+
+  api.contextMenu.onAction("slskd-fill-album", function (target) {
+    startFill(target).catch(function (e) { console.error("slskd fill-album failed:", e); });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Upgrade / fill-album entry points
+// ---------------------------------------------------------------------------
+// Both fall back to the plain "Search on Soulseek…" behaviour when the library
+// can't answer — a track that isn't a local library row has nothing to replace,
+// an album with no rows here has nothing to compare against — and say so, so
+// the user isn't left wondering why the filter never appeared.
+function plainSearch(target, note) {
+  if (note) api.ui.showNotification(note);
+  var q = searchQueryForTarget(target);
+  if (!q) return Promise.resolve();
+  return runSearch(q);
+}
+
+async function startUpgrade(target) {
+  var t = target || {};
+  api.ui.navigateToView(VIEW_ID);
+  var row = null;
+  if (t.trackId != null && api.library && typeof api.library.getTrackById === "function") {
+    try { row = await api.library.getTrackById(t.trackId); } catch (e) { console.error("slskd: could not read library track " + t.trackId + ":", e); }
+  }
+  if (!row) return plainSearch(t, "Upgrade works on tracks in your library — searching Soulseek for this one instead.");
+  if (!row.path || String(row.path).indexOf("file://") !== 0) {
+    return plainSearch({ kind: "track", title: row.title, artistName: row.artist_name },
+      "Upgrade replaces a local file, and “" + row.title + "” isn't one — searching Soulseek for it instead.");
+  }
+  var mode = {
+    kind: "upgrade",
+    trackId: row.id,
+    title: row.title,
+    artist: row.artist_name || null,
+    album: row.album_title || null,
+    trackNumber: row.track_number || null,
+    current: libraryQuality(row),
+    showAll: false
+  };
+  var extra = { mode: mode };
+  // Same recording or nothing: a result more than a few seconds off the copy in
+  // hand is a different version, not a better copy of this one.
+  if (row.duration_secs != null && row.duration_secs > 0) extra.knownDurationSecs = row.duration_secs;
+  await runSearch(searchQueryForTarget({ kind: "track", title: row.title, artistName: row.artist_name }), extra);
+}
+
+// The album's library rows. An album target normally carries its id; one built
+// from names alone (the control API's plugin-action route) is looked up by
+// title + artist through the library's FTS.
+async function albumRowsFor(t) {
+  if (!api.library || typeof api.library.getTracks !== "function") return { id: null, tracks: [] };
+  var albumId = t.albumId != null ? t.albumId : null;
+  var title = t.albumTitle || t.title || "";
+  if (albumId == null && title && typeof api.library.ftsAlbums === "function") {
+    try {
+      var hits = await api.library.ftsAlbums(title, { limit: 20 }) || [];
+      var wantTitle = normalizeText(title);
+      var wantArtist = t.artistName ? normalizeText(t.artistName) : null;
+      for (var i = 0; i < hits.length; i++) {
+        if (normalizeText(hits[i].title) !== wantTitle) continue;
+        if (wantArtist && normalizeText(hits[i].artist_name || "") !== wantArtist) continue;
+        albumId = hits[i].id;
+        break;
+      }
+    } catch (e) {
+      console.error("slskd: album lookup failed:", e);
+    }
+  }
+  if (albumId == null) return { id: null, tracks: [] };
+  try {
+    return { id: albumId, tracks: await api.library.getTracks({ albumId: albumId, limit: 1000 }) || [] };
+  } catch (e) {
+    console.error("slskd: could not read album " + albumId + ":", e);
+    return { id: albumId, tracks: [] };
+  }
+}
+
+async function startFill(target) {
+  var t = target || {};
+  api.ui.navigateToView(VIEW_ID);
+  var title = t.albumTitle || t.title || "";
+  var album = await albumRowsFor(t);
+  if (!album.tracks.length) {
+    return plainSearch({ kind: "album", albumTitle: title, artistName: t.artistName },
+      "“" + title + "” has no tracks in your library to compare against — searching Soulseek for the whole album instead.");
+  }
+  var mode = {
+    kind: "fill",
+    albumId: album.id,
+    albumTitle: title,
+    artistName: t.artistName || null,
+    owned: album.tracks.map(function (r) {
+      return { title: r.title, trackNumber: r.track_number != null ? r.track_number : null, durationSecs: r.duration_secs != null ? r.duration_secs : null };
+    }),
+    showAll: false
+  };
+  await runSearch(searchQueryForTarget({ kind: "album", albumTitle: title, artistName: t.artistName }), { mode: mode });
+}
+
+// Hand a finished upgrade to the host's download modal with the library row it
+// is meant to replace. A host that knows `libraryTrackId` opens its compare →
+// Replace / Save as copy flow; an older one runs the ordinary Add to library
+// copy, which is the same modal minus the replace step.
+function openReplace(key) {
+  var rec = tracked[key];
+  var tr = importTrackFor(key);
+  if (!rec || !rec.upgrade || !tr) {
+    api.ui.showNotification("That file isn't a finished upgrade.");
+    return;
+  }
+  tr.libraryTrackId = rec.upgrade.trackId;
+  api.ui.requestAction("download-tracks", { providerId: PROVIDER_KEY, providerName: PROVIDER_NAME, tracks: [tr] });
 }
 
 // ---------------------------------------------------------------------------
@@ -3596,7 +4171,7 @@ function schedulePoll(fast) {
 // Lifecycle
 // ---------------------------------------------------------------------------
 async function loadSettings() {
-  var keys = ["url", "apiKey", "tierOverride", "insecure", "preferredFormats", "fallbackQuality", "batchSeq"];
+  var keys = ["url", "apiKey", "tierOverride", "insecure", "preferredFormats", "fallbackQuality", "batchSeq", "managedBy"];
   for (var i = 0; i < keys.length; i++) {
     try {
       var v = await api.storage.get(keys[i]);
@@ -3678,6 +4253,23 @@ async function activate(hostApi) {
     return [{ value: "original", label: "Original file", description: "Copies the file Soulseek delivered, untouched." }];
   });
 
+  // Roadie's answer after the user approved (or declined) Viboplr there. The
+  // link carries no key — the plugin reads the connection from Roadie's API.
+  if (api.network && typeof api.network.onDeepLink === "function") {
+    api.network.onDeepLink(function (url) {
+      var ret = parseRoadieReturn(url);
+      if (!ret) return;
+      if (ret.status === "connected") {
+        adoptRoadieConnection("deep link").then(function (ok) {
+          if (ok) api.ui.showNotification("Connected to slskd through Roadie.");
+          return refreshReadiness();
+        }).catch(function (e) { console.error("slskd: Roadie handoff failed:", e); });
+      } else if (ret.status === "declined") {
+        api.ui.showNotification("You declined the connection in Roadie. You can still enter slskd's address and key by hand.");
+      }
+    });
+  }
+
   render();
   renderSettings();
 
@@ -3732,6 +4324,10 @@ return {
   _whatIsThisUrl: whatIsThisUrl,
   _setupBar: setupBar,
   _connectionSection: connectionSection,
+  _roadieAutoConfigAction: roadieAutoConfigAction,
+  _roadieSetupButtons: roadieSetupButtons,
+  _parseRoadieReturn: parseRoadieReturn,
+  _roadieLink: roadieLink,
   _hostOf: hostOf,
   _searchQueryForTarget: searchQueryForTarget,
   _nextReadiness: nextReadiness,
@@ -3777,5 +4373,11 @@ return {
   _ledgerTotals: ledgerTotals,
   _refreshTransfers: refreshTransfers,
   _keptKeys: keptKeys,
+  _libraryQuality: libraryQuality,
+  _isUpgradeOver: isUpgradeOver,
+  _ownedTrackFor: ownedTrackFor,
+  _missingFiles: missingFiles,
+  _startUpgrade: startUpgrade,
+  _startFill: startFill,
   _setFallbackSearchMs: function (ms) { FALLBACK_SEARCH_MS = ms; }
 };

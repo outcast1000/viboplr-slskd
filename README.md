@@ -36,7 +36,18 @@ You need:
 slskd stays yours: its config, its process, its updates. Nothing in Viboplr
 downloads, writes or launches it. If you already run slskd somewhere (Docker, a
 NAS), skip the guide and paste its address and API key into the Connection
-section. The view tells you which of four things is wrong until it isn't: not
+section.
+
+**Shortcut: Roadie.** [Roadie](https://github.com/outcast1000/roadie) is a
+separate app that installs, configures, runs and updates slskd for you (and
+other tools). When it is running, the empty view offers **Install slskd with
+Roadie**: Roadie asks you before installing and before letting Viboplr connect,
+then hands the plugin the address and its own API key. Roadie owns the process
+from then on — the plugin follows its port, shows *slskd is stopped* with an
+**Open Roadie** button when it isn't running, and forgets the connection if you
+remove slskd there. Typing an address by hand takes it back. Viboplr itself
+still installs and runs nothing; it only opens `roadie://` links (Viboplr 1.0.71
+or newer). The view tells you which of four things is wrong until it isn't: not
 set up, slskd not reachable, key rejected, or slskd not signed in to Soulseek —
 each with the fix.
 
@@ -50,6 +61,14 @@ each with the fix.
   search also shows folders; one click queues the whole album.
 - **Right-click → Search on Soulseek…** on any track, album or artist in
   Viboplr, and Cmd+K offers Soulseek as a source for whatever you typed.
+- **Right-click → Upgrade with Soulseek…** on a library track: the same
+  search, showing only files that beat the copy you have (lossless over lossy,
+  or a clearly higher bitrate), same length only. Pick one; when it lands, the
+  Downloads row offers **Replace in library…**, which opens Viboplr's compare →
+  replace / keep both step.
+- **Right-click → Fill missing tracks with Soulseek…** on an album: every
+  folder found is compared with the tracks you already have, and **Fill**
+  downloads just the ones you don't. "Show everything found" lifts either filter.
 - **Downloads tab** with progress, your position in the other user's queue, and
   per-row actions that show only what applies: Cancel while it runs, Retry /
   Another source on a failure, Play / Add to library once it's done, Remove for

@@ -70,6 +70,13 @@ function fakeHost(opts) {
       getLocalCollections: async () => o.collections || [{ id: 1, name: "Music", path: "/Users/me/Music" }],
       resync: async (id) => { calls.resync.push(id); }
     },
+    // `o.library` = { tracks: Track[], albums: Album[] } — the library the
+    // upgrade / fill-album modes read. Empty by default.
+    library: {
+      getTrackById: async (id) => ((o.library && o.library.tracks) || []).find((t) => t.id === id) || null,
+      getTracks: async (q) => ((o.library && o.library.tracks) || []).filter((t) => q && q.albumId != null ? t.album_id === q.albumId : true),
+      ftsAlbums: async () => (o.library && o.library.albums) || []
+    },
     system: { readAudioTags: async (paths) => paths.map(() => null) },
     assistant: { onTool: (name, fn) => { tools[name] = fn; } }
   };

@@ -55,6 +55,8 @@ call's shape.
 | URI scheme `slsk://` | `api.playback.onResolveStreamByUri` | plays a finished download |
 | Download provider `slskd-import` | `api.downloads.onResolveByUri` | "Add to library…" via the host modal |
 | Context menu `slskd-search` | track / album / artist | "Search on Soulseek…" |
+| Context menu `slskd-upgrade` | track | "Upgrade with Soulseek…" — search filtered to files better than the library copy (`libraryQuality` / `isUpgradeOver`); the download is stamped `upgrade: { trackId }` and its Downloads row gets "Replace in library…", which hands the host modal `libraryTrackId` |
+| Context menu `slskd-fill-album` | album | "Fill missing tracks with Soulseek…" — folders compared against the album's library rows (`ownedTrackFor`); "Fill" downloads only the missing files |
 | Assistant tools | `status`, `search`, `download`, `list_downloads` | for the host's control API / MCP |
 
 `test/transfers.test.js` ("activate registers every surface the manifest declares") fails
