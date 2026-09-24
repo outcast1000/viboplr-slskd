@@ -51,6 +51,16 @@
         <h2>Configure</h2>
         <p>Paste <code>%LOCALAPPDATA%\slskd\slskd.yml</code> into the Explorer address bar, or open it from Notepad. Add the lines below (indentation matters — two spaces per level). Replace the two <span class="placeholder">Soulseek placeholders</span> with your own account; the key is already yours. If the file already has an uncommented <code>soulseek:</code>, <code>shares:</code> or <code>web:</code> section, add the lines inside it instead of repeating the heading.</p>
         <p><strong>Shared folders.</strong> Soulseek is a sharing network, and many users won't send files to someone who shares nothing. Tick the folders to share; the config below follows. Other users can only download from them, never change them. slskd scans them at every start, so a large library takes a few minutes the first time.</p>
+        <div class="notice account">
+          <strong>Your Soulseek account.</strong> There is no sign-up form. The first time any program logs in with a username the server has never seen, that username is created with the password sent — so you simply choose both here.
+          <ul>
+            <li><strong>Write them down.</strong> There is no email behind the account, no password reset and no recovery.</li>
+            <li><strong>Taken names just fail.</strong> A name someone else owns comes back as "invalid credentials"; pick another. There is no way to check first, and a typo creates a new account instead of failing.</li>
+            <li><strong>Use a throwaway password.</strong> The Soulseek protocol sends it to the server essentially in the clear. Never reuse a real one.</li>
+            <li><strong>The username is public</strong> — everyone you exchange files with sees it.</li>
+            <li><strong>One program per account.</strong> Signing in from a second client kicks the first one off. If you already use SoulseekQt or Nicotine+, either give slskd that login and stop the other, or make slskd its own account — running both on one account makes slskd drop in and out, which looks like a broken plugin.</li>
+          </ul>
+        </div>
         <div class="shares" data-shares data-placeholder="D:\Music"></div>
         <p><strong>HTTPS off.</strong> The last two lines switch off slskd's built-in HTTPS, which has a bug on Windows. The plugin talks to slskd over plain <code>http</code> on this computer, so nothing is lost.</p>
         <div class="snippet"><pre data-yml="windows"></pre><button class="copy" data-copy>Copy</button></div>
@@ -103,6 +113,16 @@ chmod +x ~/slskd/slskd
         <p>A fresh file is nothing but commented-out examples (every line starts with <code>#</code>), so there is nothing to merge: paste the block below at the very end and save. Replace the two <span class="placeholder">Soulseek placeholders</span> with your own account; the key is already yours. Indentation matters — two spaces per level, as shown.</p>
         <p class="small">Editing a file you had already configured? Then add the lines inside its existing <code>soulseek:</code>, <code>shares:</code> or <code>web:</code> section instead of repeating the heading.</p>
         <p><strong>Shared folders.</strong> Soulseek is a sharing network, and many users won't send files to someone who shares nothing. Tick the folders to share; the config below follows. Other users can only download from them, never change them. slskd scans them at every start, so a large library takes a few minutes the first time.</p>
+        <div class="notice account">
+          <strong>Your Soulseek account.</strong> There is no sign-up form. The first time any program logs in with a username the server has never seen, that username is created with the password sent — so you simply choose both here.
+          <ul>
+            <li><strong>Write them down.</strong> There is no email behind the account, no password reset and no recovery.</li>
+            <li><strong>Taken names just fail.</strong> A name someone else owns comes back as "invalid credentials"; pick another. There is no way to check first, and a typo creates a new account instead of failing.</li>
+            <li><strong>Use a throwaway password.</strong> The Soulseek protocol sends it to the server essentially in the clear. Never reuse a real one.</li>
+            <li><strong>The username is public</strong> — everyone you exchange files with sees it.</li>
+            <li><strong>One program per account.</strong> Signing in from a second client kicks the first one off. If you already use SoulseekQt or Nicotine+, either give slskd that login and stop the other, or make slskd its own account — running both on one account makes slskd drop in and out, which looks like a broken plugin.</li>
+          </ul>
+        </div>
         <div class="shares" data-shares data-placeholder="/Users/you/Music"></div>
         <div class="snippet"><pre data-yml="macos"></pre><button class="copy" data-copy>Copy</button></div>
       </li>
@@ -150,6 +170,16 @@ docker run -d --name slskd --restart unless-stopped \
       <li>
         <h2>Configure</h2>
         <p>The first start creates <code>~/slskd/slskd.yml</code>. Add the lines below (indentation matters — two spaces per level). Replace the two <span class="placeholder">Soulseek placeholders</span> with your own account; the key is already yours. If the file already has an uncommented <code>soulseek:</code>, <code>shares:</code> or <code>web:</code> section, add the lines inside it instead of repeating the heading. Then <code>docker restart slskd</code>.</p>
+        <div class="notice account">
+          <strong>Your Soulseek account.</strong> There is no sign-up form. The first time any program logs in with a username the server has never seen, that username is created with the password sent — so you simply choose both here.
+          <ul>
+            <li><strong>Write them down.</strong> There is no email behind the account, no password reset and no recovery.</li>
+            <li><strong>Taken names just fail.</strong> A name someone else owns comes back as "invalid credentials"; pick another. There is no way to check first, and a typo creates a new account instead of failing.</li>
+            <li><strong>Use a throwaway password.</strong> The Soulseek protocol sends it to the server essentially in the clear. Never reuse a real one.</li>
+            <li><strong>The username is public</strong> — everyone you exchange files with sees it.</li>
+            <li><strong>One program per account.</strong> Signing in from a second client kicks the first one off. If you already use SoulseekQt or Nicotine+, either give slskd that login and stop the other, or make slskd its own account — running both on one account makes slskd drop in and out, which looks like a broken plugin.</li>
+          </ul>
+        </div>
         <div class="snippet"><pre data-yml="docker"></pre><button class="copy" data-copy>Copy</button></div>
       </li>
       <li>

@@ -393,3 +393,108 @@ test("transferEta is bytes left over the average speed, and null without one", (
   assert.equal(p._transferEta({ size: 9000000, bytesTransferred: 0, averageSpeed: 0 }), null);
   assert.equal(p._transferEta(null), null);
 });
+
+// --- what a real run taught ------------------------------------------------------
+// Against a live slskd, a sharer that advertised a free slot kept the transfer
+// in "Queued, Remotely" for the whole budget, flickering through Initializing
+// and InProgress at 0 bytes as slskd retried — and the state-based stall rule
+// took that flicker for a start. The rule is now "no bytes for N seconds".
+
+function flickerHost(bytesPerPoll) {
+  let polls = 0;
+  const flicker = ["Queued, Remotely", "Initializing", "InProgress", "Queued, Remotely"];
+  return fakeHost({
+    store: { tracked: {} },
+    fetch: async (url, init) => {
+      const method = (init && init.method) || "GET";
+      if (url.endsWith("/api/v0/transfers/downloads") && method === "GET") {
+        const n = polls++;
+        return { status: 200, text: async () => JSON.stringify([{ username: "peer", directories: [{ files: [{
+          id: "t1", username: "peer", filename: "a\\b.mp3", size: 9000000,
+          state: flicker[n % flicker.length], bytesTransferred: bytesPerPoll * n
+        }] }] }]) };
+      }
+      if (url.includes("/api/v0/transfers/downloads/") && method === "DELETE") return { status: 200, text: async () => "" };
+      return undefined;
+    }
+  });
+}
+
+test("a transfer that flickers through InProgress at 0 bytes is stalled, not started", async () => {
+  const plugin = loadPlugin();
+  const h = flickerHost(0);
+  await plugin.activate(h.api);
+  try {
+    const t0 = Date.now();
+    const w = await plugin._waitForTransfer("peer" + SEP + "a\\b.mp3", Date.now() + 15000, null, 2500);
+    assert.equal(w.state, "stalled");
+    assert.ok(Date.now() - t0 < 6000, "gave up on the stall threshold, not the deadline");
+  } finally {
+    plugin.deactivate();
+  }
+});
+
+test("a transfer whose bytes keep growing is never stalled, whatever its state says", async () => {
+  const plugin = loadPlugin();
+  const h = flickerHost(100000);
+  await plugin.activate(h.api);
+  try {
+    const w = await plugin._waitForTransfer("peer" + SEP + "a\\b.mp3", Date.now() + 4500, null, 2500);
+    assert.equal(w.state, "timeout", "ran to the deadline because data kept arriving");
+  } finally {
+    plugin.deactivate();
+  }
+});
+
+test("the poll forgets a pending fallback whose background download failed, and drops slskd's row", async () => {
+  const plugin = loadPlugin();
+  const key = "yoblin" + SEP + "x\\Autumn Sweater.mp3";
+  const deletes = [];
+  const h = fakeHost({
+    store: {
+      tracked: { [key]: { destination: "viboplr/fallback/3-x", b64: "abc", resolvedPath: null, meta: {}, size: 12878403, fallback: true } },
+      fallback: { "autumn sweater|yo la tengo": { ref: key, title: "Autumn Sweater", artist: "Yo La Tengo", at: Date.now() - 120000, size: 12878403, state: "pending", path: null } }
+    },
+    responses: {
+      "/api/v0/transfers/downloads": [{ username: "yoblin", directories: [{ files: [{ id: "t9", username: "yoblin", filename: "x\\Autumn Sweater.mp3", size: 12878403, state: "Completed, Errored", bytesTransferred: 0 }] }] }]
+    },
+    fetch: async (url, init) => {
+      if (init && init.method === "DELETE") { deletes.push(url); return { status: 200, text: async () => "" }; }
+      return undefined;
+    }
+  });
+  await plugin.activate(h.api);
+  try {
+    await plugin._refreshTransfers();
+    assert.deepEqual(h.store.fallback, {}, "the failed attempt is forgotten");
+    assert.equal(h.store.tracked[key], undefined);
+    assert.equal(deletes.length, 1, "slskd's Failed row is removed");
+    assert.ok(deletes[0].includes("remove=true"));
+  } finally {
+    plugin.deactivate();
+  }
+});
+
+test("the poll turns a pending fallback whose background download finished into a kept file", async () => {
+  const plugin = loadPlugin();
+  const key = "peer" + SEP + "x\\Song.mp3";
+  const h = fakeHost({
+    store: {
+      tracked: { [key]: { destination: "viboplr/fallback/4-x", b64: "dmlib3Bsci9mYWxsYmFjay80LXg=", resolvedPath: null, meta: {}, size: 5000, fallback: true } },
+      fallback: { "song|artist": { ref: key, title: "Song", artist: "Artist", at: Date.now() - 120000, size: 5000, state: "pending", path: null } }
+    },
+    responses: {
+      "/api/v0/transfers/downloads": [{ username: "peer", directories: [{ files: [{ id: "t2", username: "peer", filename: "x\\Song.mp3", size: 5000, state: "Completed, Succeeded", bytesTransferred: 5000 }] }] }],
+      "/api/v0/files/downloads/directories/dmlib3Bsci9mYWxsYmFjay80LXg=": { files: [{ name: "Song.mp3", fullName: "Song.mp3", length: 5000 }], directories: [] }
+    }
+  });
+  await plugin.activate(h.api);
+  try {
+    await plugin._refreshTransfers();
+    const e = h.store.fallback["song|artist"];
+    assert.equal(e.state, "kept");
+    assert.equal(e.path, "/Users/me/Music/slskd/viboplr/fallback/4-x/Song.mp3");
+  } finally {
+    plugin.deactivate();
+  }
+});

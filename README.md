@@ -104,7 +104,7 @@ and every matching file with its match score, marked ✓ played, ↓ downloading
 the fallback **kept** are listed on the **Downloads** tab, below slskd's own
 transfers, with Play, Add to library and **Delete file**. Delete is the one place
 the plugin removes anything from disk, and it does so through slskd's own Files
-API, which slskd gates behind `remote_file_management: true` under `flags:` in
+API, which slskd gates behind a top-level `remote_file_management: true` line in
 `slskd.yml` (or `SLSKD_REMOTE_FILE_MANAGEMENT=true`); without it the plugin
 tells you what to enable rather than failing quietly. Settings → Soulseek →
 Playback fallback shows the count and size of kept files and offers the same

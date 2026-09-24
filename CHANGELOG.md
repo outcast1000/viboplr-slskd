@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.5.3
+
+First release after a run against a live slskd, which found the bug below.
+
+- **Stall is measured on bytes, not state.** A sharer that advertised a free
+  slot kept the fallback's transfer in "Queued, Remotely" for the whole budget
+  while slskd flickered it through Initializing and InProgress at zero bytes;
+  the state-based rule took that flicker for a start and waited 51 s. Now "no
+  data for 12 s" means the next sharer, whatever the state says.
+- **Background downloads are watched.** A fallback download left running past
+  the budget is reconciled on every poll: one that finishes becomes a kept file
+  and answers the next request instantly; one that fails or vanishes is removed
+  from slskd's list and forgotten, so a flaky sharer leaves neither a stray
+  "Failed" row in Downloads nor a stale index entry.
+- **The `remote_file_management` hint was wrong.** It is a top-level line in
+  `slskd.yml`, not one of `flags:`, and slskd picks it up without a restart. The
+  refusal message and the README say so now.
+- **Setup guide: "Your Soulseek account".** A note above the config block on
+  every tab: there is no sign-up, the first login creates the account, write
+  the credentials down (no recovery), a taken name just fails, use a throwaway
+  password (the protocol sends it essentially in the clear), the name is
+  public, and one client per account — sharing a login with SoulseekQt or
+  Nicotine+ makes slskd drop in and out.
+
 ## 0.5.2
 
 - **macOS guide: the right settings folder.** slskd 0.26 on .NET 10 keeps its

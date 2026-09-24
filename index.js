@@ -94,7 +94,8 @@ var FALLBACK_LABEL = "Soulseek";
 var FALLBACK_SUBDIR = "fallback";            // DEST_ROOT/fallback/<seq>-<label>
 var FALLBACK_BUDGET_MS = 55000;              // answer (or give up) before the host does
 var FALLBACK_SEARCH_MS = 20000;              // the search's share of the budget
-var FALLBACK_START_MS = 12000;               // a transfer not moving by then is a queued one
+var FALLBACK_START_MS = 12000;               // no bytes for this long = the slot wasn't free; next sharer
+var FALLBACK_RECONCILE_AGE_MS = 60000;       // a pending entry younger than this still belongs to its resolve
 var FALLBACK_MIN_REMAINING_MS = 10000;       // don't start a sharer with less than this left
 var FALLBACK_POLL_MS = 1000;
 var FALLBACK_MAX_TRIES = 3;
@@ -1500,8 +1501,50 @@ async function refreshTransfers() {
   completionsSeeded = true;
 
   await readTagsForResolved();
+  await reconcilePendingFallbacks();
   render();
   if (justFinished.length) await handleCompletions(justFinished);
+}
+
+// A fallback download left running past the budget ("used next time") is only
+// worth anything if someone watches it land — or fail. Every poll checks the
+// pending entries: a finished one is located and becomes a kept file; a failed,
+// cancelled or vanished one is dropped from slskd's list and forgotten, so a
+// flaky sharer leaves neither a stray "Failed" row in Downloads nor an index
+// entry that would send the next request waiting on a corpse. Entries younger
+// than `FALLBACK_RECONCILE_AGE_MS`, or any entry while a resolve is running,
+// still belong to that resolve and are left alone.
+async function reconcilePendingFallbacks() {
+  if (fallbackBusy) return;
+  var keys = Object.keys(fallback);
+  var changed = false;
+  for (var i = 0; i < keys.length; i++) {
+    var e = fallback[keys[i]];
+    if (!e || e.state !== "pending") continue;
+    if (nowMs() - (e.at || 0) < FALLBACK_RECONCILE_AGE_MS) continue;
+    var t = transferByKey(e.ref);
+    var phase = t ? transferPhase(t.state) : null;
+    if (phase === "succeeded") {
+      var rec = tracked[e.ref];
+      var path = rec ? (rec.resolvedPath || await resolveTransferPath(t, rec)) : null;
+      if (!path) continue;
+      e.state = "kept";
+      e.path = path;
+      e.size = t.size || e.size || null;
+      changed = true;
+      api.log("info", "fallback: the background download of “" + e.title + "” finished — kept for next time", "slskd");
+    } else if (!t || phase === "failed" || phase === "cancelled") {
+      if (t) await dropStalled(t);
+      delete tracked[e.ref];
+      delete fallback[keys[i]];
+      changed = true;
+      api.log("warn", "fallback: the background download of “" + e.title + "” " + (t ? phase : "vanished from slskd") + " — forgotten", "slskd");
+    }
+  }
+  if (changed) {
+    await saveFallbackIndex();
+    await api.storage.set("tracked", tracked);
+  }
 }
 
 // Embedded tags for every located file that hasn't been read yet, in ONE host
@@ -1755,12 +1798,16 @@ async function relocateKept(entry) {
 }
 
 // Watch one transfer until it finishes, fails, stalls or the budget runs out.
-// "Stalled" is a transfer that has not started moving `FALLBACK_START_MS` after
-// it was queued — the sharer's slot was not free after all — and is what makes
-// trying the next candidate worthwhile.
-async function waitForTransfer(key, deadline, onTick) {
-  var since = nowMs();
-  var started = false;
+// "Stalled" means NO BYTES have arrived for `FALLBACK_START_MS` — the sharer's
+// slot was not free after all — and is what makes trying the next candidate
+// worthwhile. It is measured on bytes, not on state, deliberately: slskd
+// flickers Queued → Initializing → InProgress (at 0 bytes) → Queued while it
+// retries a sharer, so a state-based rule marked such a transfer "started" and
+// then waited on it to the deadline — 51 s of silence on a real run.
+async function waitForTransfer(key, deadline, onTick, stallMs) {
+  var stallAfter = stallMs || FALLBACK_START_MS;
+  var movedAt = nowMs();
+  var lastBytes = 0;
   var unseen = 0;
   while (nowMs() < deadline) {
     await sleep(FALLBACK_POLL_MS);
@@ -1779,9 +1826,10 @@ async function waitForTransfer(key, deadline, onTick) {
     var phase = transferPhase(t.state);
     if (phase === "succeeded") return { state: "done", transfer: t };
     if (phase === "failed" || phase === "cancelled") return { state: phase, transfer: t };
-    if (phase === "downloading") started = true;
+    var bytes = t.bytesTransferred || 0;
+    if (bytes > lastBytes) { lastBytes = bytes; movedAt = nowMs(); }
     if (onTick) onTick(t, phase);
-    if (!started && nowMs() - since > FALLBACK_START_MS) return { state: "stalled", transfer: t };
+    if (nowMs() - movedAt > stallAfter) return { state: "stalled", transfer: t };
   }
   return { state: "timeout", transfer: transferByKey(key) };
 }
@@ -2004,7 +2052,7 @@ async function resolveFallback(title, artistName, albumName, durationSecs, opts)
       if (w.transfer) await dropStalled(w.transfer);
       delete fallback[fkey];
       await saveFallbackIndex();
-      settleFetch(w.state === "stalled" ? "did not start within " + Math.round(FALLBACK_START_MS / 1000) + "s — trying the next sharer" : w.state, "warn");
+      settleFetch(w.state === "stalled" ? "no data for " + Math.round(FALLBACK_START_MS / 1000) + "s — trying the next sharer" : w.state, "warn");
     }
     finishResolve(rec, "failed", "no sharer delivered the file in time");
     return null;
@@ -2026,7 +2074,7 @@ async function resolveFallback(title, artistName, albumName, durationSecs, opts)
 // its own data directory anyway. slskd gates that API behind
 // `remote_file_management`, so a refusal is explained rather than swallowed.
 var REMOTE_FILE_MANAGEMENT_HINT = "slskd refused to delete the file. Deleting through its API needs " +
-  "`flags: { remote_file_management: true }` in slskd.yml (or SLSKD_REMOTE_FILE_MANAGEMENT=true); restart slskd after changing it.";
+  "a top-level `remote_file_management: true` line in slskd.yml (or SLSKD_REMOTE_FILE_MANAGEMENT=true) — slskd picks the change up without a restart.";
 
 async function deleteFallbackFile(fkey) {
   var entry = fallback[fkey];
@@ -3453,6 +3501,8 @@ return {
   _matchLabel: matchLabel,
   _fallbackTotals: fallbackTotals,
   _transferEta: transferEta,
+  _waitForTransfer: waitForTransfer,
+  _refreshTransfers: refreshTransfers,
   _keptKeys: keptKeys,
   _setFallbackSearchMs: function (ms) { FALLBACK_SEARCH_MS = ms; }
 };
