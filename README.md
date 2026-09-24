@@ -84,14 +84,29 @@ waiting:
 2. **Match**, not just rank. A result must carry most of the title's words in its
    filename and the artist's words somewhere in its path; a *live*, *remix*,
    *instrumental* or *cover* the request didn't ask for is marked down. Among
-   the matches, a sharer with a free upload slot comes first — the user is
-   listening to silence — and without a preferred-formats setting a high-bitrate
-   lossy file beats a lossless one, which is a fifth of the bytes for the same
-   song.
-3. **Fetch**, moving on. The best match is queued into
-   `<downloads>/viboplr/fallback/…`; if it hasn't started moving in 12 s the
-   slot wasn't free after all, so it is dropped and the next sharer tried (up
-   to three).
+   the matches, a sharer who has **delivered before** comes first, then one with
+   a free upload slot — the flag is self-reported, and was wrong for the sharer
+   that cost the first live run its whole budget. Then quality, per **Settings →
+   Soulseek → Fallback quality**: *Fast* (default) puts high-bitrate lossy first,
+   a fifth of the bytes of lossless so the song starts sooner; *Best* puts
+   lossless first, as the Search tab does; a preferred-formats list overrides
+   both.
+
+   The plugin keeps a **sharer ledger** from every download it watches — the
+   Search tab's, the assistant's, the fallback's: deliveries, failures and
+   stalls per username, a delivery worth two strikes. Sharers who have
+   delivered rank first in the Search tab too (at equal quality), sharers who
+   only ever fail sink, and the Availability column says which is which
+   ("free slot · delivered 3×", "queue 12 · unreliable"). Settings → Soulseek
+   shows the totals and can forget the history.
+3. **Fetch**, hedged. The best match is queued into
+   `<downloads>/viboplr/fallback/…`. If no byte has arrived after 5 s, the
+   runner-up — always a different sharer — is queued beside it, never more than
+   two at once. The first transfer to move wins and the other is cancelled on
+   the spot; a transfer that is sending is never second-guessed, however slow.
+   Any attempt with no data for 12 s is dropped and its place refilled, up to
+   four sharers per resolve. A good sharer, the common case, still costs
+   exactly one enqueue.
 4. **What lands in time plays.** What doesn't keeps downloading in the
    background and answers the *next* request for that song instantly — the
    plugin remembers every file the fallback fetched, by normalized title +

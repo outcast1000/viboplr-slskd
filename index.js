@@ -98,7 +98,9 @@ var FALLBACK_START_MS = 12000;               // no bytes for this long = the slo
 var FALLBACK_RECONCILE_AGE_MS = 60000;       // a pending entry younger than this still belongs to its resolve
 var FALLBACK_MIN_REMAINING_MS = 10000;       // don't start a sharer with less than this left
 var FALLBACK_POLL_MS = 1000;
-var FALLBACK_MAX_TRIES = 3;
+var FALLBACK_MAX_TRIES = 4;                  // sharers tried per resolve, hedged or not
+var FALLBACK_HEDGE_MS = 5000;                // no bytes from the first sharer for this long → queue a second
+var FALLBACK_MAX_INFLIGHT = 2;               // never more than this many strangers' slots at once
 var FALLBACK_MIN_TITLE_MATCH = 0.6;          // share of the title's words the filename must carry
 var FALLBACK_MIN_ARTIST_MATCH = 0.5;         // share of the artist's words the path must carry
 var FALLBACK_VIEW_CANDIDATES = 25;
@@ -116,6 +118,7 @@ var settings = {
   tierOverride: null,     // null | "local" | "remote"
   insecure: false,        // accept slskd's self-signed cert
   preferredFormats: "",   // comma-separated, "" = no preference
+  fallbackQuality: "fast", // "fast" (high-bitrate lossy first) | "best" (lossless first); preferredFormats overrides both
   batchSeq: 0
 };
 
@@ -144,6 +147,21 @@ var tagsPending = {};     // resolvedPath -> in-flight readAudioTags promise
 // "pending" | "kept", path, lastUsedAt }. Persisted; the Downloads tab lists and
 // deletes exactly these.
 var fallback = {};
+// What every sharer has done for us, keyed by username → { delivered, failed,
+// stalled, bytes, lastAt }. Fed by every download this plugin watches — the
+// Search tab's, the assistant's, the fallback's — and read back as a ranking
+// key, because the free-slot flag and upload speed a sharer advertises are
+// self-reported and were both wrong for the peer that cost the first live run
+// its whole budget. A sharer that has actually delivered outranks one that
+// merely claims it could.
+var sharers = {};
+// Which transfers the ledger has dealt with: "claimed" while a fallback race is
+// watching one (the race reports its outcome; the poll must not), "counted"
+// once an outcome was recorded — or seen already finished at the first poll of
+// a session, which is history, not news. Two observers see every transfer
+// (the poll and, for fallback files, the race), and this is what stops them
+// counting one outcome twice or a stale one at every restart.
+var ledgerSeen = {};
 
 // slskd runs ONE search at a time (POST /searches answers 429 while another is
 // in flight), so every search — the view's, a context-menu one, an assistant
@@ -281,6 +299,7 @@ function rankResults(responses, prefs) {
   var preferred = prefs.preferredFormats || null;
   var known = prefs.knownDurationSecs != null ? prefs.knownDurationSecs : null;
   var maxQueue = prefs.maxQueue != null ? prefs.maxQueue : null;
+  var tierOf = typeof prefs.sharerTier === "function" ? prefs.sharerTier : null;
   var out = [];
   var seen = {};
 
@@ -320,6 +339,7 @@ function rankResults(responses, prefs) {
         uploadSpeed: resp.uploadSpeed != null ? resp.uploadSpeed : 0,
         qualityTier: qualityTier(file),
         availabilityTier: avail,
+        sharerTier: tierOf ? tierOf(resp.username || "") : 1,
         formatRank: formatRank(ext, preferred)
       });
     }
@@ -328,6 +348,8 @@ function rankResults(responses, prefs) {
   out.sort(function (a, b) {
     if (a.formatRank !== b.formatRank) return a.formatRank - b.formatRank;
     if (a.qualityTier !== b.qualityTier) return a.qualityTier - b.qualityTier;
+    // A sharer who has delivered before beats one who only advertises a slot.
+    if (a.sharerTier !== b.sharerTier) return a.sharerTier - b.sharerTier;
     if (a.availabilityTier !== b.availabilityTier) return a.availabilityTier - b.availabilityTier;
     if (a.uploadSpeed !== b.uploadSpeed) return b.uploadSpeed - a.uploadSpeed;
     if (a.queueLength !== b.queueLength) return a.queueLength - b.queueLength;
@@ -845,6 +867,55 @@ function availabilityLabel(c) {
   return "queue " + c.queueLength;
 }
 
+// ---------------------------------------------------------------------------
+// Sharer ledger — pure
+// ---------------------------------------------------------------------------
+// A delivery is worth two strikes: one bad day should not bury a sharer who
+// has come through before, but a sharer who only ever fails sinks.
+function sharerScore(st) {
+  if (!st) return 0;
+  return (st.delivered || 0) * 2 - (st.failed || 0) - (st.stalled || 0);
+}
+
+// 0 = proven (has delivered, net positive) · 1 = unknown · 2 = burned.
+function sharerTier(st) {
+  var sc = sharerScore(st);
+  if (sc > 0) return 0;
+  if (sc < 0) return 2;
+  return 1;
+}
+
+function sharerLabel(st) {
+  var tier = sharerTier(st);
+  if (tier === 0) return "delivered " + (st.delivered === 1 ? "once" : st.delivered + "×");
+  if (tier === 2) return "unreliable";
+  return "";
+}
+
+// Record one outcome for a sharer. `event` is "delivered" | "failed" |
+// "stalled"; anything else is ignored so callers can pass a drop reason through.
+function noteSharer(ledger, username, event, bytes) {
+  if (!username || !ledger) return ledger;
+  if (event !== "delivered" && event !== "failed" && event !== "stalled") return ledger;
+  var st = ledger[username] || { delivered: 0, failed: 0, stalled: 0, bytes: 0, lastAt: null };
+  st[event] = (st[event] || 0) + 1;
+  if (event === "delivered" && bytes) st.bytes = (st.bytes || 0) + bytes;
+  st.lastAt = Date.now();
+  ledger[username] = st;
+  return ledger;
+}
+
+function ledgerTotals(ledger) {
+  var keys = Object.keys(ledger || {});
+  var proven = 0, burned = 0;
+  for (var i = 0; i < keys.length; i++) {
+    var t = sharerTier(ledger[keys[i]]);
+    if (t === 0) proven++;
+    else if (t === 2) burned++;
+  }
+  return { seen: keys.length, proven: proven, burned: burned };
+}
+
 
 // ---------------------------------------------------------------------------
 // Playback fallback — pure helpers
@@ -947,12 +1018,14 @@ function scoreFallbackCandidate(c, want) {
   return { title: titleScore, artist: artistScore, penalty: penalty, score: score };
 }
 
-// The fallback waits for the file with the user listening to silence, so a
-// fast, sure transfer beats a better one. Without a stated format preference,
-// high-bitrate lossy comes before lossless (a fifth of the bytes for the same
-// song); with one, the user's order stands as it does everywhere else.
-function fallbackQualityRank(c, preferred) {
+// The fallback waits for the file with the user listening to silence, so by
+// default a fast, sure transfer beats a better one: high-bitrate lossy comes
+// before lossless (a fifth of the bytes for the same song). The user can flip
+// that to "best" (lossless first, as the Search tab ranks), and a stated
+// format preference overrides both, as it does everywhere else.
+function fallbackQualityRank(c, preferred, mode) {
   if (preferred && preferred.length) return c.formatRank * 10 + c.qualityTier;
+  if (mode === "best") return c.qualityTier;
   if (c.qualityTier === T_HIGH) return 0;
   if (c.qualityTier === T_UNKNOWN) return 1;
   if (c.qualityTier === T_LOSSLESS) return 2;
@@ -963,7 +1036,7 @@ function fallbackQualityRank(c, preferred) {
 // Ranked search results → the ones that are this song, best first. Every
 // candidate carries its `match` so the Fallback tab can show why it placed
 // where it did; the ones below the bar are dropped, not demoted.
-function rankFallback(candidates, title, artist, preferred) {
+function rankFallback(candidates, title, artist, preferred, mode) {
   var want = { title: titleWords(title), artist: artistWords(artist) };
   var out = [];
   for (var i = 0; i < (candidates || []).length; i++) {
@@ -975,7 +1048,8 @@ function rankFallback(candidates, title, artist, preferred) {
     var copy = {};
     for (var k in c) if (Object.prototype.hasOwnProperty.call(c, k)) copy[k] = c[k];
     copy.match = m;
-    copy.fallbackRank = fallbackQualityRank(c, preferred);
+    copy.fallbackRank = fallbackQualityRank(c, preferred, mode);
+    if (copy.sharerTier == null) copy.sharerTier = 1;
     out.push(copy);
   }
   out.sort(function (a, b) {
@@ -983,6 +1057,9 @@ function rankFallback(candidates, title, artist, preferred) {
     // not outrank a free upload slot.
     var sa = Math.round(a.match.score * 10), sb = Math.round(b.match.score * 10);
     if (sa !== sb) return sb - sa;
+    // Proven delivery outranks an advertised free slot: the flag is
+    // self-reported and was wrong for the sharer that cost a whole budget.
+    if (a.sharerTier !== b.sharerTier) return a.sharerTier - b.sharerTier;
     if (a.availabilityTier !== b.availabilityTier) return a.availabilityTier - b.availabilityTier;
     if (a.fallbackRank !== b.fallbackRank) return a.fallbackRank - b.fallbackRank;
     if (a.uploadSpeed !== b.uploadSpeed) return b.uploadSpeed - a.uploadSpeed;
@@ -1317,7 +1394,10 @@ async function readResponses(path, field) {
 }
 
 function viewPrefs(extra) {
-  var prefs = { preferredFormats: parsePreferredFormats(settings.preferredFormats) };
+  var prefs = {
+    preferredFormats: parsePreferredFormats(settings.preferredFormats),
+    sharerTier: function (username) { return sharerTier(sharers[username]); }
+  };
   if (extra && extra.knownDurationSecs != null) prefs.knownDurationSecs = extra.knownDurationSecs;
   return prefs;
 }
@@ -1491,6 +1571,13 @@ async function refreshTransfers() {
       knownDone[key] = true;
       if (completionsSeeded) justFinished.push(tr);
     }
+    // The ledger: only transitions seen live count. Whatever is already
+    // finished at the first poll of a session is history — marked as dealt
+    // with, not recorded — or every restart would re-count it.
+    if (phase === "succeeded" || phase === "failed") {
+      if (completionsSeeded) ledgerCount(key, tr.username, phase === "succeeded" ? "delivered" : "failed", tr.size || 0, false);
+      else if (!ledgerSeen[key]) ledgerSeen[key] = "counted";
+    }
     if (rec && !rec.resolvedPath && phase === "succeeded") {
       await resolveTransferPath(tr, rec);
     }
@@ -1534,6 +1621,7 @@ async function reconcilePendingFallbacks() {
       changed = true;
       api.log("info", "fallback: the background download of “" + e.title + "” finished — kept for next time", "slskd");
     } else if (!t || phase === "failed" || phase === "cancelled") {
+      if (t && phase === "failed") ledgerCount(e.ref, t.username, "failed", 0, false);
       if (t) await dropStalled(t);
       delete tracked[e.ref];
       delete fallback[keys[i]];
@@ -1774,6 +1862,21 @@ function renderIfFallback() {
   if (activeTab === "fallback") render();
 }
 
+function recordSharer(username, event, bytes) {
+  noteSharer(sharers, username, event, bytes);
+  api.storage.set("sharers", sharers).catch(function (e) { console.error("slskd: couldn't save the sharer ledger:", e); });
+}
+
+// Count one transfer's outcome exactly once. `owner` is true for the race
+// reporting a transfer it claimed; the poll passes false and yields to a claim.
+function ledgerCount(key, username, event, bytes, owner) {
+  var st = ledgerSeen[key];
+  if (st === "counted") return;
+  if (st === "claimed" && !owner) return;
+  ledgerSeen[key] = "counted";
+  recordSharer(username, event, bytes);
+}
+
 async function saveFallbackIndex() {
   try {
     await api.storage.set("fallback", fallback);
@@ -1901,6 +2004,185 @@ function liveLine(rec) {
   return rec.live + (rec.eta ? "  ·  about " + formatDurationSecs(rec.eta) + " left" : "");
 }
 
+// The fetch, hedged. The best candidate is queued at once. If no byte has
+// arrived after FALLBACK_HEDGE_MS, the runner-up — a DIFFERENT sharer; slskd
+// queues per user, so two files from one user just queue behind each other —
+// is queued beside it, never more than FALLBACK_MAX_INFLIGHT at a time. The
+// first transfer to move is the leader: every other attempt is cancelled on the
+// spot, and a leader is never second-guessed, however slow. Any attempt with no
+// bytes for FALLBACK_START_MS is dropped and its slot refilled. This grew out of
+// the first live run, where a "free slot" sharer that never sent a byte cost
+// the whole budget one sharer at a time; a good sharer, which is the common
+// case, still costs exactly one enqueue.
+//
+// Returns { state: "done", path, attempt } | { state: "timeout", attempt } (one
+// transfer left running for next time) | { state: "unlocated" } | { state:
+// "exhausted" } (every sharer tried and dropped) | { state: "none" } (nothing
+// could even be queued).
+async function raceSharers(rec, matches, ctx) {
+  var live = [];
+  var next = 0;
+  var users = {};
+  var tried = 0;
+  var lastStartAt = 0;
+  var leader = null;
+
+  function indexEntry(attempt, state, path) {
+    fallback[ctx.fkey] = { ref: attempt.key, title: ctx.title, artist: ctx.artistName || null, query: ctx.query,
+      at: attempt.startedAt, size: attempt.c.size || null, state: state, path: path || null };
+  }
+
+  async function persist() {
+    await saveFallbackIndex();
+    await api.storage.set("tracked", tracked);
+  }
+
+  // Queue the next candidate from a sharer not yet tried. False when there is
+  // none left (or the per-resolve cap is reached).
+  async function startNext() {
+    while (next < matches.length && tried < FALLBACK_MAX_TRIES) {
+      var c = matches[next++];
+      if (users[c.username]) continue;
+      users[c.username] = 1;
+      tried++;
+      var key = c.username + KEY_SEP + c.filename;
+      rec.tried.push(key);
+      var settle = resolveStep(rec, "download from " + c.username + " (" + basenameRemote(c.filename) + ", " + formatBytes(c.size) + ")");
+      try {
+        var out = await enqueueBatch(c.username, [c], (ctx.artistName ? ctx.artistName + " - " : "") + ctx.title, FALLBACK_SUBDIR);
+        if (!out.queued.length) {
+          settle("slskd refused it" + (out.failures[0] && out.failures[0].message ? " — " + out.failures[0].message : ""), "warn");
+          ledgerCount(key, c.username, "failed", 0, true);
+          await dropIfListed(key);
+          continue;
+        }
+      } catch (e) {
+        settle((e && e.message) || String(e), "error");
+        ledgerCount(key, c.username, "failed", 0, true);
+        await dropIfListed(key);
+        continue;
+      }
+      if (tracked[key]) tracked[key].fallback = true;
+      // Claim the transfer for the ledger: this race reports its outcome, so
+      // the poll, which may see the state flip first, leaves it alone.
+      if (!ledgerSeen[key]) ledgerSeen[key] = "claimed";
+      var attempt = { c: c, key: key, settle: settle, startedAt: nowMs(), movedAt: nowMs(), lastBytes: 0, unseen: 0, transfer: null };
+      live.push(attempt);
+      lastStartAt = attempt.startedAt;
+      if (!rec.picked) rec.picked = c;
+      if (!fallback[ctx.fkey]) indexEntry(attempt, "pending");
+      await persist();
+      renderIfFallback();
+      return true;
+    }
+    return false;
+  }
+
+  // Cancel an attempt in slskd and forget it here — transfer row, bookkeeping
+  // record, and the index entry if it was pointing at this one.
+  async function drop(attempt, reason, level, event) {
+    var at = live.indexOf(attempt);
+    if (at >= 0) live.splice(at, 1);
+    if (leader === attempt) leader = null;
+    if (event) ledgerCount(attempt.key, attempt.c.username, event, 0, true);
+    if (attempt.transfer) await dropStalled(attempt.transfer); else await dropIfListed(attempt.key);
+    delete tracked[attempt.key];
+    if (fallback[ctx.fkey] && fallback[ctx.fkey].ref === attempt.key) delete fallback[ctx.fkey];
+    if (rec.picked && sameCandidate(rec.picked, attempt.c)) rec.picked = (leader || live[0] || {}).c || null;
+    await persist();
+    attempt.settle(reason, level || "warn");
+  }
+
+  if (!(await startNext())) return { state: "none" };
+
+  while (nowMs() < ctx.deadline) {
+    await sleep(FALLBACK_POLL_MS);
+    var flat = null;
+    try { flat = await fetchTransfers(); } catch (e) { flat = null; }
+    if (!flat) continue;
+    transfers = flat;
+
+    var snapshot = live.slice();
+    for (var i = 0; i < snapshot.length; i++) {
+      var a = snapshot[i];
+      if (live.indexOf(a) < 0) continue;
+      var t = transferByKey(a.key);
+      if (!t) {
+        // slskd lists a transfer the moment it accepts the enqueue; a few
+        // misses are a race, a run of them means it was dropped.
+        if (++a.unseen >= 5) await drop(a, "vanished from slskd", "warn", "failed");
+        continue;
+      }
+      a.unseen = 0;
+      a.transfer = t;
+      var phase = transferPhase(t.state);
+      if (phase === "succeeded") {
+        var others = live.filter(function (x) { return x !== a; });
+        for (var k = 0; k < others.length; k++) await drop(others[k], "another sharer delivered first");
+        ledgerCount(a.key, a.c.username, "delivered", t.size || a.c.size || 0, true);
+        var path = await locateFinished(t, tracked[a.key]);
+        if (!path) {
+          a.settle("finished, but the file could not be located in slskd's downloads folder", "error");
+          return { state: "unlocated", attempt: a };
+        }
+        indexEntry(a, "kept", path);
+        fallback[ctx.fkey].lastUsedAt = nowMs();
+        fallback[ctx.fkey].size = t.size || a.c.size || null;
+        await persist();
+        rec.chosen = a.c;
+        rec.picked = a.c;
+        a.settle("finished");
+        return { state: "done", path: path, attempt: a };
+      }
+      if (phase === "failed" || phase === "cancelled") {
+        await drop(a, phase, "warn", phase === "failed" ? "failed" : null);
+        continue;
+      }
+      var bytes = t.bytesTransferred || 0;
+      if (bytes > a.lastBytes) {
+        a.lastBytes = bytes;
+        a.movedAt = nowMs();
+        if (!leader) {
+          leader = a;
+          rec.picked = a.c;
+          indexEntry(a, "pending");
+          await persist();
+          var losers = live.filter(function (x) { return x !== a; });
+          for (var m = 0; m < losers.length; m++) await drop(losers[m], "another sharer started sending first");
+        }
+      }
+      if (nowMs() - a.movedAt > FALLBACK_START_MS) {
+        await drop(a, "no data for " + Math.round(FALLBACK_START_MS / 1000) + "s", "warn", "stalled");
+      }
+    }
+
+    // Hedge, or refill after a drop: only while nothing is moving, only up to
+    // the in-flight cap, and only with enough budget left for it to matter.
+    if (!leader && live.length < FALLBACK_MAX_INFLIGHT && ctx.deadline - nowMs() >= FALLBACK_MIN_REMAINING_MS) {
+      var silentFor = live.length ? nowMs() - lastStartAt : Infinity;
+      if (silentFor >= FALLBACK_HEDGE_MS) await startNext();
+    }
+    if (!live.length) return { state: "exhausted" };
+
+    var primary = leader || live[0];
+    if (primary.transfer) liveTransferTick(rec, primary.key)(primary.transfer);
+  }
+
+  // Out of time. Keep ONE transfer running for next time — the leader if any,
+  // else the first — and cancel the rest, so two strangers' slots aren't held
+  // for a song nobody is waiting on any more.
+  var keep = leader || live[0] || null;
+  var rest = live.filter(function (x) { return x !== keep; });
+  for (var r = 0; r < rest.length; r++) await drop(rest[r], "out of time — cancelled" + (keep ? " in favour of " + keep.c.username : ""));
+  if (!keep) return { state: "exhausted" };
+  indexEntry(keep, "pending");
+  await persist();
+  rec.picked = keep.c;
+  rec.chosen = keep.c;
+  keep.settle("out of time while downloading — it keeps going and is used next time", "warn");
+  return { state: "timeout", attempt: keep };
+}
+
 async function resolveFallback(title, artistName, albumName, durationSecs, opts) {
   if (opts && opts.preferVideo) return null;           // audio only; the video pass is not ours
   if (readiness.state !== "ready" || tier !== "local") return null;
@@ -1982,7 +2264,7 @@ async function resolveFallback(title, artistName, albumName, durationSecs, opts)
       return null;
     }
     var preferred = parsePreferredFormats(settings.preferredFormats);
-    var matches = rankFallback(ranked, title, artistName, preferred);
+    var matches = rankFallback(ranked, title, artistName, preferred, settings.fallbackQuality);
     rec.candidates = matches.slice(0, FALLBACK_VIEW_CANDIDATES);
     settleSearch(ranked.length + " downloadable file" + (ranked.length === 1 ? "" : "s") + ", " + matches.length + " that match" +
       (ranked.partial ? " (cut at " + Math.round(FALLBACK_SEARCH_MS / 1000) + "s while slskd was still searching)" : ""), matches.length ? "info" : "warn");
@@ -1991,70 +2273,24 @@ async function resolveFallback(title, artistName, albumName, durationSecs, opts)
       return null;
     }
 
-    // 3. Fetch, best candidate first, moving on when one doesn't start.
-    for (var i = 0; i < matches.length && i < FALLBACK_MAX_TRIES; i++) {
-      if (deadline - nowMs() < FALLBACK_MIN_REMAINING_MS) {
-        finishResolve(rec, "timeout", "not enough of the budget left to try another sharer");
-        return null;
-      }
-      var c = matches[i];
-      var key = c.username + KEY_SEP + c.filename;
-      rec.tried.push(key);
-      var settleFetch = resolveStep(rec, "download from " + c.username + " (" + basenameRemote(c.filename) + ", " + formatBytes(c.size) + ")");
-      try {
-        var out = await enqueueBatch(c.username, [c], (artistName ? artistName + " - " : "") + title, FALLBACK_SUBDIR);
-        if (!out.queued.length) {
-          settleFetch("slskd refused it" + (out.failures[0] && out.failures[0].message ? " — " + out.failures[0].message : ""), "warn");
-          await dropIfListed(key);
-          continue;
-        }
-      } catch (e) {
-        settleFetch((e && e.message) || String(e), "error");
-        await dropIfListed(key);
-        continue;
-      }
-      rec.picked = c;
-      renderIfFallback();
-      var trackedRec = tracked[key];
-      if (trackedRec) trackedRec.fallback = true;
-      fallback[fkey] = { ref: key, title: title, artist: artistName || null, query: query, at: nowMs(), size: c.size || null, state: "pending", path: null };
-      await saveFallbackIndex();
-      await api.storage.set("tracked", tracked);
-
-      var w = await waitForTransfer(key, deadline, liveTransferTick(rec, key));
-      clearLive(rec);
-      if (w.state === "done") {
-        var path = await locateFinished(w.transfer, tracked[key]);
-        if (!path) {
-          settleFetch("finished, but the file could not be located in slskd's downloads folder", "error");
-          finishResolve(rec, "failed", "the download finished but its file could not be located");
-          return null;
-        }
-        fallback[fkey].state = "kept";
-        fallback[fkey].path = path;
-        fallback[fkey].size = w.transfer.size || c.size || null;
-        fallback[fkey].lastUsedAt = nowMs();
-        await saveFallbackIndex();
-        rec.chosen = c;
-        settleFetch("finished");
-        finishResolve(rec, "played", null, path);
-        schedulePoll(true);
-        return fallbackAnswer(path);
-      }
-      if (w.state === "timeout") {
-        rec.chosen = c;
-        settleFetch("out of time while downloading — it keeps going and is used next time", "warn");
-        finishResolve(rec, "timeout", "the download did not finish within the budget; it continues in the background");
-        schedulePoll(true);
-        return null;
-      }
-      // stalled / failed / cancelled / gone: clear it and try the next sharer.
-      if (w.transfer) await dropStalled(w.transfer);
-      delete fallback[fkey];
-      await saveFallbackIndex();
-      settleFetch(w.state === "stalled" ? "no data for " + Math.round(FALLBACK_START_MS / 1000) + "s — trying the next sharer" : w.state, "warn");
+    // 3. Fetch — hedged. See `raceSharers`.
+    var race = await raceSharers(rec, matches, { fkey: fkey, title: title, artistName: artistName, query: query, deadline: deadline });
+    clearLive(rec);
+    if (race.state === "done") {
+      finishResolve(rec, "played", null, race.path);
+      schedulePoll(true);
+      return fallbackAnswer(race.path);
     }
-    finishResolve(rec, "failed", "no sharer delivered the file in time");
+    if (race.state === "unlocated") {
+      finishResolve(rec, "failed", "the download finished but its file could not be located");
+      return null;
+    }
+    if (race.state === "timeout") {
+      finishResolve(rec, "timeout", "the download did not finish within the budget; it continues in the background");
+      schedulePoll(true);
+      return null;
+    }
+    finishResolve(rec, "failed", race.state === "none" ? "every sharer refused the download" : "no sharer delivered the file in time");
     return null;
   } catch (e) {
     console.error("slskd: fallback resolve failed:", e);
@@ -2317,7 +2553,8 @@ function resultCells(c) {
   if (quality && quality !== "unknown") cells.quality = quality;
   if (c.size) cells.size = formatBytes(c.size);
   if (c.length != null) cells.duration = formatDurationSecs(c.length);
-  cells.availability = availabilityLabel(c);
+  var rep = sharerLabel(sharers[c.username]);
+  cells.availability = availabilityLabel(c) + (rep ? " · " + rep : "");
   return cells;
 }
 
@@ -2724,15 +2961,31 @@ function fallbackSettingsSection() {
   var totals = fallbackTotals(fallback);
   var children = [
     { type: "text", className: "plugin-muted",
-      content: "When a track has no playable source, Viboplr can fetch it from Soulseek: one bounded search, then the best-matching file from a sharer with a free slot, played as soon as it lands. " +
-        "Enable it and set its order among the other sources in Settings → Providers → Playback fallback. Without a preferred-formats setting the fallback favours high-bitrate lossy files over lossless — they arrive in a fraction of the time." },
+      content: "When a track has no playable source, Viboplr can fetch it from Soulseek: one bounded search, then the best-matching file from a sharer who has delivered before or advertises a free slot, played as soon as it lands. " +
+        "Enable it and set its order among the other sources in Settings → Providers → Playback fallback." },
+    { type: "settings-row", label: "Fallback quality",
+      description: settings.preferredFormats
+        ? "Your preferred formats (“" + settings.preferredFormats + "”) decide; this setting only applies when that field is empty."
+        : "Fast favours high-bitrate lossy files — a fifth of the bytes of lossless, so the song starts sooner. Best ranks lossless first, as the Search tab does.",
+      control: { type: "select", action: "set-fallback-quality", value: settings.fallbackQuality === "best" ? "best" : "fast",
+        options: [
+          { value: "fast", label: "Fast (lossy first)" },
+          { value: "best", label: "Best (lossless first)" }
+        ] } },
+    { type: "settings-row", label: "Sharers",
+      description: (function () {
+        var lt = ledgerTotals(sharers);
+        if (!lt.seen) return "No downloads watched yet. Every sharer's deliveries, failures and stalls are remembered, and sharers who have delivered are ranked above ones who only advertise a free slot — in the Search tab and in the fallback.";
+        return lt.seen + (lt.seen === 1 ? " sharer" : " sharers") + " seen · " + lt.proven + " proven · " + lt.burned + " unreliable. Proven sharers rank first in results and in the fallback.";
+      })() },
     { type: "settings-row", label: "Files kept by the fallback",
       description: totals.count
         ? totals.count + (totals.count === 1 ? " file" : " files") + " · " + formatBytes(totals.bytes) + ", in slskd's downloads folder under “" + DEST_ROOT + "/" + FALLBACK_SUBDIR + "”. The Downloads tab lists each one."
         : "None yet. Fetched files stay in slskd's downloads folder, under “" + DEST_ROOT + "/" + FALLBACK_SUBDIR + "”, so a song plays instantly the next time." },
     { type: "toolbar", buttons: [
       { label: "Show in Soulseek", action: "open-fallback", variant: "secondary" }
-    ].concat(totals.count ? [{ label: "Delete all kept files", action: "delete-all-kept", variant: "secondary", icon: "🗑" }] : []) }
+    ].concat(totals.count ? [{ label: "Delete all kept files", action: "delete-all-kept", variant: "secondary", icon: "🗑" }] : [])
+     .concat(Object.keys(sharers).length ? [{ label: "Forget sharer history", action: "reset-sharers", variant: "secondary" }] : []) }
   ];
   return { type: "section", title: "Playback fallback", children: children };
 }
@@ -3134,6 +3387,17 @@ function registerActions() {
   api.ui.onAction("set-key", function (data) { saveSetting("apiKey", (data && data.value) || ""); });
   api.ui.onAction("set-key:submit", function (data) { saveSetting("apiKey", (data && data.value) || ""); });
   api.ui.onAction("set-formats", function (data) { saveSetting("preferredFormats", (data && data.value) || ""); });
+  api.ui.onAction("set-fallback-quality", function (data) {
+    var v = data && data.value;
+    if (v !== "fast" && v !== "best") return;
+    saveSetting("fallbackQuality", v);
+  });
+  api.ui.onAction("reset-sharers", function () {
+    sharers = {};
+    api.storage.set("sharers", sharers).catch(function (e) { console.error("slskd: couldn't reset the sharer ledger:", e); });
+    render();
+    renderSettings();
+  });
   api.ui.onAction("set-insecure", function (data) { saveSetting("insecure", !!(data && data.value)); });
   api.ui.onAction("set-local", function (data) {
     saveSetting("tierOverride", (data && data.value) ? "local" : "remote");
@@ -3332,7 +3596,7 @@ function schedulePoll(fast) {
 // Lifecycle
 // ---------------------------------------------------------------------------
 async function loadSettings() {
-  var keys = ["url", "apiKey", "tierOverride", "insecure", "preferredFormats", "batchSeq"];
+  var keys = ["url", "apiKey", "tierOverride", "insecure", "preferredFormats", "fallbackQuality", "batchSeq"];
   for (var i = 0; i < keys.length; i++) {
     try {
       var v = await api.storage.get(keys[i]);
@@ -3348,6 +3612,8 @@ async function loadSettings() {
     if (t && typeof t === "object") tracked = t;
     var fb = await api.storage.get("fallback");
     if (fb && typeof fb === "object") fallback = fb;
+    var sh = await api.storage.get("sharers");
+    if (sh && typeof sh === "object") sharers = sh;
   } catch (e) {
     console.error("slskd: couldn't read stored state:", e);
   }
@@ -3432,6 +3698,7 @@ function deactivate() {
   searchGen++;
   toolResults = {};
   knownDone = {};
+  ledgerSeen = {};
   completionsSeeded = false;
   lastResolve = null;
   fallbackBusy = false;
@@ -3502,6 +3769,12 @@ return {
   _fallbackTotals: fallbackTotals,
   _transferEta: transferEta,
   _waitForTransfer: waitForTransfer,
+  _FALLBACK_HEDGE_MS: FALLBACK_HEDGE_MS,
+  _sharerScore: sharerScore,
+  _sharerTier: sharerTier,
+  _sharerLabel: sharerLabel,
+  _noteSharer: noteSharer,
+  _ledgerTotals: ledgerTotals,
   _refreshTransfers: refreshTransfers,
   _keptKeys: keptKeys,
   _setFallbackSearchMs: function (ms) { FALLBACK_SEARCH_MS = ms; }

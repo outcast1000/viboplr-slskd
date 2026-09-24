@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.6.0
+
+- **Hedged fetch.** The best sharer is queued at once; if no byte has arrived
+  after 5 s the runner-up — always a different sharer — is queued beside it,
+  never more than two at once. The first transfer to move wins and the other is
+  cancelled on the spot; a transfer that is sending is never second-guessed,
+  however slow. An attempt with no data for 12 s is dropped and its place
+  refilled, up to four sharers per resolve. A good sharer, the common case,
+  still costs exactly one enqueue. On timeout one transfer is kept running for
+  next time and the rest are cancelled, so two strangers' slots aren't held for
+  a song nobody is waiting on.
+- **Sharer ledger.** Every download the plugin watches — the Search tab's, the
+  assistant's, the fallback's — records the sharer's deliveries, failures and
+  stalls (a delivery is worth two strikes). Sharers who have delivered rank
+  first in the Search tab at equal quality and ahead of an advertised free slot
+  in the fallback; sharers who only ever fail sink. The Availability column
+  says which is which ("free slot · delivered 3×", "queue 12 · unreliable").
+  Settings → Soulseek shows the totals and can forget the history.
+- **Fallback quality setting** (Settings → Soulseek → Playback fallback): *Fast*
+  (default) puts high-bitrate lossy files first, *Best* puts lossless first as
+  the Search tab does; a preferred-formats list overrides both.
+- A sharer dropped mid-resolve no longer leaves a bookkeeping record behind.
+- `CLAUDE.md` / `AGENTS.md`: a guide for AI agents working in this repository —
+  how Viboplr runs a plugin, the fallback design and the decisions behind it,
+  slskd facts that bit, unit and live testing, releasing.
+
 ## 0.5.3
 
 First release after a run against a live slskd, which found the bug below.

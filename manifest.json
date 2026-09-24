@@ -1,7 +1,7 @@
 {
   "id": "slskd",
   "name": "Soulseek",
-  "version": "0.5.3",
+  "version": "0.6.0",
   "author": "Viboplr",
   "description": "Search and download from the Soulseek network via a slskd daemon: ranked results, whole-album grabs, live transfer progress, finished files that play and reach your library, and a playback fallback that fetches a missing track from Soulseek.",
   "minAppVersion": "1.0.34",

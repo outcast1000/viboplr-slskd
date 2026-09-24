@@ -498,3 +498,267 @@ test("the poll turns a pending fallback whose background download finished into 
     plugin.deactivate();
   }
 });
+
+test("a sharer dropped mid-resolve leaves no bookkeeping record behind; only the one that delivered is tracked", async () => {
+  const plugin = loadPlugin();
+  const good = "Music\\Yo La Tengo\\08 - Autumn Sweater.mp3";
+  const bad = "Music\\Yo La Tengo\\Autumn Sweater.mp3";
+  const batches = [];
+  let polls = 0;
+  const h = fakeHost({
+    store: { tracked: {} },
+    fetch: async (url, init) => {
+      const json = (v) => ({ status: 200, text: async () => JSON.stringify(v) });
+      const method = (init && init.method) || "GET";
+      if (url.includes("/api/v0/searches") && method === "POST") return json({ id: "s1" });
+      if (url.includes("/responses")) {
+        return json([
+          // Same quality; "flaky" wins the tie on upload speed and is tried first.
+          { username: "flaky", hasFreeUploadSlot: true, queueLength: 0, uploadSpeed: 9000000, files: [{ filename: bad, size: 9000000, length: 318, bitRate: 320 }] },
+          { username: "solid", hasFreeUploadSlot: true, queueLength: 0, uploadSpeed: 1000000, files: [{ filename: good, size: 9000000, length: 318, bitRate: 320 }] }
+        ]);
+      }
+      if (url.includes("/api/v0/searches/s1")) return json({ id: "s1", state: "Completed, ResponseLimitReached", responseCount: 2, fileCount: 2 });
+      if (url.includes("/api/v0/transfers/downloads/batches") && method === "POST") { batches.push(JSON.parse(init.body)); return json({ failures: [] }); }
+      if (url.endsWith("/api/v0/transfers/downloads") && method === "GET") {
+        const rows = batches.map((b, i) => {
+          const flaky = b.username === "flaky";
+          const n = polls;
+          const state = flaky ? "Completed, Errored" : (n - i < 2 ? "InProgress" : "Completed, Succeeded");
+          return { username: b.username, directories: [{ files: [{ id: "t" + i, username: b.username, filename: b.files[0].filename, size: 9000000, state, bytesTransferred: flaky ? 0 : 9000000 }] }] };
+        });
+        polls++;
+        return json(rows);
+      }
+      if (url.includes("/api/v0/files/downloads/directories/") && method === "GET") return json({ files: [{ name: "08 - Autumn Sweater.mp3", fullName: "08 - Autumn Sweater.mp3", length: 9000000 }], directories: [] });
+      if (url.includes("/api/v0/transfers/downloads/") && method === "DELETE") return { status: 200, text: async () => "" };
+      return undefined;
+    }
+  });
+  await plugin.activate(h.api);
+  try {
+    const out = await h.resolvers["meta:" + plugin._FALLBACK_ID]("Autumn Sweater", "Yo La Tengo", null, 318, {});
+    assert.ok(out && out.url.endsWith("/08 - Autumn Sweater.mp3"), "the second sharer delivered: " + (out && out.url));
+    assert.deepEqual(batches.map((b) => b.username), ["flaky", "solid"], "the flaky sharer was tried first and dropped");
+    const keys = Object.keys(h.store.tracked);
+    assert.deepEqual(keys, ["solid" + SEP + good], "only the sharer that delivered is tracked");
+    assert.equal(Object.values(h.store.fallback)[0].ref, "solid" + SEP + good);
+  } finally {
+    plugin.deactivate();
+  }
+});
+
+// --- hedging --------------------------------------------------------------------
+// The best sharer is queued at once; if it has sent nothing after 5 s a second
+// sharer is queued beside it. First to move wins, the other is cancelled, and a
+// moving transfer is never second-guessed.
+
+function hedgeHost(behaviour) {
+  const batches = [];
+  const deletes = [];
+  const seen = {};
+  const file = (user) => "Music\\Yo La Tengo\\" + user + " - Autumn Sweater.mp3";
+  const h = fakeHost({
+    store: { tracked: {} },
+    fetch: async (url, init) => {
+      const json = (v) => ({ status: 200, text: async () => JSON.stringify(v) });
+      const method = (init && init.method) || "GET";
+      if (url.includes("/api/v0/searches") && method === "POST") return json({ id: "s1" });
+      if (url.includes("/responses")) {
+        return json(["alpha", "bravo", "charlie"].map((u, i) => ({
+          username: u, hasFreeUploadSlot: true, queueLength: 0, uploadSpeed: 9000000 - i * 1000000,
+          files: [{ filename: file(u), size: 9000000, length: 318, bitRate: 320 }]
+        })));
+      }
+      if (url.includes("/api/v0/searches/s1")) return json({ id: "s1", state: "Completed, ResponseLimitReached", responseCount: 3, fileCount: 3 });
+      if (url.includes("/api/v0/transfers/downloads/batches") && method === "POST") {
+        const b = JSON.parse(init.body);
+        batches.push({ user: b.username, at: Date.now() });
+        return json({ failures: [] });
+      }
+      if (url.endsWith("/api/v0/transfers/downloads") && method === "GET") {
+        const rows = batches.map((b, i) => {
+          seen[b.user] = (seen[b.user] || 0) + 1;
+          const st = behaviour(b.user, seen[b.user]);
+          return { username: b.user, directories: [{ files: [{ id: "t" + i, username: b.user, filename: file(b.user), size: 9000000, state: st.state, bytesTransferred: st.bytes }] }] };
+        });
+        return json(rows);
+      }
+      if (url.includes("/api/v0/files/downloads/directories/") && method === "GET") {
+        return json({ files: batches.map((b) => ({ name: b.user + " - Autumn Sweater.mp3", fullName: b.user + " - Autumn Sweater.mp3", length: 9000000 })), directories: [] });
+      }
+      if (url.includes("/api/v0/transfers/downloads/") && method === "DELETE") { deletes.push(url); return { status: 200, text: async () => "" }; }
+      return undefined;
+    }
+  });
+  return { h, batches, deletes };
+}
+
+test("a sharer that sends nothing for 5 s gets a second one queued beside it; the one that moves wins and the silent one is cancelled", async () => {
+  const plugin = loadPlugin();
+  const { h, batches, deletes } = hedgeHost((user, n) => {
+    if (user === "alpha") return { state: "Queued, Remotely", bytes: 0 };           // never sends
+    return n < 2 ? { state: "InProgress", bytes: 4500000 } : { state: "Completed, Succeeded", bytes: 9000000 };
+  });
+  await plugin.activate(h.api);
+  try {
+    const out = await h.resolvers["meta:" + plugin._FALLBACK_ID]("Autumn Sweater", "Yo La Tengo", null, 318, {});
+    assert.ok(out && out.url.endsWith("/bravo - Autumn Sweater.mp3"), "the hedge delivered: " + (out && out.url));
+    assert.deepEqual(batches.map((b) => b.user), ["alpha", "bravo"], "exactly one hedge, from a different sharer");
+    const gap = batches[1].at - batches[0].at;
+    assert.ok(gap >= plugin._FALLBACK_HEDGE_MS - 200 && gap < plugin._FALLBACK_HEDGE_MS + 3000, "hedged after ~5 s, not after the 12 s stall: " + gap + "ms");
+    assert.equal(deletes.length, 1, "the silent sharer was cancelled");
+    assert.ok(decodeURIComponent(deletes[0]).includes("/alpha/"), deletes[0]);
+    assert.deepEqual(Object.keys(h.store.tracked).map((k) => k.split(SEP)[0]), ["bravo"], "only the winner is tracked");
+    assert.equal(Object.values(h.store.fallback)[0].ref.split(SEP)[0], "bravo");
+  } finally {
+    plugin.deactivate();
+  }
+});
+
+test("a sharer that is sending, however slowly, is never hedged", async () => {
+  const plugin = loadPlugin();
+  const { h, batches } = hedgeHost((user, n) => {
+    // alpha trickles: a little more every poll, done on the 8th (~8 s, past the hedge point).
+    return n < 8 ? { state: "InProgress", bytes: 100000 * n } : { state: "Completed, Succeeded", bytes: 9000000 };
+  });
+  await plugin.activate(h.api);
+  try {
+    const out = await h.resolvers["meta:" + plugin._FALLBACK_ID]("Autumn Sweater", "Yo La Tengo", null, 318, {});
+    assert.ok(out && out.url.endsWith("/alpha - Autumn Sweater.mp3"));
+    assert.deepEqual(batches.map((b) => b.user), ["alpha"], "no second enqueue while bytes were arriving");
+  } finally {
+    plugin.deactivate();
+  }
+});
+
+// --- the sharer ledger -------------------------------------------------------------
+// Every download this plugin watches teaches it something about a sharer, and
+// a sharer who has delivered outranks one who only advertises a free slot.
+
+test("the ledger scores a delivery as two strikes' worth and tiers sharers proven / unknown / burned", () => {
+  let led = {};
+  p._noteSharer(led, "a", "delivered", 9000000);
+  p._noteSharer(led, "a", "stalled");
+  p._noteSharer(led, "b", "failed");
+  p._noteSharer(led, "b", "stalled");
+  p._noteSharer(led, "c", "ignored-event");
+  assert.equal(p._sharerScore(led.a), 1, "2 for the delivery, -1 for the stall");
+  assert.equal(p._sharerTier(led.a), 0, "proven");
+  assert.equal(p._sharerTier(led.b), 2, "burned");
+  assert.equal(p._sharerTier(led.c), 1, "an unknown event records nothing");
+  assert.equal(p._sharerTier(undefined), 1, "never seen = unknown");
+  assert.equal(led.a.bytes, 9000000);
+  assert.equal(p._sharerLabel(led.a), "delivered once");
+  assert.equal(p._sharerLabel({ delivered: 3, failed: 0, stalled: 0 }), "delivered 3×");
+  assert.equal(p._sharerLabel(led.b), "unreliable");
+  assert.equal(p._sharerLabel(undefined), "");
+  assert.deepEqual(p._ledgerTotals(led), { seen: 2, proven: 1, burned: 1 });
+});
+
+test("Search-tab ranking promotes a proven sharer over an unknown one at equal quality, and buries a burned one", () => {
+  const responses = [
+    { username: "unknown", hasFreeUploadSlot: true, queueLength: 0, uploadSpeed: 9000000, files: [{ filename: "a\\x.mp3", size: 1, bitRate: 320 }] },
+    { username: "proven", hasFreeUploadSlot: false, queueLength: 4, uploadSpeed: 100, files: [{ filename: "b\\x.mp3", size: 1, bitRate: 320 }] },
+    { username: "burned", hasFreeUploadSlot: true, queueLength: 0, uploadSpeed: 9999999, files: [{ filename: "c\\x.mp3", size: 1, bitRate: 320 }] }
+  ];
+  const tiers = { proven: 0, unknown: 1, burned: 2 };
+  const out = p._rankResults(responses, { sharerTier: (u) => tiers[u] });
+  assert.deepEqual(out.map((c) => c.username), ["proven", "unknown", "burned"]);
+  // Without a ledger the order is what it always was.
+  const plain = p._rankResults(responses, {});
+  assert.deepEqual(plain.map((c) => c.username), ["burned", "unknown", "proven"], "availability then speed, as before");
+});
+
+test("the fallback ranks a proven sharer with a queue above an unknown sharer with a free slot", () => {
+  const unknown = cand({ username: "unknown", filename: "Music\\Radiohead\\Karma Police.mp3", sharerTier: 1, availabilityTier: 0 });
+  const proven = cand({ username: "proven", filename: "Music\\Radiohead\\03 Karma Police.mp3", sharerTier: 0, availabilityTier: 1, hasFreeUploadSlot: false, queueLength: 3 });
+  const out = p._rankFallback([unknown, proven], "Karma Police", "Radiohead", null, "fast");
+  assert.equal(out[0].username, "proven");
+});
+
+test("the fallback quality setting: fast puts high-bitrate lossy first, best puts lossless first, preferred formats override both", () => {
+  const flac = cand({ username: "a", filename: "Music\\Radiohead\\03 - Karma Police.flac", extension: "flac", qualityTier: 0, size: 30000000 });
+  const mp3 = cand({ username: "b" });
+  assert.equal(p._rankFallback([flac, mp3], "Karma Police", "Radiohead", null, "fast")[0].username, "b");
+  assert.equal(p._rankFallback([flac, mp3], "Karma Police", "Radiohead", null, "best")[0].username, "a");
+  flac.formatRank = 1; mp3.formatRank = 0;
+  assert.equal(p._rankFallback([flac, mp3], "Karma Police", "Radiohead", ["mp3", "flac"], "best")[0].username, "b", "an explicit format list wins over the mode");
+});
+
+test("a live fallback writes the ledger: the sharer that delivered is proven, and the results show it", async () => {
+  const plugin = loadPlugin();
+  const { h } = fallbackHost();
+  await plugin.activate(h.api);
+  try {
+    await h.resolvers["meta:" + plugin._FALLBACK_ID]("Karma Police", "Radiohead", null, 264, {});
+    assert.equal(h.store.sharers.peer.delivered, 1);
+    assert.equal(h.store.sharers.peer.bytes, 9000000);
+    assert.equal(h.store.sharers.slow, undefined, "a sharer never tried is not in the ledger");
+    // The label rides on the availability cell of every result row from now on.
+    const cells = plugin._resultCells(cand({ username: "peer" }));
+    assert.equal(cells.availability, "free slot · delivered once");
+  } finally {
+    plugin.deactivate();
+  }
+});
+
+test("a sharer dropped for failing is marked against; the quality setting is read from storage and saved from its action", async () => {
+  const plugin = loadPlugin();
+  const good = "Music\\Yo La Tengo\\08 - Autumn Sweater.mp3";
+  const bad = "Music\\Yo La Tengo\\Autumn Sweater.mp3";
+  const batches = [];
+  let polls = 0;
+  const h = fakeHost({
+    store: { tracked: {}, fallbackQuality: "best" },
+    fetch: async (url, init) => {
+      const json = (v) => ({ status: 200, text: async () => JSON.stringify(v) });
+      const method = (init && init.method) || "GET";
+      if (url.includes("/api/v0/searches") && method === "POST") return json({ id: "s1" });
+      if (url.includes("/responses")) {
+        return json([
+          { username: "flaky", hasFreeUploadSlot: true, queueLength: 0, uploadSpeed: 9000000, files: [{ filename: bad, size: 9000000, length: 318, bitRate: 320 }] },
+          { username: "solid", hasFreeUploadSlot: true, queueLength: 0, uploadSpeed: 1000000, files: [{ filename: good, size: 9000000, length: 318, bitRate: 320 }] }
+        ]);
+      }
+      if (url.includes("/api/v0/searches/s1")) return json({ id: "s1", state: "Completed, ResponseLimitReached", responseCount: 2, fileCount: 2 });
+      if (url.includes("/api/v0/transfers/downloads/batches") && method === "POST") { batches.push(JSON.parse(init.body)); return json({ failures: [] }); }
+      if (url.endsWith("/api/v0/transfers/downloads") && method === "GET") {
+        const rows = batches.map((b, i) => {
+          const flaky = b.username === "flaky";
+          const state = flaky ? "Completed, Errored" : (polls - i < 2 ? "InProgress" : "Completed, Succeeded");
+          return { username: b.username, directories: [{ files: [{ id: "t" + i, username: b.username, filename: b.files[0].filename, size: 9000000, state, bytesTransferred: flaky ? 0 : 9000000 }] }] };
+        });
+        polls++;
+        return json(rows);
+      }
+      if (url.includes("/api/v0/files/downloads/directories/") && method === "GET") return json({ files: [{ name: "08 - Autumn Sweater.mp3", fullName: "08 - Autumn Sweater.mp3", length: 9000000 }], directories: [] });
+      if (url.includes("/api/v0/transfers/downloads/") && method === "DELETE") return { status: 200, text: async () => "" };
+      return undefined;
+    }
+  });
+  await plugin.activate(h.api);
+  try {
+    await h.resolvers["meta:" + plugin._FALLBACK_ID]("Autumn Sweater", "Yo La Tengo", null, 318, {});
+    assert.equal(h.store.sharers.flaky.failed, 1);
+    assert.equal(h.store.sharers.solid.delivered, 1);
+    assert.equal(plugin._sharerTier(h.store.sharers.flaky), 2);
+
+    // Second resolve of another song: the ledger now puts "solid" first even
+    // though "flaky" still advertises the faster upload.
+    batches.length = 0; polls = 0;
+    h.store.fallback = {};
+    await h.resolvers["meta:" + plugin._FALLBACK_ID]("Autumn Sweater (Live)", "Yo La Tengo", null, null, {});
+    assert.equal(batches[0] && batches[0].username, "solid", "the proven sharer is tried first now");
+
+    // The settings action persists the quality mode.
+    h.actions["set-fallback-quality"]({ value: "fast" });
+    await new Promise((r) => setTimeout(r, 500));
+    assert.equal(h.store.fallbackQuality, "fast");
+    h.actions["set-fallback-quality"]({ value: "nonsense" });
+    await new Promise((r) => setTimeout(r, 500));
+    assert.equal(h.store.fallbackQuality, "fast", "an unknown value is ignored");
+  } finally {
+    plugin.deactivate();
+  }
+});
