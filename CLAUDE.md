@@ -93,9 +93,16 @@ resolver, then plugins in load order) and gives each one **60 seconds**. Everyth
 
 Owner decisions that must hold:
 
-- **The user owns slskd.** The host never installs, launches, supervises or configures a
-  third-party daemon; the plugin gives guided instructions (the GitHub Pages setup guide in
-  `docs/`) and detects state. A host-managed slskd sidecar was built and rejected.
+- **The user owns slskd; Roadie runs it for them, never Viboplr.** The host never installs,
+  launches, supervises or configures a third-party daemon itself (a host-managed slskd sidecar
+  was built and rejected). The two ways to get slskd are the guided setup (the GitHub Pages
+  guide in `docs/`) and **Roadie**, the separate tool manager whose CLI release the host carries
+  as a managed dependency (`roadie` in `dependencies.rs`, with Viboplr's own `--data-dir`). The
+  plugin drives it with `api.system.exec` (`tool status` / `install --consumer viboplr` /
+  `connection` / `start`, always `--as Viboplr`). Every install is a click here plus an
+  approval in Roadie's dialog, and `tool connection` runs automatically only once Viboplr is
+  already approved (`roadieAutoConfigAction`), because an unapproved one opens that dialog.
+  Everything is feature-detected: `getDependency("roadie")` is null on hosts without it.
 - **No metadata-based download provider.** A download the user asks for by hand gets a
   file they picked, not the fallback's best guess.
 - The plugin deletes only files the **fallback** fetched, and only when asked. The

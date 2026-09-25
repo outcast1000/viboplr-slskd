@@ -39,15 +39,16 @@ NAS), skip the guide and paste its address and API key into the Connection
 section.
 
 **Shortcut: Roadie.** [Roadie](https://github.com/outcast1000/roadie) is a
-separate app that installs, configures, runs and updates slskd for you (and
-other tools). When it is running, the empty view offers **Install slskd with
-Roadie**: Roadie asks you before installing and before letting Viboplr connect,
-then hands the plugin the address and its own API key. Roadie owns the process
-from then on — the plugin follows its port, shows *slskd is stopped* with an
-**Open Roadie** button when it isn't running, and forgets the connection if you
-remove slskd there. Typing an address by hand takes it back. Viboplr itself
-still installs and runs nothing; it only opens `roadie://` links (Viboplr 1.0.71
-or newer). The view tells you which of four things is wrong until it isn't: not
+tool manager that installs, configures, runs and updates slskd for you. Viboplr
+carries its command-line release as a dependency (Settings → Dependencies):
+**Set up slskd for me** installs Roadie, and then **Install slskd with Roadie**
+(Soulseek account optional) asks Roadie to fetch slskd. Roadie asks you in its
+own dialog before installing, runs slskd on this computer only, and in the
+same approval gives Viboplr its own API key, so the plugin connects by itself.
+Roadie owns the process from then on: the plugin follows its port, shows
+*slskd is stopped* with a **Start slskd** button when it isn't running, and
+forgets the connection if slskd is removed. Typing an address by hand takes it
+back. The view tells you which of four things is wrong until it isn't: not
 set up, slskd not reachable, key rejected, or slskd not signed in to Soulseek —
 each with the fix.
 

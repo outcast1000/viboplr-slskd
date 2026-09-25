@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.8.0
+
+- **Roadie now comes with Viboplr.** Viboplr carries Roadie's command-line release as a managed
+  dependency (Settings → Dependencies), so the empty view no longer needs a separate Roadie app
+  running. *Set up slskd for me* opens Viboplr's own install modal for Roadie. With Roadie present,
+  the view shows an **Install slskd with Roadie** form (Soulseek username and password, both
+  optional): one Roadie run downloads slskd, asks you in Roadie's dialog, starts it on this
+  computer only, and grants Viboplr its own key in the same approval. The plugin then connects by
+  itself. The account is passed to Roadie once and never stored by the plugin.
+- **Setup is one screen with a checklist.** While Roadie sets slskd up, the view shows only
+  *Setting up slskd with Roadie*: approve in Roadie's dialog (with a note that it may be behind
+  the window), download (with a progress bar), unpack and check, start slskd, connect Viboplr,
+  and sign in to Soulseek as your account. Each step turns ✓ on a real signal. A failure stops on
+  its step in plain words: a decline or a broken download offers *Back* to the form (typed values
+  kept); slskd not starting shows Roadie's reason with *Try again*. No sign-in within 45 seconds
+  explains that slskd keeps trying and a VPN or firewall may be blocking the server, with *Check
+  again* / *Close*. The address and key fields, the guide links and readiness toasts stay out
+  of the way until setup ends; the view then turns into the plugin itself.
+- **An account is required to install.** *Install slskd* stays disabled until both the username
+  and password are filled in, and the form explains how to get one: Soulseek has no sign-up page,
+  so a username nobody else uses plus a password creates the account on slskd's first sign-in.
+- **The sign-in step says what it's doing and, if it can't, why.** While it waits it shows slskd's
+  own connection state ("Connecting to the Soulseek server… 12s"). If it can't sign in it reads
+  slskd's recent log through Roadie (`roadie tool logs slskd`) and reports the reason: a
+  connection that timed out, was refused or can't reach the server is explained as a VPN, work
+  network or firewall blocking it (slskd keeps retrying), and a refused sign-in (wrong password,
+  or a username someone else owns) stops the wait at once instead of after 45 seconds. Any error
+  in the steps after the install turns the current step into ✗ with the error rather than
+  leaving it spinning.
+- **"Start slskd at login" is asked, and off by default.** The install form carries the switch,
+  and the plugin always passes the answer (`--set autostart=…`), so Roadie's recipe default (on)
+  never decides it. On means Roadie adds a login item, and macOS announces it as background
+  activity. For a Roadie-managed slskd the same switch sits in the Connection section and runs
+  `roadie tool autostart slskd on|off`.
+- A Roadie-managed slskd that isn't running shows **Start slskd**, which runs `roadie tool start
+  slskd`.
+- The plugin drives Roadie with `api.system.exec` (`tool status`, `tool install --consumer
+  viboplr`, `tool connection`, `tool start`) and only asks Roadie for a connection automatically
+  once Viboplr is already approved, so Roadie never opens a dialog you didn't click for. The
+  `roadie://` deep links, the loopback probe of the desktop app's API and the
+  `viboplr://plugin/slskd/roadie` return link are gone.
+- Needs a Viboplr whose dependency registry has `roadie`. On an older Viboplr,
+  `getDependency("roadie")` answers null, nothing Roadie-related shows, and the setup guide is
+  the way to get slskd, as before.
+
 ## 0.7.0
 
 - **Install slskd with Roadie.** When [Roadie](https://github.com/outcast1000/roadie), the

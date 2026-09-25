@@ -14,7 +14,7 @@ function fakeHost(opts) {
   const actions = {};
   const tools = {};
   const resolvers = {};
-  const calls = { requestAction: [], notifications: [], badges: [], resync: [], played: [], fetched: [], views: [] };
+  const calls = { requestAction: [], notifications: [], badges: [], resync: [], played: [], fetched: [], views: [], exec: [] };
   const responses = Object.assign({
     "/api/v0/application": {
       server: { state: "Connected, LoggedIn", isLoggedIn: true, isTransitioning: false, username: "me" },
@@ -77,7 +77,19 @@ function fakeHost(opts) {
       getTracks: async (q) => ((o.library && o.library.tracks) || []).filter((t) => q && q.albumId != null ? t.album_id === q.albumId : true),
       ftsAlbums: async () => (o.library && o.library.albums) || []
     },
-    system: { readAudioTags: async (paths) => paths.map(() => null) },
+    // `o.dependencies` = { name: getDependency answer } (absent → null, i.e. a
+    // host that doesn't know the binary); `o.exec(program, args, opts)` answers
+    // api.system.exec. Every exec is logged in `calls.exec`.
+    system: Object.assign(
+      { readAudioTags: async (paths) => paths.map(() => null) },
+      o.dependencies ? { getDependency: async (name) => (o.dependencies[name] !== undefined ? o.dependencies[name] : null) } : {},
+      o.exec ? {
+        exec: async (program, args, execOpts) => {
+          calls.exec.push({ program, args });
+          return o.exec(program, args, execOpts);
+        }
+      } : {}
+    ),
     assistant: { onTool: (name, fn) => { tools[name] = fn; } }
   };
   return { api, actions, tools, resolvers, calls, store };
