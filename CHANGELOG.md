@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.9.0
+
+Needs Viboplr 1.0.72 or newer, which names the owning plugin on every plugin menu item — the
+menu entries are now just *Search…*, *Upgrade* and *Fill missing tracks…*, shown as
+"Soulseek: …".
+
+- **Upgrade finds the better copy for you.** Right-click → Soulseek: Upgrade no longer opens a
+  search to pick from. It adds the track to a new **Upgrades** tab and does the rest: one search,
+  the same recording only (same length, no live or remix you didn't ask for), better than your
+  copy, from the sharer most likely to deliver, with the next sharer asked if one sends nothing for
+  10 minutes. The finished file is **checked** before you hear about it: its real size over its
+  real length has to match what was advertised and still beat your copy, so a mislabelled "320"
+  is set aside. Then *Compare & replace…* opens Viboplr's compare step, and nothing in your library
+  changes until you confirm there. *Choose myself…* still opens the filtered search. (The
+  *Compare & replace* / *Show* buttons on the notifications arrive with a later Viboplr; until
+  then the notification is text only and the same buttons are on the Upgrades row.)
+- **Upgrade to: Best available, Lossless only, or MP3 320 / V0** (Settings). When nothing meets
+  it, the Upgrades row offers the best better copy that was found.
+- **Fallback quality has the same four choices**, set separately: *Fastest start* (default,
+  unchanged), *Best available*, *Lossless only* and *MP3 320 / V0 only*. The last two skip the
+  track rather than play anything less, and the Fallback tab says when the setting, not the song,
+  was why nothing played.
+- **Settings moved into the Soulseek view** as its own tab, beside Search, Downloads, Upgrades and
+  Fallback. There is no longer a Soulseek page under Viboplr's Settings.
+
 ## 0.8.0
 
 - **"slskd not found" is a short screen with three ways forward.** Never set up: *Install

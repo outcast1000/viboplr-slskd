@@ -751,13 +751,61 @@ test("a sharer dropped for failing is marked against; the quality setting is rea
     await h.resolvers["meta:" + plugin._FALLBACK_ID]("Autumn Sweater (Live)", "Yo La Tengo", null, null, {});
     assert.equal(batches[0] && batches[0].username, "solid", "the proven sharer is tried first now");
 
-    // The settings action persists the quality mode.
+    // The settings action persists the quality mode — all four of them.
+    h.actions["set-fallback-quality"]({ value: "lossless" });
+    await new Promise((r) => setTimeout(r, 500));
+    assert.equal(h.store.fallbackQuality, "lossless");
     h.actions["set-fallback-quality"]({ value: "fast" });
     await new Promise((r) => setTimeout(r, 500));
     assert.equal(h.store.fallbackQuality, "fast");
     h.actions["set-fallback-quality"]({ value: "nonsense" });
     await new Promise((r) => setTimeout(r, 500));
     assert.equal(h.store.fallbackQuality, "fast", "an unknown value is ignored");
+  } finally {
+    plugin.deactivate();
+  }
+});
+
+// --- Fallback quality: four modes, two of them filters ------------------------
+
+test("rankFallback: Lossless only and MP3 320 / V0 only filter; Fastest and Best only reorder", () => {
+  const p = loadPlugin();
+  const c = (o) => Object.assign({ username: "u", filename: "Music\\Radiohead\\03 - Karma Police." + (o.extension || "mp3"), size: 9e6, length: 264,
+    hasFreeUploadSlot: true, queueLength: 0, uploadSpeed: 1, availabilityTier: 0, sharerTier: 1, formatRank: 0 }, o);
+  const flac = c({ username: "flac", extension: "flac", qualityTier: 0, bitDepth: 16 });
+  const mp3 = c({ username: "mp3", extension: "mp3", qualityTier: 1, bitRate: 320 });
+  const ogg = c({ username: "ogg", extension: "ogg", qualityTier: 1, bitRate: 320 });
+  const low = c({ username: "low", extension: "mp3", qualityTier: 3, bitRate: 192 });
+  const unknown = c({ username: "unk", extension: "mp3", qualityTier: 2, bitRate: null });
+  const all = [low, unknown, ogg, flac, mp3];
+  const users = (mode) => p._rankFallback(all, "Karma Police", "Radiohead", null, mode).map((x) => x.username);
+  assert.deepEqual(users("fast").slice(0, 2).sort(), ["mp3", "ogg"], "high-bitrate lossy first");
+  assert.equal(users("fast").length, 5, "fastest start plays anything that matches");
+  assert.equal(users("best")[0], "flac");
+  assert.equal(users("best").length, 5);
+  assert.deepEqual(users("lossless"), ["flac"]);
+  assert.deepEqual(users("high"), ["mp3", "ogg"], "MP3 leads; lower rates, lossless and unreported rates are out");
+});
+
+test("fallbackQualityDescription says what each mode does, and how preferred formats combine with it", () => {
+  const p = loadPlugin();
+  assert.ok(/starts sooner/.test(p._fallbackQualityDescription("fast", "")));
+  assert.ok(/skips the track rather than play a lossy copy/.test(p._fallbackQualityDescription("lossless", "")));
+  assert.ok(/order what's left/.test(p._fallbackQualityDescription("high", "mp3")), "a filter keeps its filter; formats order within it");
+  assert.ok(/decide the order instead/.test(p._fallbackQualityDescription("best", "flac")));
+});
+
+test("Lossless only with no lossless file: nothing is downloaded, and the Fallback tab says the setting skipped the matches", async () => {
+  const plugin = loadPlugin();
+  const { h, calls } = fallbackHost({ store: { tracked: {}, fallbackQuality: "lossless" } });
+  await plugin.activate(h.api);
+  try {
+    const out = await h.resolvers["meta:" + plugin._FALLBACK_ID]("Karma Police", "Radiohead", "OK Computer", 264, {});
+    assert.equal(out, null);
+    assert.equal(calls.batches.length, 0, "no lossy file was fetched");
+    h.actions["main-tab"]({ tabId: "fallback" });
+    const view = JSON.stringify(h.calls.views.filter((v) => v.viewId === "slskd-browse").at(-1));
+    assert.ok(view.includes("no lossless file — 2 other matching files skipped by the Fallback quality setting"), view.slice(0, 1500));
   } finally {
     plugin.deactivate();
   }

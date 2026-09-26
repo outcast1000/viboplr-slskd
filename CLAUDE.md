@@ -49,14 +49,14 @@ call's shape.
 
 | Surface | Where | Notes |
 |---|---|---|
-| Sidebar view `slskd-browse` | Search / Downloads / Fallback tabs | `render()` |
-| Settings panel `slskd-settings` | Settings → Soulseek | `renderSettings()` |
+| Sidebar view `slskd-browse` | Search / Downloads / Fallback / Settings tabs | `render()` |
+| Settings tab | 4th tab of `slskd-browse` (no host settings panel) | `settingsTab()`; `renderSettings()` re-renders only while it is showing |
 | Stream resolver `slskd-fallback` | `api.playback.onStreamResolve` | the **playback fallback**, see below |
 | URI scheme `slsk://` | `api.playback.onResolveStreamByUri` | plays a finished download |
 | Download provider `slskd-import` | `api.downloads.onResolveByUri` | "Add to library…" via the host modal |
-| Context menu `slskd-search` | track / album / artist | "Search on Soulseek…" |
-| Context menu `slskd-upgrade` | track | "Upgrade with Soulseek…" — search filtered to files better than the library copy (`libraryQuality` / `isUpgradeOver`); the download is stamped `upgrade: { trackId }` and its Downloads row gets "Replace in library…", which hands the host modal `libraryTrackId` |
-| Context menu `slskd-fill-album` | album | "Fill missing tracks with Soulseek…" — folders compared against the album's library rows (`ownedTrackFor`); "Fill" downloads only the missing files |
+| Context menu `slskd-search` | track / album / artist | "Search…" (shown as "Soulseek: Search…") |
+| Context menu `slskd-upgrade` | track | "Upgrade" (shown as "Soulseek: Upgrade") — **automatic**: `queueUpgrade` adds an entry to the Upgrades tab, which finds, downloads and checks a better copy (see *Automatic upgrades* below); "Choose myself…" on the row opens the old interactive search (`startUpgrade`, filtered by `isUpgradeOver`). Both stamp the download `upgrade: { trackId }`, and "Compare & replace…" / the Downloads row's "Replace in library…" hand the host modal `libraryTrackId` |
+| Context menu `slskd-fill-album` | album | "Fill missing tracks…" (shown as "Soulseek: Fill missing tracks…") — folders compared against the album's library rows (`ownedTrackFor`); "Fill" downloads only the missing files |
 | Assistant tools | `status`, `search`, `download`, `list_downloads` | for the host's control API / MCP |
 
 `test/transfers.test.js` ("activate registers every surface the manifest declares") fails
@@ -81,7 +81,11 @@ resolver, then plugins in load order) and gives each one **60 seconds**. Everyth
   turns a finished background download into a kept file or forgets a failed one.
 - Ranking (`rankFallback`): match score (title words in the filename, artist words in the
   path, variant-word penalties) → **sharer ledger tier** → advertised availability →
-  quality per the *Fallback quality* setting → speed → queue → size.
+  quality per the *Fallback quality* setting → speed → queue → size. That setting
+  (`fallbackQuality`, `FALLBACK_MODES`) is `fast` | `best` | `lossless` | `high`; the last two
+  also **filter** through `meetsQualityTarget`, the same test the Upgrade target uses, and a
+  resolve they empty reports "no lossless file — N other matching files skipped…" instead
+  of "nothing matched".
 - The **sharer ledger** (`sharers`, per username: delivered / failed / stalled) is fed by
   every download the plugin watches and is a ranking key in the Search tab too. Two
   observers see each transfer (the poll and the race); `ledgerSeen` claim/counted marks
@@ -104,10 +108,38 @@ Owner decisions that must hold:
   already approved (`roadieAutoConfigAction`), because an unapproved one opens that dialog.
   Everything is feature-detected: `getDependency("roadie")` is null on hosts without it.
 - **No metadata-based download provider.** A download the user asks for by hand gets a
-  file they picked, not the fallback's best guess.
+  file they picked, not the fallback's best guess. The one deliberate exception is
+  **Upgrade** (owner's decision, 2026-09-27): it picks the file itself, but the *replace*
+  always goes through the host's compare dialog, so a wrong pick costs a download, never a
+  library file. Don't add an auto-replace.
 - The plugin deletes only files the **fallback** fetched, and only when asked. The
   Downloads tab's "Remove" drops slskd's row and leaves the file.
 - Nothing installs itself; a successful operation announces nothing; failures stay visible.
+
+## Automatic upgrades (the Upgrades tab)
+
+The fallback's machinery with the goal turned around: nobody is listening, so quality leads
+and the clock is minutes. `upgrades` (storage key, keyed `t<trackId>`) holds one record per
+track, advanced by the transfer poll (`advanceUpgrades`, after `readTagsForResolved`) rather
+than by a long-running promise, because a stranger's queue can outlast a restart.
+
+- **searching**: one `performSearch` (30 s cap, through `searchChain`), then `rankUpgrade`:
+  `rankFallback`'s word match, **no unasked-for variant at all** (the fallback only marks it
+  down), `isUpgradeOver` the library copy, then the **Upgrade target** (`upgradeTarget` setting:
+  `best` | `lossless` | `high` = MP3 320 / V0, which deliberately skips lossless). Sort: match
+  bucket → quality (MP3 first under `high`) → sharer ledger → free slot → speed → queue. No pick
+  at the target but a better copy exists → **alternative** ("Take the best found").
+- **downloading**: one sharer at a time into `viboplr/upgrades/`, each sharer once, at most 4.
+  No bytes for 10 min → cancelled, counted as a stall, next sharer. **Cancelled** by the user
+  stops the upgrade instead of moving on.
+- **checking**: size ÷ tag duration, the same estimate `libraryQuality` makes for the library
+  copy, so both sides are measured alike. More than 20 % under the advertised rate, no better
+  than the copy, or below the target → rejected: `upgrade` is removed from the tracked record
+  (no Replace offer) but the file stays — the plugin deletes only fallback files.
+- **ready** → toast with *Compare & replace* (`upgrade-replace-notice` opens `lastReadyUpgrade`)
+  → `openReplace`. **replaced** is detected when the library row's path or size changes.
+- The completion toast in `handleCompletions` stays quiet for `upgrade.auto` records; the
+  engine announces after the check.
 
 ## slskd facts that bit
 

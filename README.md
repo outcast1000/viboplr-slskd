@@ -60,14 +60,25 @@ each with the fix.
   preferred-format list ("flac, mp3") goes on top.
 - **Files or Folders.** Soulseek users mostly share complete albums, so every
   search also shows folders; one click queues the whole album.
-- **Right-click → Search on Soulseek…** on any track, album or artist in
+- **Right-click → Soulseek: Search…** on any track, album or artist in
   Viboplr, and Cmd+K offers Soulseek as a source for whatever you typed.
-- **Right-click → Upgrade with Soulseek…** on a library track: the same
-  search, showing only files that beat the copy you have (lossless over lossy,
-  or a clearly higher bitrate), same length only. Pick one; when it lands, the
-  Downloads row offers **Replace in library…**, which opens Viboplr's compare →
-  replace / keep both step.
-- **Right-click → Fill missing tracks with Soulseek…** on an album: every
+- **Right-click → Soulseek: Upgrade** on a library track finds a better copy
+  on its own and follows it in the **Upgrades** tab. It searches once, keeps
+  only files that are the same recording (same length, no *live*/*remix* you
+  didn't ask for) and beat your copy (lossless over lossy, or a clearly higher
+  bitrate), and downloads the best one from a sharer likely to deliver. A
+  sharer that sends nothing for 10 minutes makes way for the next. The
+  finished file is then **checked**: its real size over its real length has to
+  match what the sharer advertised and still beat your copy, so a "320" that is
+  really 128 is set aside and the next sharer is asked. Then *Compare &
+  replace…* opens Viboplr's compare → replace / keep both step. Nothing in
+  your library changes until you confirm there.
+  **Soulseek → Settings → Upgrade to** picks what it looks for: *Best available*
+  (lossless when someone has it), *Lossless only*, or *MP3 320 / V0*
+  (a better copy at a fraction of lossless's size). When nothing meets the
+  target, the row offers the best better copy it did find. *Choose myself…*
+  opens the search, filtered to better files, so you can pick one by hand.
+- **Right-click → Soulseek: Fill missing tracks…** on an album: every
   folder found is compared with the tracks you already have, and **Fill**
   downloads just the ones you don't. "Show everything found" lifts either filter.
 - **Downloads tab** with progress, your position in the other user's queue, and
@@ -86,7 +97,7 @@ each with the fix.
   your collections, finished files are picked up automatically (the plugin
   rescans that collection as they land). Otherwise **Add to library…** copies one
   or several finished files into a collection through Viboplr's own download
-  modal, with tags and cover art written. Settings → Soulseek → Library says
+  modal, with tags and cover art written. Soulseek → Settings → Library says
   which case you're in.
 - **Real metadata.** Embedded tags are read from finished files and win, field by
   field, over the filename guess.
@@ -106,18 +117,23 @@ waiting:
    *instrumental* or *cover* the request didn't ask for is marked down. Among
    the matches, a sharer who has **delivered before** comes first, then one with
    a free upload slot — the flag is self-reported, and was wrong for the sharer
-   that cost the first live run its whole budget. Then quality, per **Settings →
-   Soulseek → Fallback quality**: *Fast* (default) puts high-bitrate lossy first,
-   a fifth of the bytes of lossless so the song starts sooner; *Best* puts
-   lossless first, as the Search tab does; a preferred-formats list overrides
-   both.
+   that cost the first live run its whole budget. Then quality, per **Soulseek →
+   Settings → Fallback quality**, the same choices as the Upgrade target:
+   *Fastest start* (default) puts high-bitrate lossy first, a fifth of the
+   bytes of lossless so the song starts sooner; *Best available* puts lossless
+   first, as the Search tab does. *Lossless only* and *MP3 320 / V0 only* are
+   filters, not just orders: for someone who would rather the track be skipped
+   than hear anything less. When a filter is what came up empty, the Fallback
+   tab says so ("no lossless file — 2 other matching files skipped"). A
+   preferred-formats list orders the files instead under the first two, and
+   within the filter under the last two.
 
    The plugin keeps a **sharer ledger** from every download it watches — the
    Search tab's, the assistant's, the fallback's: deliveries, failures and
    stalls per username, a delivery worth two strikes. Sharers who have
    delivered rank first in the Search tab too (at equal quality), sharers who
    only ever fail sink, and the Availability column says which is which
-   ("free slot · delivered 3×", "queue 12 · unreliable"). Settings → Soulseek
+   ("free slot · delivered 3×", "queue 12 · unreliable"). Soulseek → Settings
    shows the totals and can forget the history.
 3. **Fetch**, hedged. The best match is queued into
    `<downloads>/viboplr/fallback/…`. If no byte has arrived after 5 s, the
@@ -141,7 +157,7 @@ transfers, with Play, Add to library and **Delete file**. Delete is the one plac
 the plugin removes anything from disk, and it does so through slskd's own Files
 API, which slskd gates behind a top-level `remote_file_management: true` line in
 `slskd.yml` (or `SLSKD_REMOTE_FILE_MANAGEMENT=true`); without it the plugin
-tells you what to enable rather than failing quietly. Settings → Soulseek →
+tells you what to enable rather than failing quietly. Soulseek → Soulseek →
 Playback fallback shows the count and size of kept files and offers the same
 delete.
 
@@ -160,7 +176,7 @@ happens *after* a download finishes.
 | **Docker / NAS / another machine** | Land in slskd's downloads folder. Add that folder (or its mount) as a music source in Collections |
 
 The plugin guesses from the address you enter and you can override it with
-**"slskd runs on this computer"** in Settings → Soulseek.
+**"slskd runs on this computer"** in Soulseek → Settings.
 
 ## Assistant tools
 

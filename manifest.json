@@ -1,10 +1,10 @@
 {
   "id": "slskd",
   "name": "Soulseek",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "author": "Viboplr",
   "description": "Search and download from the Soulseek network via a slskd daemon: ranked results, whole-album grabs, live transfer progress, finished files that play and reach your library, and a playback fallback that fetches a missing track from Soulseek.",
-  "minAppVersion": "1.0.34",
+  "minAppVersion": "1.0.72",
   "stability": "experimental",
   "homepage": "https://github.com/outcast1000/viboplr-slskd",
   "updateUrl": "https://github.com/outcast1000/viboplr-slskd/releases/latest/download/update.json",
@@ -87,24 +87,19 @@
     "contextMenuItems": [
       {
         "id": "slskd-search",
-        "label": "Search on Soulseek…",
+        "label": "Search…",
         "targets": ["track", "album", "artist"]
       },
       {
         "id": "slskd-upgrade",
-        "label": "Upgrade with Soulseek…",
+        "label": "Upgrade",
         "targets": ["track"]
       },
       {
         "id": "slskd-fill-album",
-        "label": "Fill missing tracks with Soulseek…",
+        "label": "Fill missing tracks…",
         "targets": ["album"]
       }
-    ],
-    "settingsPanel": {
-      "id": "slskd-settings",
-      "label": "Soulseek",
-      "order": 55
-    }
+    ]
   }
 }

@@ -344,6 +344,7 @@ test("integration: a Roadie-managed slskd offers the login-item switch and chang
     exec: fakeRoadie(state)
   }, async (host) => {
     const views = () => JSON.stringify(host.calls.views.slice(-4));
+    host.actions["main-tab"]({ tabId: "settings" });
     assert.ok(/"action":"roadie-autostart","checked":true/.test(views()), "shows Roadie's current answer");
     await host.actions["roadie-autostart"]({ value: false });
     await until(() => /"action":"roadie-autostart","checked":false/.test(views()));
@@ -453,7 +454,12 @@ test("integration: a step that throws fails on screen instead of spinning foreve
 });
 
 // slskd's own web page asks for a sign-in that isn't the API key.
-const settingsView = (host) => JSON.stringify(host.calls.views.filter((v) => v.viewId === "slskd-settings").at(-1));
+// Settings live in the view's Settings tab; the setup screens show the same
+// sections when slskd isn't ready.
+const settingsView = (host) => {
+  host.actions["main-tab"]({ tabId: "settings" });
+  return lastView(host);
+};
 
 test("the web login comes out of Roadie's connection answer, or not at all", () => {
   const from = plugin._webLoginFromRoadie;

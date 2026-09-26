@@ -37,7 +37,6 @@
 // ---------------------------------------------------------------------------
 var PLUGIN_ID = "slskd";
 var VIEW_ID = "slskd-browse";
-var SETTINGS_VIEW_ID = "slskd-settings";
 var PROVIDER_ID = "slskd-import";
 // The host keys download providers as "pluginId:providerId" — what
 // requestAction("download-tracks") must be handed (cf. "ytdlp:ytdlp-download").
@@ -105,6 +104,15 @@ var FALLBACK_MIN_TITLE_MATCH = 0.6;          // share of the title's words the f
 var FALLBACK_MIN_ARTIST_MATCH = 0.5;         // share of the artist's words the path must carry
 var FALLBACK_VIEW_CANDIDATES = 25;
 
+// Automatic upgrades (the Upgrades tab). Nobody is waiting on these, so the
+// clock is the sharer's queue, not a listener's patience.
+var UPGRADE_SUBDIR = "upgrades";             // DEST_ROOT/upgrades/<seq>-<label>
+var UPGRADE_SEARCH_MS = 30000;               // one bounded search per upgrade
+var UPGRADE_STALL_MS = 10 * 60 * 1000;       // no bytes for this long → the next sharer
+var UPGRADE_MAX_TRIES = 4;                   // sharers asked per upgrade
+var UPGRADE_KEEP_CANDIDATES = 8;
+var UPGRADE_UNSEEN_LIMIT = 5;                // polls a transfer may be missing from slskd's list
+
 var B64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 // ---------------------------------------------------------------------------
@@ -118,7 +126,8 @@ var settings = {
   tierOverride: null,     // null | "local" | "remote"
   insecure: false,        // accept slskd's self-signed cert
   preferredFormats: "",   // comma-separated, "" = no preference
-  fallbackQuality: "fast", // "fast" (high-bitrate lossy first) | "best" (lossless first); preferredFormats overrides both
+  fallbackQuality: "fast", // "fast" | "best" | "lossless" | "high" — see FALLBACK_MODES; preferredFormats orders within it
+  upgradeTarget: "best",  // "best" | "lossless" | "high" — what an automatic upgrade looks for
   batchSeq: 0,
   managedBy: null         // null | "roadie" — the address/key came from Roadie and follow it
 };
@@ -1132,9 +1141,30 @@ function scoreFallbackCandidate(c, want) {
 // before lossless (a fifth of the bytes for the same song). The user can flip
 // that to "best" (lossless first, as the Search tab ranks), and a stated
 // format preference overrides both, as it does everywhere else.
+//
+// "lossless" and "high" are filters as well as orders (see `rankFallback`):
+// only lossless, or only high-bitrate lossy with MP3 first — the Upgrade
+// target's options, for a listener who would rather wait or skip than hear
+// anything less.
+var FALLBACK_MODES = {
+  fast: "Fastest start",
+  best: "Best available",
+  lossless: "Lossless only",
+  high: "MP3 320 / V0 only"
+};
+
+function fallbackModeOf(value) {
+  return FALLBACK_MODES[value] ? value : "fast";
+}
+
+function fallbackModeFilters(mode) {
+  return mode === "lossless" || mode === "high";
+}
+
 function fallbackQualityRank(c, preferred, mode) {
   if (preferred && preferred.length) return c.formatRank * 10 + c.qualityTier;
-  if (mode === "best") return c.qualityTier;
+  if (mode === "best" || mode === "lossless") return c.qualityTier;
+  if (mode === "high") return c.extension === "mp3" ? 0 : 1;
   if (c.qualityTier === T_HIGH) return 0;
   if (c.qualityTier === T_UNKNOWN) return 1;
   if (c.qualityTier === T_LOSSLESS) return 2;
@@ -1148,8 +1178,10 @@ function fallbackQualityRank(c, preferred, mode) {
 function rankFallback(candidates, title, artist, preferred, mode) {
   var want = { title: titleWords(title), artist: artistWords(artist) };
   var out = [];
+  var filtered = fallbackModeFilters(mode);
   for (var i = 0; i < (candidates || []).length; i++) {
     var c = candidates[i];
+    if (filtered && !meetsQualityTarget(c, mode)) continue;
     var m = scoreFallbackCandidate(c, want);
     if (m.title < FALLBACK_MIN_TITLE_MATCH) continue;
     if (want.artist.length && m.artist < FALLBACK_MIN_ARTIST_MATCH) continue;
@@ -1328,7 +1360,7 @@ function notificationFor(state, cfg, r) {
     return { message: "slskd isn't running — start it from Soulseek in the sidebar.", action: { label: "Start slskd", id: "roadie-start-from-notice" } };
   }
   if (state === "unreachable") return { message: "slskd isn't reachable — open Soulseek in the sidebar to fix the address, or start slskd.", action: open };
-  if (state === "unauthorized") return { message: "slskd rejected the API key — update it in Settings → Soulseek.", action: open };
+  if (state === "unauthorized") return { message: "slskd rejected the API key — update it in Soulseek → Settings.", action: open };
   if (state === "disconnected") return { message: "slskd is running but isn't signed in to Soulseek.", action: open };
   return null;
 }
@@ -1739,6 +1771,7 @@ async function refreshTransfers() {
 
   await readTagsForResolved();
   await reconcilePendingFallbacks();
+  await advanceUpgrades();
   render();
   if (justFinished.length) await handleCompletions(justFinished);
 }
@@ -1838,7 +1871,10 @@ async function handleCompletions(finished) {
     }
   }
   var upgradeRec = finished.length === 1 ? tracked[trackKeyOf(finished[0])] : null;
-  if (upgradeRec && upgradeRec.upgrade) {
+  if (upgradeRec && upgradeRec.upgrade && upgradeRec.upgrade.auto) {
+    // An automatic upgrade announces itself once the file passed its check
+    // (advanceUpgradeCheck) — "ready" before that could be a mislabelled file.
+  } else if (upgradeRec && upgradeRec.upgrade) {
     // The file arrived for one purpose; say where the button is rather than
     // opening the modal over whatever the user is doing now — a Soulseek
     // transfer can land hours after it was asked for.
@@ -2422,12 +2458,18 @@ async function resolveFallback(title, artistName, albumName, durationSecs, opts)
       return null;
     }
     var preferred = parsePreferredFormats(settings.preferredFormats);
-    var matches = rankFallback(ranked, title, artistName, preferred, settings.fallbackQuality);
+    var mode = fallbackModeOf(settings.fallbackQuality);
+    var matches = rankFallback(ranked, title, artistName, preferred, mode);
     rec.candidates = matches.slice(0, FALLBACK_VIEW_CANDIDATES);
     settleSearch(ranked.length + " downloadable file" + (ranked.length === 1 ? "" : "s") + ", " + matches.length + " that match" +
       (ranked.partial ? " (cut at " + Math.round(FALLBACK_SEARCH_MS / 1000) + "s while slskd was still searching)" : ""), matches.length ? "info" : "warn");
     if (!matches.length) {
-      finishResolve(rec, "no-match", ranked.length ? "nothing on Soulseek matched the title and artist closely enough" : "nothing on Soulseek matched");
+      // Say when it was the quality setting, not the song, that came up empty —
+      // "nothing matched" would send the user looking in the wrong place.
+      var unfiltered = fallbackModeFilters(mode) ? rankFallback(ranked, title, artistName, preferred, "best").length : 0;
+      finishResolve(rec, "no-match", unfiltered
+        ? "no " + (mode === "lossless" ? "lossless" : "MP3 320 / V0") + " file — " + unfiltered + " other matching file" + (unfiltered === 1 ? "" : "s") + " skipped by the Fallback quality setting"
+        : (ranked.length ? "nothing on Soulseek matched the title and artist closely enough" : "nothing on Soulseek matched"));
       return null;
     }
 
@@ -4109,6 +4151,23 @@ function keptSection() {
   return out;
 }
 
+// Pure: what the chosen fallback quality means, in the row under it.
+function fallbackQualityDescription(mode, preferredFormats) {
+  var text = mode === "best"
+    ? "Lossless first, as the Search tab ranks — the song can take several times longer to start."
+    : mode === "lossless"
+      ? "Only lossless files. When nobody has one in time, the fallback skips the track rather than play a lossy copy."
+      : mode === "high"
+        ? "Only high-bitrate lossy files, MP3 320 or V0 first. Lower rates, lossless and files that report no bitrate are skipped."
+        : "High-bitrate lossy files first — a fifth of the bytes of lossless, so the song starts sooner. Anything that matches can play.";
+  if (preferredFormats) {
+    text += fallbackModeFilters(mode)
+      ? " Your preferred formats (“" + preferredFormats + "”) order what's left."
+      : " Your preferred formats (“" + preferredFormats + "”) decide the order instead.";
+  }
+  return text;
+}
+
 function fallbackSettingsSection() {
   var totals = fallbackTotals(fallback);
   var children = [
@@ -4116,13 +4175,13 @@ function fallbackSettingsSection() {
       content: "When a track has no playable source, Viboplr can fetch it from Soulseek: one bounded search, then the best-matching file from a sharer who has delivered before or advertises a free slot, played as soon as it lands. " +
         "Enable it and set its order among the other sources in Settings → Providers → Playback fallback." },
     { type: "settings-row", label: "Fallback quality",
-      description: settings.preferredFormats
-        ? "Your preferred formats (“" + settings.preferredFormats + "”) decide; this setting only applies when that field is empty."
-        : "Fast favours high-bitrate lossy files — a fifth of the bytes of lossless, so the song starts sooner. Best ranks lossless first, as the Search tab does.",
-      control: { type: "select", action: "set-fallback-quality", value: settings.fallbackQuality === "best" ? "best" : "fast",
+      description: fallbackQualityDescription(fallbackModeOf(settings.fallbackQuality), settings.preferredFormats),
+      control: { type: "select", action: "set-fallback-quality", value: fallbackModeOf(settings.fallbackQuality),
         options: [
-          { value: "fast", label: "Fast (lossy first)" },
-          { value: "best", label: "Best (lossless first)" }
+          { value: "fast", label: "Fastest start" },
+          { value: "best", label: "Best available" },
+          { value: "lossless", label: "Lossless only" },
+          { value: "high", label: "MP3 320 / V0 only" }
         ] } },
     { type: "settings-row", label: "Sharers",
       description: (function () {
@@ -4154,24 +4213,42 @@ function render() {
     api.ui.setViewData(VIEW_ID, setupView(), { scrollKey: "setup" });
     return;
   }
-  var mainTab = activeTab === "transfers" || activeTab === "fallback" ? activeTab : "search";
+  var mainTab = mainTabFor(activeTab);
   var body = [{
     type: "tabs",
     tabs: [
       { id: "search", label: "Search" },
       { id: "transfers", label: "Downloads", count: transfers.length || undefined },
-      { id: "fallback", label: "Fallback" }
+      { id: "upgrades", label: "Upgrades", count: Object.keys(upgrades).filter(function (k) { return upgrades[k].state !== "replaced"; }).length || undefined },
+      { id: "fallback", label: "Fallback" },
+      { id: "settings", label: "Settings" }
     ],
     activeTab: mainTab,
     action: "main-tab"
   }];
-  body.push(mainTab === "transfers" ? transfersTab() : (mainTab === "fallback" ? fallbackTab() : searchTab()));
+  body.push(mainTab === "transfers" ? transfersTab()
+    : mainTab === "upgrades" ? upgradesTab()
+    : mainTab === "fallback" ? fallbackTab()
+    : mainTab === "settings" ? settingsTab()
+    : searchTab());
   api.ui.setViewData(VIEW_ID, { type: "layout", direction: "vertical", children: body },
     { scrollKey: mainTab === "search" ? "search:" + search.query : mainTab });
 }
 
+// Pure: which top-level tab `activeTab` belongs to. "folders" is the Search
+// tab's folder mode, not a tab of its own.
+function mainTabFor(tab) {
+  return tab === "transfers" || tab === "upgrades" || tab === "fallback" || tab === "settings" ? tab : "search";
+}
+
+// Settings live in the view's own Settings tab. The setup screens carry the
+// Connection section themselves, so nothing here is unreachable while slskd
+// isn't ready.
 function renderSettings() {
-  if (!api) return;
+  if (activeTab === "settings") render();
+}
+
+function settingsTab() {
   var children = [connectionSection()];
   var webPage = webPageSection();
   if (webPage) children.push(webPage);
@@ -4192,6 +4269,7 @@ function renderSettings() {
     ]
   });
 
+  children.push(upgradeSettingsSection());
   children.push(fallbackSettingsSection());
 
   if (readiness.state === "ready" && tier === "local" && downloadsDir) {
@@ -4213,7 +4291,7 @@ function renderSettings() {
     });
   }
 
-  api.ui.setViewData(SETTINGS_VIEW_ID, { type: "layout", direction: "vertical", children: children });
+  return { type: "layout", direction: "vertical", children: children };
 }
 
 // ---------------------------------------------------------------------------
@@ -4326,7 +4404,7 @@ function registerActions() {
 
   api.ui.onAction("main-tab", function (data) {
     var id = data && data.tabId;
-    activeTab = id === "transfers" || id === "fallback" ? id : "search";
+    activeTab = mainTabFor(id);
     render();
     schedulePoll(activeTab === "transfers");
   });
@@ -4428,6 +4506,56 @@ function registerActions() {
     }
     enqueueFiles(g.username, missing, g.name, modeRecExtra())
       .catch(function (e) { console.error("slskd fill enqueue failed:", e); });
+  });
+
+  // ---- the Upgrades tab ----
+  api.ui.onAction("open-upgrades", function () {
+    activeTab = "upgrades";
+    render();
+    api.ui.navigateToView(VIEW_ID);
+    schedulePoll(true);
+  });
+
+  api.ui.onAction("upgrade-replace-notice", function () {
+    if (lastReadyUpgrade) openUpgradeReplace(lastReadyUpgrade);
+  });
+
+  api.ui.onAction("upgrade-replace", function (data) {
+    var ids = rowIds(data);
+    if (ids.length) openUpgradeReplace(ids[0]);
+  });
+
+  api.ui.onAction("upgrade-take-alternative", function (data) {
+    var ids = rowIds(data);
+    if (!ids.length) return;
+    takeUpgradeAlternative(ids[0]).catch(function (e) { console.error("slskd: taking the upgrade alternative failed:", e); });
+  });
+
+  // The interactive search the context menu used to open: the same filter,
+  // the user picks the file.
+  api.ui.onAction("upgrade-choose", function (data) {
+    var e = upgrades[rowIds(data)[0]];
+    if (!e) return;
+    startUpgrade({ kind: "track", trackId: e.trackId, title: e.title, artistName: e.artist })
+      .catch(function (err) { console.error("slskd upgrade search failed:", err); });
+  });
+
+  api.ui.onAction("upgrade-retry", function (data) {
+    var ids = rowIds(data);
+    for (var i = 0; i < ids.length; i++) {
+      retryUpgrade(ids[i]).catch(function (e) { console.error("slskd: retrying the upgrade failed:", e); });
+    }
+  });
+
+  api.ui.onAction("upgrade-remove", function (data) {
+    var ids = rowIds(data);
+    for (var i = 0; i < ids.length; i++) {
+      removeUpgrade(ids[i]).catch(function (e) { console.error("slskd: removing the upgrade failed:", e); });
+    }
+  });
+
+  api.ui.onAction("set-upgrade-target", function (data) {
+    saveSetting("upgradeTarget", upgradeTargetOf(data && data.value));
   });
 
   api.ui.onAction("mode-show-all", function () {
@@ -4673,7 +4801,7 @@ function registerActions() {
   api.ui.onAction("set-formats", function (data) { saveSetting("preferredFormats", (data && data.value) || ""); });
   api.ui.onAction("set-fallback-quality", function (data) {
     var v = data && data.value;
-    if (v !== "fast" && v !== "best") return;
+    if (!FALLBACK_MODES[v]) return;
     saveSetting("fallbackQuality", v);
   });
   api.ui.onAction("reset-sharers", function () {
@@ -4700,12 +4828,618 @@ function registerActions() {
   });
 
   api.contextMenu.onAction("slskd-upgrade", function (target) {
-    startUpgrade(target).catch(function (e) { console.error("slskd upgrade failed:", e); });
+    return queueUpgrade(target).catch(function (e) { console.error("slskd upgrade failed:", e); });
   });
 
   api.contextMenu.onAction("slskd-fill-album", function (target) {
     startFill(target).catch(function (e) { console.error("slskd fill-album failed:", e); });
   });
+}
+
+// ---------------------------------------------------------------------------
+// Automatic upgrades (the Upgrades tab)
+// ---------------------------------------------------------------------------
+// "Upgrade" on a library track runs the fallback's machinery with the goal
+// turned around: nobody is listening, so quality leads and the clock is
+// minutes, not seconds. One bounded search; the files that are this recording
+// (`rankFallback`'s word match + the duration filter), strictly better than the
+// copy in hand (`isUpgradeOver`) and at the user's Upgrade target; the best one
+// is downloaded, and a sharer that sends nothing for `UPGRADE_STALL_MS` makes
+// way for the next. The finished file is then CHECKED — its real size over its
+// real duration, the same estimate `libraryQuality` makes for the library copy —
+// before the user is asked anything, so a "320" that is really 128 never
+// reaches the compare dialog.
+//
+// The pick is automatic; the REPLACE never is. It goes through the host's
+// compare dialog (`openReplace`), so a wrong pick costs a download, never a
+// library file. That is the line the "no metadata download provider" rule is
+// really drawing, and why this is not one.
+//
+// Long-lived by design — a stranger's queue can be hours — so an upgrade is a
+// persisted record the transfer poll advances (`advanceUpgrades`), not an async
+// loop holding a promise open across a restart.
+//
+// `upgrades`: "t<trackId>" → {
+//   trackId, title, artist, album, trackNumber, durationSecs, path,
+//   current,        libraryQuality(row) — the copy in hand
+//   target,         "best" | "lossless" | "high" — the setting when it started
+//   state,          "searching" | "downloading" | "checking" | "ready" |
+//                   "alternative" | "none" | "failed" | "replaced"
+//   message,        the one line the row shows for a resting state
+//   candidates,     lean copies of the ranked picks, best first
+//   alternative,    the best better copy that misses the target (state "alternative")
+//   triedUsers,     usernames already asked — each sharer gets one chance
+//   active,         { key, username, filename, size, startedAt, movedAt, lastBytes, unseen }
+//   file,           { key, path, quality } once a download passed the check
+//   replaceRequested, createdAt, updatedAt
+// }
+var upgrades = {};
+var upgradeSearchRunning = false;
+var upgradeAdvancing = false;  // the poll and a click can both advance; one at a time
+var lastReadyUpgrade = null;   // which entry the "ready" toast's button opens
+
+var UPGRADE_TARGETS = {
+  best: "Best available",
+  lossless: "Lossless",
+  high: "MP3 320 / V0"
+};
+
+function upgradeTargetOf(value) {
+  return UPGRADE_TARGETS[value] ? value : "best";
+}
+
+// Pure: does a file reach the user's target? "best" takes anything better than
+// the copy in hand; "lossless" only lossless; "high" only high-bitrate lossy —
+// the size-conscious choice, so lossless is deliberately NOT accepted there.
+function meetsQualityTarget(c, target) {
+  if (!c) return false;
+  var t = upgradeTargetOf(target);
+  if (t === "lossless") return c.qualityTier === T_LOSSLESS;
+  if (t === "high") return c.qualityTier === T_HIGH;
+  return true;
+}
+
+// Pure: how good a file is, as a sort key (lower first). Tier, then the figure
+// inside the tier: more bits / a higher sample rate for lossless, a higher rate
+// for lossy. Under "high", MP3 leads the high-bitrate tier — it is the format
+// the option names, and the one every player and device reads.
+function upgradeQualityKey(c, target) {
+  var inner = c.qualityTier === T_LOSSLESS
+    ? -((c.bitDepth || 16) * 1000 + Math.round((c.sampleRate || 44100) / 1000))
+    : -(c.bitRate || 0);
+  var fmt = upgradeTargetOf(target) === "high" && c.extension !== "mp3" ? 1 : 0;
+  return [c.qualityTier, fmt, inner];
+}
+
+function compareKeys(a, b) {
+  for (var i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return a[i] - b[i];
+  }
+  return 0;
+}
+
+// Pure: ranked search results → what this upgrade can use. `picks` are the
+// same recording, better than `current` and at the target, best first:
+// match (tenth-of-a-point buckets, as the fallback), then quality, then who is
+// likely to deliver — a proven sharer, then a free slot, speed, queue.
+// `alternative` is the best better copy that misses the target, so "no FLAC
+// out there" can still offer the 320 that is. `better` counts both.
+function rankUpgrade(ranked, entry) {
+  var target = upgradeTargetOf(entry.target);
+  var matches = rankFallback(ranked, entry.title, entry.artist, null, "best");
+  // A variant word the title doesn't ask for (live, remix, cover…) is marked
+  // down in the fallback, which only has to play something close. An upgrade
+  // REPLACES the library copy, so a different recording is out entirely.
+  var better = matches.filter(function (c) { return !c.match.penalty && isUpgradeOver(c, entry.current); });
+  var sorter = function (a, b) {
+    var sa = Math.round(a.match.score * 10), sb = Math.round(b.match.score * 10);
+    if (sa !== sb) return sb - sa;
+    var q = compareKeys(upgradeQualityKey(a, target), upgradeQualityKey(b, target));
+    if (q) return q;
+    if (a.sharerTier !== b.sharerTier) return a.sharerTier - b.sharerTier;
+    if (a.availabilityTier !== b.availabilityTier) return a.availabilityTier - b.availabilityTier;
+    if (a.uploadSpeed !== b.uploadSpeed) return b.uploadSpeed - a.uploadSpeed;
+    if (a.queueLength !== b.queueLength) return a.queueLength - b.queueLength;
+    return a.filename < b.filename ? -1 : (a.filename > b.filename ? 1 : 0);
+  };
+  var picks = better.filter(function (c) { return meetsQualityTarget(c, target); }).sort(sorter);
+  var rest = better.filter(function (c) { return !meetsQualityTarget(c, target); }).sort(sorter);
+  return { picks: picks, alternative: rest[0] || null, matched: matches.length, better: better.length };
+}
+
+// Pure: what a finished file really is. Lossless is taken from the container
+// (a rate is meaningless there, and depth/rate can't be measured without
+// decoding, so the sharer's figures stand); lossy is its size over its
+// duration — `libraryQuality`'s estimate, so both sides of "is it better?"
+// are measured the same way.
+function measuredQuality(pick, size, durationSecs) {
+  var q = libraryQuality({ format: pick.extension, file_size: size, duration_secs: durationSecs });
+  if (q.qualityTier === T_LOSSLESS) {
+    q.bitDepth = pick.bitDepth || null;
+    q.sampleRate = pick.sampleRate || null;
+  }
+  return q;
+}
+
+// Pure: does the finished file hold up? `measured` null = couldn't measure
+// (no duration from the tags, or an older host) — passed through, because the
+// compare dialog still stands between it and the library. A lossy file more
+// than a fifth below its advertised rate is mislabelled whatever else is true.
+var UPGRADE_LABEL_TOLERANCE = 0.8;
+function checkUpgrade(entry, pick, measured) {
+  if (!measured) return { ok: true, note: "couldn't measure the file — check it in the compare step" };
+  if (measured.qualityTier !== T_LOSSLESS && measured.bitRate != null && pick.bitRate &&
+      measured.bitRate < pick.bitRate * UPGRADE_LABEL_TOLERANCE) {
+    return { ok: false, note: "advertised " + pick.bitRate + " kbps, measured ≈" + measured.bitRate + " kbps" };
+  }
+  if (!isUpgradeOver(measured, entry.current)) {
+    return { ok: false, note: "measured " + qualityLabel(measured) + " — no better than your copy" };
+  }
+  if (!meetsQualityTarget(measured, entry.target)) {
+    return { ok: false, note: "measured " + qualityLabel(measured) + " — below the " + UPGRADE_TARGETS[upgradeTargetOf(entry.target)] + " target" };
+  }
+  return { ok: true, note: null };
+}
+
+function leanCandidate(c) {
+  return {
+    username: c.username, filename: c.filename, size: c.size, length: c.length,
+    bitRate: c.bitRate, bitDepth: c.bitDepth, sampleRate: c.sampleRate,
+    isVariableBitRate: c.isVariableBitRate, extension: c.extension, qualityTier: c.qualityTier,
+    hasFreeUploadSlot: c.hasFreeUploadSlot, queueLength: c.queueLength, uploadSpeed: c.uploadSpeed,
+    sharerTier: c.sharerTier, availabilityTier: c.availabilityTier
+  };
+}
+
+function upgradeKey(trackId) {
+  return "t" + trackId;
+}
+
+function upgradeIsBusy(e) {
+  return !!e && (e.state === "searching" || e.state === "downloading" || e.state === "checking");
+}
+
+function upgradesNeedPoll() {
+  var keys = Object.keys(upgrades);
+  for (var i = 0; i < keys.length; i++) if (upgradeIsBusy(upgrades[keys[i]])) return true;
+  return false;
+}
+
+async function saveUpgrades() {
+  await api.storage.set("upgrades", upgrades);
+}
+
+function setUpgradeState(e, state, message) {
+  e.state = state;
+  e.message = message || null;
+  e.updatedAt = nowMs();
+}
+
+// Pure: the second line of an Upgrades row.
+function upgradeLine(e, t) {
+  var target = UPGRADE_TARGETS[upgradeTargetOf(e.target)];
+  var have = "your copy " + (e.currentLabel || "?");
+  if (e.state === "searching") return "Searching Soulseek for " + target.toLowerCase() + " · " + have;
+  if (e.state === "downloading" && e.active) {
+    var pick = e.active;
+    var bits = [qualityLabel(pick) + " from " + pick.username];
+    var phase = t ? transferPhase(t.state) : null;
+    if (phase === "downloading" || phase === "starting") {
+      var pct = transferProgress(t);
+      bits.push(pct == null ? "downloading" : "downloading " + Math.round(pct * 100) + "%");
+      if (t.averageSpeed) bits.push("↓ " + formatSpeed(t.averageSpeed));
+    } else if (t && t.placeInQueue != null) {
+      bits.push("waiting in their queue · position " + t.placeInQueue);
+    } else {
+      bits.push("queued");
+    }
+    return bits.join("  ·  ");
+  }
+  if (e.state === "checking") return "Checking the file…";
+  if (e.state === "ready" && e.file) return "Ready: " + qualityLabel(e.file.quality) + " (" + have + ")" + (e.message ? " · " + e.message : "");
+  if (e.state === "replaced") return "Replaced in your library";
+  return (e.message || e.state) + " · " + have;
+}
+
+// Pure: which row actions an Upgrades row shows.
+function upgradeRowActions(e) {
+  var ids = [];
+  if (e.state === "ready") ids.push("upgrade-replace");
+  if (e.state === "alternative") ids.push("upgrade-take-alternative");
+  if (e.state !== "replaced") ids.push("upgrade-choose");
+  if (e.state === "none" || e.state === "failed" || e.state === "alternative") ids.push("upgrade-retry");
+  ids.push("upgrade-remove");
+  return ids;
+}
+
+function currentLabelFor(q) {
+  var ext = (q.extension || "").toUpperCase();
+  var have = q.qualityTier === T_LOSSLESS ? qualityLabel(q) : (q.bitRate ? ext + " ≈" + q.bitRate + "kbps" : (ext || "unknown quality"));
+  return have;
+}
+
+// The context-menu entry point. Checks what can be upgraded exactly as the
+// interactive mode does — a local library file, or nothing to replace — and
+// falls back to the same plain search when it can't.
+async function queueUpgrade(target) {
+  var t = target || {};
+  var row = null;
+  if (t.trackId != null && api.library && typeof api.library.getTrackById === "function") {
+    try { row = await api.library.getTrackById(t.trackId); } catch (e) { console.error("slskd: could not read library track " + t.trackId + ":", e); }
+  }
+  if (!row) {
+    api.ui.navigateToView(VIEW_ID);
+    return plainSearch(t, "Upgrade works on tracks in your library — searching Soulseek for this one instead.");
+  }
+  if (!row.path || String(row.path).indexOf("file://") !== 0) {
+    api.ui.navigateToView(VIEW_ID);
+    return plainSearch({ kind: "track", title: row.title, artistName: row.artist_name },
+      "Upgrade replaces a local file, and “" + row.title + "” isn't one — searching Soulseek for it instead.");
+  }
+  var key = upgradeKey(row.id);
+  var open = { label: "Show", id: "open-upgrades" };
+  if (upgradeIsBusy(upgrades[key])) {
+    api.ui.showNotification("“" + row.title + "” is already being upgraded.", { action: open });
+    return;
+  }
+  var current = libraryQuality(row);
+  upgrades[key] = {
+    trackId: row.id,
+    title: row.title,
+    artist: row.artist_name || null,
+    album: row.album_title || null,
+    trackNumber: row.track_number || null,
+    durationSecs: row.duration_secs != null && row.duration_secs > 0 ? row.duration_secs : null,
+    path: row.path,
+    current: current,
+    currentLabel: currentLabelFor(current) + (current.size ? " · " + formatBytes(current.size) : ""),
+    target: upgradeTargetOf(settings.upgradeTarget),
+    state: "searching",
+    message: null,
+    candidates: [],
+    alternative: null,
+    triedUsers: [],
+    active: null,
+    file: null,
+    replaceRequested: false,
+    createdAt: nowMs(),
+    updatedAt: nowMs()
+  };
+  await saveUpgrades();
+  api.ui.showNotification(readiness.state === "ready"
+    ? "Looking for a better copy of “" + row.title + "”."
+    : "“" + row.title + "” will be upgraded once slskd is ready.", { action: open });
+  render();
+  if (readiness.state === "ready") advanceUpgrades().catch(function (e) { console.error("slskd: advancing upgrades failed:", e); });
+  schedulePoll(true);
+}
+
+// Run the search for one entry. Not awaited by the poll: it takes up to
+// `UPGRADE_SEARCH_MS`, queued behind any other search in `searchChain`.
+async function runUpgradeSearch(e) {
+  upgradeSearchRunning = true;
+  try {
+    var query = fallbackQuery(e.title, e.artist);
+    var prefs = viewPrefs({ knownDurationSecs: e.durationSecs });
+    var ranked = await performSearch(query, prefs, null, null, nowMs() + UPGRADE_SEARCH_MS);
+    if (upgrades[upgradeKey(e.trackId)] !== e || e.state !== "searching") return;   // removed meanwhile
+    if (ranked === null) return;   // slskd was busy; the next poll tries again
+    var r = rankUpgrade(ranked, e);
+    e.candidates = r.picks.slice(0, UPGRADE_KEEP_CANDIDATES).map(leanCandidate);
+    e.alternative = r.alternative ? leanCandidate(r.alternative) : null;
+    api.log("info", "upgrade: “" + e.title + "” — " + ranked.length + " files, " + r.matched + " match, " + r.better + " better, " + r.picks.length + " at the target", "slskd");
+    if (!e.candidates.length) {
+      if (e.alternative) {
+        setUpgradeState(e, "alternative", "No " + UPGRADE_TARGETS[upgradeTargetOf(e.target)].toLowerCase() + " copy found; best better copy is " + qualityLabel(e.alternative));
+      } else {
+        setUpgradeState(e, "none", r.matched ? "Nothing better than your copy on Soulseek right now" : "Nothing on Soulseek matched this track");
+      }
+      await saveUpgrades();
+      return;
+    }
+    await startNextUpgradeCandidate(e);
+  } catch (err) {
+    console.error("slskd: upgrade search failed:", err);
+    setUpgradeState(e, "failed", "Search failed: " + ((err && err.message) || String(err)));
+    await saveUpgrades();
+  } finally {
+    upgradeSearchRunning = false;
+    render();
+  }
+}
+
+// Queue the best candidate from a sharer not yet asked. Rests the entry in
+// "failed" when there is none, or the per-upgrade cap is reached.
+async function startNextUpgradeCandidate(e) {
+  while (e.triedUsers.length < UPGRADE_MAX_TRIES) {
+    var c = null;
+    for (var i = 0; i < e.candidates.length; i++) {
+      if (e.triedUsers.indexOf(e.candidates[i].username) < 0) { c = e.candidates[i]; break; }
+    }
+    if (!c) break;
+    e.triedUsers.push(c.username);
+    var key = c.username + KEY_SEP + c.filename;
+    try {
+      var out = await enqueueBatch(c.username, [c], (e.artist ? e.artist + " - " : "") + e.title, UPGRADE_SUBDIR, {
+        upgrade: { trackId: e.trackId, title: e.title, artist: e.artist, auto: true },
+        meta: { title: e.title, artist: e.artist, album: e.album, track_number: e.trackNumber }
+      });
+      if (!out.queued.length) {
+        ledgerCount(key, c.username, "failed", 0, false);
+        await dropIfListed(key);
+        continue;
+      }
+    } catch (err) {
+      console.error("slskd: upgrade enqueue failed:", err);
+      ledgerCount(key, c.username, "failed", 0, false);
+      await dropIfListed(key);
+      continue;
+    }
+    var now = nowMs();
+    e.active = Object.assign(leanCandidate(c), { key: key, startedAt: now, movedAt: now, lastBytes: 0, unseen: 0 });
+    setUpgradeState(e, "downloading");
+    await saveUpgrades();
+    return true;
+  }
+  e.active = null;
+  setUpgradeState(e, "failed", "No sharer delivered (" + e.triedUsers.length + " tried)");
+  await saveUpgrades();
+  return false;
+}
+
+// Give up on the active attempt and move on. `drop` = cancel it in slskd and
+// forget the record (a stall); a failed/vanished one is already over.
+async function abandonUpgradeAttempt(e, t, reason, drop) {
+  var a = e.active;
+  api.log("warn", "upgrade: “" + e.title + "” — " + a.username + ": " + reason, "slskd");
+  if (drop && t) await dropStalled(t);
+  if (drop) delete tracked[a.key];
+  e.active = null;
+  await api.storage.set("tracked", tracked);
+  await startNextUpgradeCandidate(e);
+}
+
+// One step for every entry, from the transfer poll (so `transfers` is fresh).
+async function advanceUpgrades() {
+  if (readiness.state !== "ready" || upgradeAdvancing) return;
+  upgradeAdvancing = true;
+  try {
+    await advanceUpgradesNow();
+  } finally {
+    upgradeAdvancing = false;
+  }
+}
+
+async function advanceUpgradesNow() {
+  var keys = Object.keys(upgrades);
+  var changed = false;
+  for (var i = 0; i < keys.length; i++) {
+    var e = upgrades[keys[i]];
+    if (!e) continue;
+    if (e.state === "searching") {
+      if (!upgradeSearchRunning) runUpgradeSearch(e).catch(function (err) { console.error("slskd: upgrade search failed:", err); });
+    } else if (e.state === "downloading" && e.active) {
+      await advanceUpgradeDownload(e);
+    } else if (e.state === "checking") {
+      await advanceUpgradeCheck(e);
+    } else if (e.state === "ready" && e.replaceRequested) {
+      changed = (await detectReplaced(e)) || changed;
+    }
+  }
+  if (changed) await saveUpgrades();
+}
+
+async function advanceUpgradeDownload(e) {
+  var a = e.active;
+  var t = transferByKey(a.key);
+  if (!t) {
+    // Listed the moment slskd accepts it; a run of misses means it's gone
+    // (removed from the Downloads tab, or by slskd).
+    if (++a.unseen >= UPGRADE_UNSEEN_LIMIT) await abandonUpgradeAttempt(e, null, "vanished from slskd", false);
+    return;
+  }
+  a.unseen = 0;
+  var phase = transferPhase(t.state);
+  if (phase === "succeeded") {
+    var rec = tracked[a.key];
+    var path = rec ? (rec.resolvedPath || await resolveTransferPath(t, rec)) : null;
+    if (!path) return;   // located on a later poll
+    e.file = { key: a.key, path: path, size: t.size || a.size || null };
+    setUpgradeState(e, "checking");
+    await saveUpgrades();
+    await advanceUpgradeCheck(e);
+    return;
+  }
+  if (phase === "cancelled") {
+    // Cancelled from the Downloads tab (or slskd's own page): that's the user
+    // saying no, not a sharer failing — stop, don't try the next one.
+    e.active = null;
+    setUpgradeState(e, "failed", "Download cancelled");
+    await saveUpgrades();
+    return;
+  }
+  if (phase === "failed") {
+    await abandonUpgradeAttempt(e, t, "failed" + (t.exception ? " — " + t.exception : ""), false);
+    return;
+  }
+  var bytes = t.bytesTransferred || 0;
+  if (bytes > a.lastBytes) {
+    a.lastBytes = bytes;
+    a.movedAt = nowMs();
+    await saveUpgrades();
+  } else if (nowMs() - a.movedAt > UPGRADE_STALL_MS) {
+    ledgerCount(a.key, a.username, "stalled", 0, false);
+    await abandonUpgradeAttempt(e, t, "no data for " + Math.round(UPGRADE_STALL_MS / 60000) + " min", true);
+  }
+}
+
+// Measure the finished file once its tags are read (`readTagsForResolved` runs
+// earlier in the same poll). An older host without readAudioTags can't measure,
+// and the file goes to the compare step on the sharer's word.
+async function advanceUpgradeCheck(e) {
+  var rec = tracked[e.file.key];
+  var canRead = api.system && typeof api.system.readAudioTags === "function";
+  if (rec && canRead && !rec.tagsRead) return;
+  var duration = rec && rec.meta && rec.meta.durationSecs ? rec.meta.durationSecs : null;
+  var pick = e.active || {};
+  var measured = duration ? measuredQuality(pick, e.file.size, duration) : null;
+  var verdict = checkUpgrade(e, pick, measured);
+  if (!verdict.ok) {
+    api.log("warn", "upgrade: “" + e.title + "” — rejected " + pick.username + "'s file: " + verdict.note, "slskd");
+    // The file stays in Downloads — the plugin deletes only what the fallback
+    // fetched — but it is no longer offered as a replacement.
+    if (rec) delete rec.upgrade;
+    e.file = null;
+    e.active = null;
+    e.lastRejected = verdict.note;
+    await api.storage.set("tracked", tracked);
+    await startNextUpgradeCandidate(e);
+    if (e.state === "failed") e.message = "No file held up (" + verdict.note + ")";
+    await saveUpgrades();
+    return;
+  }
+  e.file.quality = measured || pick;
+  setUpgradeState(e, "ready", verdict.note);
+  await saveUpgrades();
+  lastReadyUpgrade = upgradeKey(e.trackId);
+  api.ui.showNotification("A better copy of “" + e.title + "” is ready: " + qualityLabel(e.file.quality) + ".",
+    { action: { label: "Compare & replace", id: "upgrade-replace-notice" } });
+}
+
+// After Compare & replace, the library row changes under us once the user
+// confirmed. A different size or path is the sign; nothing else is needed.
+async function detectReplaced(e) {
+  if (!api.library || typeof api.library.getTrackById !== "function") return false;
+  var row = null;
+  try { row = await api.library.getTrackById(e.trackId); } catch (err) { console.error("slskd: re-reading library track failed:", err); return false; }
+  if (!row) return false;
+  if (row.path !== e.path || (row.file_size || null) !== (e.current.size || null)) {
+    setUpgradeState(e, "replaced");
+    return true;
+  }
+  return false;
+}
+
+function openUpgradeReplace(key) {
+  var e = upgrades[key];
+  if (!e || e.state !== "ready" || !e.file) return;
+  e.replaceRequested = true;
+  saveUpgrades().catch(function (err) { console.error("slskd: couldn't save upgrades:", err); });
+  openReplace(e.file.key);
+}
+
+async function removeUpgrade(key) {
+  var e = upgrades[key];
+  if (!e) return;
+  if (e.state === "downloading" && e.active) {
+    var t = transferByKey(e.active.key);
+    if (t && transferPhase(t.state) !== "succeeded") {
+      await dropStalled(t);
+      delete tracked[e.active.key];
+      await api.storage.set("tracked", tracked);
+    }
+  }
+  delete upgrades[key];
+  await saveUpgrades();
+  render();
+}
+
+async function retryUpgrade(key) {
+  var e = upgrades[key];
+  if (!e || upgradeIsBusy(e)) return;
+  e.target = upgradeTargetOf(settings.upgradeTarget);
+  e.candidates = [];
+  e.alternative = null;
+  e.triedUsers = [];
+  e.active = null;
+  e.file = null;
+  e.replaceRequested = false;
+  setUpgradeState(e, "searching");
+  await saveUpgrades();
+  render();
+  advanceUpgrades().catch(function (err) { console.error("slskd: advancing upgrades failed:", err); });
+  schedulePoll(true);
+}
+
+// "Take it": the best better copy the target ruled out becomes the only pick.
+async function takeUpgradeAlternative(key) {
+  var e = upgrades[key];
+  if (!e || e.state !== "alternative" || !e.alternative) return;
+  e.target = "best";
+  e.candidates = [e.alternative];
+  e.alternative = null;
+  e.triedUsers = [];
+  await startNextUpgradeCandidate(e);
+  render();
+  schedulePoll(true);
+}
+
+function upgradeRows() {
+  return Object.keys(upgrades)
+    .map(function (k) { return upgrades[k]; })
+    .sort(function (a, b) { return (b.createdAt || 0) - (a.createdAt || 0); })
+    .map(function (e) {
+      var t = e.active ? transferByKey(e.active.key) : null;
+      return {
+        id: upgradeKey(e.trackId),
+        title: e.title,
+        subtitle: upgradeLine(e, t),
+        album: e.album || undefined,
+        duration: e.durationSecs != null ? formatDurationSecs(e.durationSecs) : undefined,
+        durationSecs: e.durationSecs,
+        artistName: e.artist,
+        albumTitle: e.album,
+        kind: "audio",
+        actions: upgradeRowActions(e)
+      };
+    });
+}
+
+function upgradesTab() {
+  var children = [];
+  var target = UPGRADE_TARGETS[upgradeTargetOf(settings.upgradeTarget)];
+  if (!Object.keys(upgrades).length) {
+    children.push({ type: "text", className: "plugin-muted",
+      content: "Nothing being upgraded. Choose Upgrade on a track in your library and a better copy is found, downloaded and checked here; you replace it after comparing the two." });
+  } else {
+    children.push({ type: "text", className: "plugin-muted",
+      content: "Upgrading to: " + target + " (change it in Settings). Each track gets the best matching file from a sharer likely to deliver; nothing in your library changes until you compare and replace." });
+    children.push({
+      type: "track-row-list",
+      items: upgradeRows(),
+      showHeader: false,
+      actions: [
+        { id: "upgrade-replace", label: "Compare & replace…", icon: "⇪" },
+        { id: "upgrade-take-alternative", label: "Take the best found", icon: "⬇" },
+        { id: "upgrade-choose", label: "Choose myself…", icon: "⌕" },
+        { id: "upgrade-retry", label: "Search again", icon: "↻" },
+        { id: "upgrade-remove", label: "Remove", icon: "🗑" }
+      ]
+    });
+  }
+  return { type: "layout", direction: "vertical", children: children };
+}
+
+function upgradeSettingsSection() {
+  var t = upgradeTargetOf(settings.upgradeTarget);
+  return {
+    type: "section",
+    title: "Upgrades",
+    children: [
+      { type: "settings-row", label: "Upgrade to",
+        description: t === "lossless"
+          ? "Only lossless files (FLAC, ALAC, WAV…). When none turns up, the Upgrades tab offers the best better copy it did find."
+          : t === "high"
+            ? "Only high-bitrate lossy files — MP3 320 or V0 first — for a better copy at a fraction of lossless's size. Lossless files are skipped."
+            : "Lossless when someone has it, otherwise the best lossy file that beats your copy.",
+        control: { type: "select", action: "set-upgrade-target", value: t,
+          options: [
+            { value: "best", label: "Best available" },
+            { value: "lossless", label: "Lossless only" },
+            { value: "high", label: "MP3 320 / V0" }
+          ] } }
+    ]
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -4990,7 +5724,7 @@ function schedulePoll(fast) {
           var p = transferPhase(t.state);
           return p === "downloading" || p === "queued" || p === "starting" || p === "requested";
         });
-        schedulePoll(active || activeTab === "transfers");
+        schedulePoll(active || upgradesNeedPoll() || activeTab === "transfers" || activeTab === "upgrades");
       });
   }, delay);
 }
@@ -4999,7 +5733,7 @@ function schedulePoll(fast) {
 // Lifecycle
 // ---------------------------------------------------------------------------
 async function loadSettings() {
-  var keys = ["url", "apiKey", "tierOverride", "insecure", "preferredFormats", "fallbackQuality", "batchSeq", "managedBy"];
+  var keys = ["url", "apiKey", "tierOverride", "insecure", "preferredFormats", "fallbackQuality", "upgradeTarget", "batchSeq", "managedBy"];
   for (var i = 0; i < keys.length; i++) {
     try {
       var v = await api.storage.get(keys[i]);
@@ -5017,6 +5751,8 @@ async function loadSettings() {
     if (fb && typeof fb === "object") fallback = fb;
     var sh = await api.storage.get("sharers");
     if (sh && typeof sh === "object") sharers = sh;
+    var up = await api.storage.get("upgrades");
+    if (up && typeof up === "object") upgrades = up;
   } catch (e) {
     console.error("slskd: couldn't read stored state:", e);
   }
@@ -5193,6 +5929,7 @@ return {
   _scoreFallbackCandidate: scoreFallbackCandidate,
   _rankFallback: rankFallback,
   _fallbackQualityRank: fallbackQualityRank,
+  _fallbackQualityDescription: fallbackQualityDescription,
   _matchLabel: matchLabel,
   _fallbackTotals: fallbackTotals,
   _transferEta: transferEta,
@@ -5210,6 +5947,16 @@ return {
   _ownedTrackFor: ownedTrackFor,
   _missingFiles: missingFiles,
   _startUpgrade: startUpgrade,
+  _queueUpgrade: queueUpgrade,
+  _advanceUpgrades: advanceUpgrades,
+  _upgrades: function () { return upgrades; },
+  _meetsQualityTarget: meetsQualityTarget,
+  _rankUpgrade: rankUpgrade,
+  _measuredQuality: measuredQuality,
+  _checkUpgrade: checkUpgrade,
+  _upgradeLine: upgradeLine,
+  _upgradeRowActions: upgradeRowActions,
+  _setUpgradeTimings: function (searchMs, stallMs) { UPGRADE_SEARCH_MS = searchMs; if (stallMs != null) UPGRADE_STALL_MS = stallMs; },
   _startFill: startFill,
   _setFallbackSearchMs: function (ms) { FALLBACK_SEARCH_MS = ms; }
 };
