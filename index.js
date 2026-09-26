@@ -124,6 +124,7 @@ var settings = {
 };
 
 var readiness = { state: "unconfigured", detail: null, username: null, version: null, shareCount: null };
+var probedOnce = false; // `readiness` above is a placeholder until the first probe
 // slskd's own word for its Soulseek connection ("Connecting", "Connected,
 // LoggedIn", "Disconnected"…) from the last probe; the setup's sign-in step
 // shows it while it waits.
@@ -535,8 +536,11 @@ function nextReadiness(probe, prev) {
     shareCount: probe && probe.shareCount != null ? probe.shareCount : null,
     changed: changed,
     // Notify only on a TRANSITION INTO a bad state — polling must never spam.
-    // "connecting" is transitional and never alarms.
-    notify: changed && bad
+    // "connecting" is transitional and never alarms. Leaving "unconfigured"
+    // never alarms either: only the user's own Connect (or typed address) in
+    // the plugin's screen does that, and the screen already shows the result —
+    // a toast telling them to "open Soulseek" while it's open is noise.
+    notify: changed && bad && prevState !== "unconfigured"
   };
 }
 
@@ -1314,10 +1318,18 @@ function badgeFor(state) {
   return null;
 }
 
-function notificationFor(state) {
-  if (state === "unreachable") return "slskd isn't reachable — open Soulseek in the sidebar to fix the address, or start slskd.";
-  if (state === "unauthorized") return "slskd rejected the API key — update it in Settings → Soulseek.";
-  if (state === "disconnected") return "slskd is running but isn't signed in to Soulseek.";
+// Pure: the warning for a state change, with the one click that fixes it.
+// A slskd Roadie installed and still has is only stopped, and Roadie can
+// start it, so the warning starts it. Anything else needs the Soulseek view,
+// so the warning opens it. The text stands alone: older hosts drop the button.
+function notificationFor(state, cfg, r) {
+  var open = { label: "Open Soulseek", id: "open-soulseek-view" };
+  if (state === "unreachable" && cfg && cfg.managedBy === "roadie" && r && r.installed && r.tool && r.tool.installed) {
+    return { message: "slskd isn't running — start it from Soulseek in the sidebar.", action: { label: "Start slskd", id: "roadie-start-from-notice" } };
+  }
+  if (state === "unreachable") return { message: "slskd isn't reachable — open Soulseek in the sidebar to fix the address, or start slskd.", action: open };
+  if (state === "unauthorized") return { message: "slskd rejected the API key — update it in Settings → Soulseek.", action: open };
+  if (state === "disconnected") return { message: "slskd is running but isn't signed in to Soulseek.", action: open };
   return null;
 }
 
@@ -1337,7 +1349,11 @@ async function refreshReadiness() {
       console.error("slskd: Roadie probe failed:", e);
     }
   }
-  var next = nextReadiness(p, readiness);
+  // Before the first probe `readiness` is a placeholder, not an answer: pass
+  // no previous state, so a slskd found down at launch still warns. (Leaving a
+  // *probed* "unconfigured" never warns — that is the user's own Connect.)
+  var next = nextReadiness(p, probedOnce ? readiness : null);
+  probedOnce = true;
   readiness = {
     state: next.state,
     detail: next.detail,
@@ -1352,8 +1368,8 @@ async function refreshReadiness() {
   // The setup checklist is already saying what's going on; a toast on top
   // of it would be the same news twice.
   if (next.notify && notifiedState !== next.state && !roadie.setup) {
-    var msg = notificationFor(next.state);
-    if (msg) api.ui.showNotification(msg);
+    var note = notificationFor(next.state, settings, roadie);
+    if (note) api.ui.showNotification(note.message, { action: note.action });
     notifiedState = next.state;
   }
   if (!next.notify && next.changed) notifiedState = null;
@@ -2534,13 +2550,20 @@ function randomApiKey() {
 // `share=` — newline-joined paths — so the guide can offer them as the shared
 // folders to pick from. Same fragment rule: the paths reach the page's own
 // script and never a server.
-function guideFragment(apiKey, collections) {
-  var out = "#key=" + encodeURIComponent(apiKey || "");
+// Pure: the host's local collections as folder paths, deduped, in order —
+// what slskd shares by default, whichever way it is installed.
+function collectionPaths(collections) {
   var paths = [];
   for (var i = 0; collections && i < collections.length; i++) {
     var p = collections[i] && collections[i].path;
     if (p && paths.indexOf(p) < 0) paths.push(p);
   }
+  return paths;
+}
+
+function guideFragment(apiKey, collections) {
+  var out = "#key=" + encodeURIComponent(apiKey || "");
+  var paths = collectionPaths(collections);
   if (paths.length) out += "&share=" + encodeURIComponent(paths.join("\n"));
   return out;
 }
@@ -2551,16 +2574,6 @@ function whatIsThisUrl(apiKey, collections) {
   return WHAT_IS_THIS_URL + guideFragment(apiKey, collections);
 }
 
-// One line of buttons. "What is this?" opens the about page (what Soulseek and
-// slskd are, why you run slskd yourself), which leads on to the setup guide;
-// everything else lives there, so the view stays out of the way of someone who
-// already has slskd running.
-function setupBar() {
-  return { type: "toolbar", buttons: [
-    { label: "What is this?", action: "setup-open-about", variant: "accent" },
-    { label: "Connect to " + SETUP_DEFAULT_URL, action: "setup-connect", variant: "secondary" }
-  ] };
-}
 
 // ---------------------------------------------------------------------------
 // Roadie (https://github.com/outcast1000/roadie) installs, runs and updates
@@ -2594,7 +2607,10 @@ var roadie = { supported: false, installed: false, tool: null, checkedAt: 0, job
 // Typed into the install form; memory only, dropped once the install ends.
 // `autostart` is the user's answer to "start slskd at login" — off unless
 // they turn it on, because on means a login item (and macOS says so).
-var roadieCreds = { username: "", password: "", autostart: false };
+// `shareCollections`: share the user's Viboplr collections on Soulseek — on
+// unless they turn it off. Soulseek queues people who share nothing behind
+// everyone else, and a music library is the obvious thing to share.
+var roadieCreds = { username: "", password: "", autostart: false, shareCollections: true };
 
 // Pure: the CLI prints one JSON document on stdout, whatever the exit code.
 function parseRoadieJson(stdout) {
@@ -2614,14 +2630,34 @@ function roadieProgress(line) {
 // Pure: the arguments of the install, account values included when typed.
 // "Start at login" is always sent, so the recipe's own default (on) never
 // decides it for the user.
-function roadieInstallArgs(creds) {
+// `shareDirs`: extra folders slskd shares, sent as a JSON array under slskd's
+// own setting name (the recipe's `configuration` entry `shares.directories`,
+// added to the downloads folder); null or empty sends nothing.
+var SHARES_ENTRY = "shares.directories";
+
+function roadieInstallArgs(creds, shareDirs) {
   var args = ["tool", "install", "slskd", "--consumer", ROADIE_CONSUMER];
   var user = creds && String(creds.username || "").trim();
   var pass = creds && String(creds.password || "");
   if (user) args.push("--set", "soulseekUsername=" + user);
   if (pass) args.push("--set", "soulseekPassword=" + pass);
   args.push("--set", "autostart=" + (creds && creds.autostart ? "true" : "false"));
+  if (shareDirs && shareDirs.length) args.push("--set", SHARES_ENTRY + "=" + JSON.stringify(shareDirs));
   return args;
+}
+
+// Pure: this Roadie's slskd recipe opens `shares.directories`. Older ones
+// (before Roadie 0.3.0) reject an unknown key and would fail the install, so
+// the folders go only where the entry shows up in `tool status`.
+function roadieCanShareDirs(tool) {
+  return !!(tool && tool.config && Array.isArray(tool.config[SHARES_ENTRY]));
+}
+
+// Pure: what the install sends as shared folders.
+function installShareDirs(creds, tool, collections) {
+  if (!creds || !creds.shareCollections || !roadieCanShareDirs(tool)) return null;
+  var paths = collectionPaths(collections);
+  return paths.length ? paths : null;
 }
 
 // Pure: the message for a CLI run that did not succeed.
@@ -2900,7 +2936,7 @@ async function installSlskdWithRoadie() {
   roadie.setup = s;
   var r;
   try {
-    r = await runRoadieJob("install", roadieInstallArgs(roadieCreds), "", function (line) {
+    r = await runRoadieJob("install", roadieInstallArgs(roadieCreds, installShareDirs(roadieCreds, roadie.tool, localCollections)), "", function (line) {
       var hit = setupStepForLine(line);
       if (!hit) return;
       advanceSetup(s, hit.step);
@@ -2925,7 +2961,7 @@ async function installSlskdWithRoadie() {
     render();
     return;
   }
-  roadieCreds = { username: "", password: "", autostart: false };
+  roadieCreds = { username: "", password: "", autostart: false, shareCollections: true };
   api.log("info", "slskd installed through Roadie", "slskd");
   await continueSetup(s, "start");
 }
@@ -3042,19 +3078,25 @@ function setupProgressView() {
   return { type: "layout", direction: "vertical", children: children };
 }
 
-async function startSlskdWithRoadie() {
+// `fromNotice`: started from the warning toast, so the user is likely not
+// looking at the Soulseek view — say it's starting, and say so if it fails.
+// Success stays quiet (the sidebar dot clearing is the answer).
+async function startSlskdWithRoadie(fromNotice) {
+  if (fromNotice) api.ui.showNotification("Starting slskd…");
   var r;
   try {
     r = await runRoadieJob("start", ["tool", "start", "slskd"], "Starting slskd…");
   } catch (e) {
     console.error("slskd: Roadie start failed:", e);
     roadie.error = String(e && e.message || e);
+    if (fromNotice) api.ui.showNotification("Roadie couldn't start slskd: " + roadie.error, { action: { label: "Open Soulseek", id: "open-soulseek-view" } });
     render();
     return;
   }
   if (!r) return;
   if (r.code !== 0) {
     roadie.error = roadieFailure(r.code, r.json, r.stderr);
+    if (fromNotice) api.ui.showNotification("Roadie couldn't start slskd: " + roadie.error, { action: { label: "Open Soulseek", id: "open-soulseek-view" } });
     render();
     return;
   }
@@ -3063,29 +3105,25 @@ async function startSlskdWithRoadie() {
   await refreshReadiness();
 }
 
-// The buttons the setup view shows for Roadie, given what we know about it.
-function roadieSetupButtons(state, cfg, r) {
-  if (!r || !r.supported) return [];
-  if (r.job) return r.job.cancel ? [{ label: "Cancel", action: "roadie-cancel", variant: "secondary" }] : [];
-  var early = state === "unconfigured" || state === "unreachable";
-  if (!r.installed) {
-    return state === "unconfigured" ? [{ label: "Set up slskd for me", action: "roadie-get", variant: "accent" }] : [];
-  }
-  var installed = r.tool && r.tool.installed;
-  if (cfg.managedBy === "roadie") {
-    return state === "unreachable" ? [{ label: "Start slskd", action: "roadie-start", variant: "accent" }] : [];
-  }
-  if (installed) return early ? [{ label: "Connect to Roadie's slskd", action: "roadie-connect", variant: "accent" }] : [];
-  return [];
+// Pure: what the "Install automatically" page can offer, given what we know
+// about Roadie.
+//   "unsupported" — this host can't provide Roadie; only the manual guide works
+//   "get-roadie"  — Roadie itself isn't installed yet; the host's modal gets it
+//   "busy"        — a Roadie command the user started is running
+//   "adopt"       — Roadie already has slskd; connecting is all that's left
+//   "form"        — the account form that installs slskd
+function autoInstallStage(r) {
+  if (!r || !r.supported) return "unsupported";
+  if (!r.installed) return "get-roadie";
+  if (r.job) return "busy";
+  if (r.tool && r.tool.installed) return "adopt";
+  return "form";
 }
 
-// Pure: whether the install form belongs on screen — Roadie is here, slskd
-// isn't installed in it, and nothing else answers yet.
-function showRoadieInstallForm(state, cfg, r) {
-  if (!r || !r.supported || !r.installed || r.job) return false;
-  if (r.tool && r.tool.installed) return false;
-  if (cfg.managedBy === "roadie") return false;
-  return state === "unconfigured" || state === "unreachable";
+// Pure: Roadie has an slskd this plugin isn't connected to — the quickest way
+// forward from any not-found screen, so it's offered first.
+function roadieHasUnusedSlskd(cfg, r) {
+  return !!(r && r.supported && r.installed && r.tool && r.tool.installed && cfg.managedBy !== "roadie");
 }
 
 // Pure: slskd can't sign in, and so can't search, without both.
@@ -3096,18 +3134,36 @@ function roadieCredsComplete(creds) {
 function roadieInstallSection() {
   return {
     type: "section",
-    title: "Install slskd with Roadie",
+    title: "Your Soulseek setup",
     children: [
-      { type: "text", content: "Roadie downloads slskd, asks you to approve it, and runs it in the background on this computer only. Your Soulseek account goes into slskd's own settings file.", className: "plugin-muted" },
+      mutedText("Your account goes into slskd's own settings file; the plugin doesn't keep it."),
       { type: "settings-row", label: "Soulseek username",
         control: { type: "text-input", placeholder: "username", action: "roadie-set-user", value: roadieCreds.username } },
       { type: "settings-row", label: "Soulseek password",
         control: { type: "text-input", placeholder: "password", action: "roadie-set-pass", password: true, value: roadieCreds.password } },
-      { type: "text", content: "No account yet? Soulseek has no sign-up page: choose a username nobody else uses and a password, and the account is created the first time slskd signs in. Keep the password somewhere safe; Soulseek can't reset it.", className: "plugin-muted" },
-      autostartRow("roadie-set-autostart", roadieCreds.autostart),
+      mutedText("No account yet? Soulseek has no sign-up page: choose a username nobody else uses and a password, and the account is created the first time slskd signs in. Keep the password somewhere safe; Soulseek can't reset it."),
+      autostartRow("roadie-set-autostart", roadieCreds.autostart)
+    ].concat(shareCollectionsRows(), [
       { type: "button", label: "Install slskd", action: "roadie-install", variant: "accent", disabled: !roadieCredsComplete(roadieCreds) }
-    ]
+    ])
   };
+}
+
+// Pure: "/Users/a/Music, D:\\Rock and 3 more" — the folders by name, briefly.
+function describeFolders(paths) {
+  var shown = paths.slice(0, 3).join(", ");
+  return paths.length > 3 ? shown + " and " + (paths.length - 3) + " more" : shown;
+}
+
+// The row that says which folders become public, with the way out. Absent
+// when there is nothing to share or this Roadie can't take the list.
+function shareCollectionsRows() {
+  var paths = collectionPaths(localCollections);
+  if (!paths.length || !roadieCanShareDirs(roadie.tool)) return [];
+  return [{ type: "settings-row", label: "Share my Viboplr collections",
+    description: (paths.length === 1 ? "1 folder: " : paths.length + " folders: ") + describeFolders(paths) +
+      ". Other Soulseek users can browse and download from them; Soulseek serves people who share before those who don't. Your downloads folder is shared too.",
+    control: { type: "toggle", label: "", action: "roadie-set-share", checked: !!roadieCreds.shareCollections } }];
 }
 
 function autostartRow(action, checked) {
@@ -3137,50 +3193,222 @@ async function setRoadieAutostart(on) {
   renderSettings();
 }
 
-// The Roadie part of the setup view: a running job, the last failure, the
-// install form.
-function roadieSetupNodes(state) {
+// A Roadie command in flight (its latest line and percent), or the last one's
+// failure, which stays until the next attempt.
+function roadieJobNodes() {
   var nodes = [];
   if (roadie.job) {
-    nodes.push({ type: "text", content: roadie.job.line, className: "plugin-muted" });
+    nodes.push(mutedText(roadie.job.line));
     if (roadie.job.percent != null) nodes.push({ type: "progress-bar", value: roadie.job.percent, max: 100 });
+    if (roadie.job.cancel) nodes.push(buttonRow([actionButton("Cancel", "roadie-cancel")]));
+  } else if (roadie.error) {
+    nodes.push(mutedText("Roadie: " + roadie.error));
   }
-  if (roadie.error && !roadie.job) nodes.push({ type: "text", content: "Roadie: " + roadie.error, className: "plugin-muted" });
-  var buttons = roadieSetupButtons(state, settings, roadie);
-  if (buttons.length) nodes.push({ type: "toolbar", buttons: buttons });
-  if (showRoadieInstallForm(state, settings, roadie)) nodes.push(roadieInstallSection());
   return nodes;
 }
 
 // ---------------------------------------------------------------------------
 // Views
 // ---------------------------------------------------------------------------
-function setupView() {
-  var children = [];
-  var st = readiness.state;
-  // The full bar (about page + Connect) belongs to the states before slskd has
-  // answered. Once it answers and something is still wrong, the fix is in
-  // slskd's settings file, and the guide's Configure step is the one place
-  // that shows those lines with THIS plugin's key already filled in — so every
-  // not-ready state offers a way there.
-  var showBar = st === "unconfigured" || st === "unreachable";
 
-  if (st === "unconfigured") {
-    children.push({ type: "text", content: "Search and download from Soulseek", className: "plugin-heading" });
-    children.push({ type: "text", content: "Needs slskd, a small Soulseek daemon you run yourself.", className: "plugin-muted" });
-  } else if (st === "unreachable" && settings.managedBy === "roadie") {
-    children.push({ type: "text", content: "slskd is stopped", className: "plugin-heading" });
-    children.push({ type: "text", content: "Roadie manages this slskd and it isn't running right now." });
-  } else if (st === "unreachable") {
-    children.push({ type: "text", content: "slskd isn't reachable", className: "plugin-heading" });
-    children.push({ type: "text", content: "Nothing answered at " + (settings.url || "(no address set)") + ". Check that slskd is running and the address is right." + (readiness.detail ? " (" + readiness.detail + ")" : "") });
-    children.push({ type: "text", content: "If slskd uses HTTPS with its default self-signed certificate, turn on \"Allow self-signed certificate\" below.", className: "plugin-muted" });
-  } else if (st === "unauthorized") {
-    children.push({ type: "text", content: "slskd rejected the API key", className: "plugin-heading" });
+// "slskd not found" — unconfigured (never connected) or unreachable (was set
+// up, now nothing answers) — is a hub and three pages. The hub says what's
+// wrong in one line and lists the ways forward; each way (install with Roadie,
+// install by hand, connect to one you already run) gets a page to itself, so
+// the account form, the guide and the address fields are never on screen
+// together. `setupPage` resets to the hub whenever slskd becomes ready.
+var SETUP_PAGES = ["home", "install-auto", "install-manual", "connect"];
+var setupPage = "home";
+
+// The host's own classes, not ones of ours: `plugin-heading` is its small
+// uppercase section label (the same look as a section title, so a page title
+// drawn with it vanished among them) and there is no `plugin-muted` rule, so
+// the title is an <h2> and secondary text borrows the settings-row
+// description style.
+var MUTED = "plugin-settings-description";
+function escapeHtml(text) {
+  return String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+function headingText(text) {
+  return { type: "text", content: "<h2>" + escapeHtml(text) + "</h2>" };
+}
+function mutedText(text) {
+  return { type: "text", content: text, className: MUTED };
+}
+// A row of plain buttons. Not a `toolbar`: the host draws that as a full-width
+// header bar, which is right above a list and heavy in the middle of a page.
+function buttonRow(buttons) {
+  return { type: "layout", direction: "horizontal", children: buttons };
+}
+function actionButton(label, action, variant, extra) {
+  var b = { type: "button", label: label, action: action, variant: variant || "secondary" };
+  for (var k in extra || {}) b[k] = extra[k];
+  return b;
+}
+function pageButton(label, page, variant) {
+  return actionButton(label, "setup-page", variant, { data: { page: page } });
+}
+// One way forward: what it is on the left, the button that takes it pinned to
+// the right (the row is a wrapping flex line; an auto margin is what aligns
+// the buttons of every row into one column).
+function optionRow(label, description, control) {
+  var c = {};
+  for (var k in control) c[k] = control[k];
+  c.style = { marginLeft: "auto" };
+  return { type: "settings-row", label: label, description: description, control: c };
+}
+function backBar() {
+  return buttonRow([pageButton("‹ Back", "home")]);
+}
+function useRoadieRow() {
+  return optionRow("Use Roadie's slskd",
+    "Roadie already has slskd on this computer. Connect to it — Roadie asks you to approve once.",
+    { type: "button", label: "Connect", action: "roadie-connect", variant: "accent" });
+}
+
+// Pure: the install options, shared by the first-run hub and the "not
+// installed any more?" part of the unreachable one. Automatic comes first and
+// is the recommended one wherever the host can provide Roadie.
+function installRows(r) {
+  var rows = [];
+  var auto = !!(r && r.supported);
+  if (auto) {
+    rows.push(optionRow("Install automatically",
+      "Roadie downloads slskd, runs it in the background and keeps it up to date. Recommended.",
+      pageButton("Install…", "install-auto", "accent")));
+  }
+  rows.push(optionRow("Install manually",
+    "A step-by-step guide for your computer, in the browser.",
+    pageButton("Show guide…", "install-manual", auto ? "secondary" : "accent")));
+  return rows;
+}
+
+// Pure: the hub for a slskd that isn't found. `st` is "unconfigured" or
+// "unreachable"; `cfg` the connection settings; `r` the Roadie snapshot;
+// `detail` the last probe's error, if any.
+function setupHomeView(st, cfg, r, detail) {
+  var children = [];
+  var roadieSlskd = roadieHasUnusedSlskd(cfg, r);
+
+  if (st === "unreachable" && cfg.managedBy === "roadie") {
+    // Roadie installed it and still says so (an uninstall releases the
+    // connection and lands on the first-run hub), so it's only stopped.
+    children.push(headingText("slskd is stopped"));
+    children.push(mutedText("Roadie installed slskd on this computer; it isn't running right now."));
+    children.push(buttonRow([
+      actionButton("Start slskd", "roadie-start", "accent", { disabled: !!(r && r.job) }),
+      pageButton("Connection settings…", "connect")
+    ]));
+    return children;
+  }
+
+  if (st === "unreachable") {
+    children.push(headingText("Can't reach slskd"));
+    // Only an HTTP status says something new (something answered, wrongly).
+    // A transport error is the proxy's "error sending request for url (…)",
+    // which repeats the address above in longer words.
+    var httpDetail = /^HTTP \d+/.test(detail || "") ? " (" + detail + ")" : "";
+    children.push(mutedText("Nothing answered at " + (cfg.url || "the saved address") + ". slskd may be stopped, or no longer installed." + httpDetail));
+    children.push(buttonRow([
+      actionButton("Try again", "test-connection", "accent"),
+      pageButton("Connection settings…", "connect")
+    ]));
+    var startRows = [optionRow("Start slskd",
+      "Start it the way you installed it. The guide's Run step shows how for your computer.",
+      { type: "button", label: "Show how…", action: "setup-open-guide", variant: "secondary" })];
+    if (roadieSlskd) startRows.unshift(useRoadieRow());
+    children.push({ type: "section", title: "Stopped?", children: startRows });
+    children.push({ type: "section", title: "Not installed any more?", children: installRows(r) });
+    return children;
+  }
+
+  children.push(headingText("Search and download from Soulseek"));
+  children.push(mutedText("Viboplr reaches Soulseek through slskd, a small app that runs in the background on your computer."));
+  if (roadieSlskd) children.push({ type: "section", title: "Ready to connect", children: [useRoadieRow()] });
+  children.push({ type: "section", title: "Install slskd", children: installRows(r) });
+  children.push({ type: "section", title: "Already running slskd?", children: [
+    optionRow("Connect to your slskd",
+      "Here, in Docker or on a NAS — enter its address and API key.",
+      pageButton("Connect…", "connect"))
+  ] });
+  children.push(buttonRow([actionButton("What is Soulseek?", "setup-open-about")]));
+  return children;
+}
+
+function installAutoView() {
+  var children = [backBar(), headingText("Install slskd automatically")];
+  var stage = autoInstallStage(roadie);
+  if (stage === "unsupported") {
+    children.push(mutedText("This version of Viboplr can't install slskd for you. The manual guide takes a few minutes."));
+    children.push(pageButton("Show guide…", "install-manual", "accent"));
+    return children;
+  }
+  children.push(mutedText("Roadie downloads slskd, asks you to approve it, and runs it in the background on this computer only."));
+  if (stage === "get-roadie") {
+    children.push({ type: "section", title: "First, Roadie", children: [
+      optionRow("Install Roadie",
+        "The small tool that installs and runs slskd for you. Viboplr fetches it; then come back here.",
+        { type: "button", label: "Install Roadie…", action: "roadie-get", variant: "accent" })
+    ] });
+  } else if (stage === "adopt") {
+    children.push({ type: "section", title: "Already installed", children: [useRoadieRow()] });
+  } else if (stage === "form") {
+    children.push(roadieInstallSection());
+  }
+  var job = roadieJobNodes();
+  for (var i = 0; i < job.length; i++) children.push(job[i]);
+  return children;
+}
+
+function installManualView() {
+  var children = [backBar(), headingText("Install slskd manually")];
+  children.push(mutedText("The guide opens in your browser and picks the download for your computer. The settings it gives you already carry this plugin's API key."));
+  children.push(buttonRow([
+    actionButton("Open the guide", "setup-open-guide", "accent"),
+    actionButton("What is Soulseek?", "setup-open-about")
+  ]));
+  var tried = readiness.state === "unreachable";
+  children.push({ type: "section", title: "Once slskd is running", children: [
+    optionRow("Connect to " + SETUP_DEFAULT_URL,
+      tried ? "Nothing answered at " + (settings.url || SETUP_DEFAULT_URL) + " yet. Check slskd is running, then try again." : "The address the guide sets up.",
+      { type: "button", label: tried ? "Try again" : "Connect", action: "setup-connect", variant: "accent" }),
+    optionRow("Different address?", "If you changed the port, or run slskd somewhere else.", pageButton("Enter address…", "connect"))
+  ] });
+  return children;
+}
+
+function connectView() {
+  var children = [backBar(), headingText("Connect to slskd")];
+  children.push(mutedText("The address slskd listens on, and an API key listed in its slskd.yml."));
+  // Only worth saying when it can be the reason: HTTPS, failing, not allowed yet.
+  if (/^https:/i.test(settings.url || "") && readiness.state === "unreachable" && !settings.insecure) {
+    children.push(mutedText("slskd's default HTTPS certificate is self-signed — turn on \"Allow self-signed certificate\"."));
+  }
+  children.push(connectionSection());
+  return children;
+}
+
+// The screen for a slskd that isn't ready. Not found → the hub or one of its
+// pages; found but not usable (key rejected, not signed in, connecting) → what
+// to fix in slskd, with the Connection section below.
+function setupView() {
+  var st = readiness.state;
+  var children;
+  if (st === "unconfigured" || st === "unreachable") {
+    if (setupPage === "install-auto") children = installAutoView();
+    else if (setupPage === "install-manual") children = installManualView();
+    else if (setupPage === "connect") children = connectView();
+    else children = setupHomeView(st, settings, roadie, readiness.detail).concat(roadieJobNodes());
+    return { type: "layout", direction: "vertical", children: children };
+  }
+
+  children = [];
+  if (st === "unauthorized") {
+    children.push(headingText("slskd rejected the API key"));
     children.push({ type: "text", content: "slskd is running, but its settings file doesn't list the key below. Add it under web → authentication → api_keys in slskd.yml and restart slskd — the setup guide's Configure step shows the exact lines with this key already in them." });
     children.push({ type: "button", label: "Open setup guide", action: "setup-open-guide", variant: "accent" });
   } else if (st === "disconnected") {
-    children.push({ type: "text", content: "slskd isn't signed in to Soulseek", className: "plugin-heading" });
+    children.push(headingText("slskd isn't signed in to Soulseek"));
     children.push({ type: "text", content: "slskd is running and the key works, but it isn't connected to the Soulseek network. Check the Soulseek username and password under soulseek: in slskd.yml (the guide's Configure step) and restart slskd, or sign in from slskd's own page." });
     children.push({ type: "toolbar", buttons: [
       { label: "Open setup guide", action: "setup-open-guide", variant: "accent" },
@@ -3189,12 +3417,11 @@ function setupView() {
   } else if (st === "connecting") {
     children.push({ type: "loading", message: "slskd is connecting to Soulseek…" });
   }
-
-  var roadieNodes = roadieSetupNodes(st);
-  for (var i = 0; i < roadieNodes.length; i++) children.push(roadieNodes[i]);
-  if (showBar && settings.managedBy !== "roadie") children.push(setupBar());
+  children = children.concat(roadieJobNodes());
   children.push({ type: "spacer" });
   children.push(connectionSection());
+  var webPage = webPageSection();
+  if (webPage) children.push(webPage);
   return { type: "layout", direction: "vertical", children: children };
 }
 
@@ -3225,6 +3452,88 @@ function connectionSection() {
         status: statusLine(), statusVariant: readiness.state === "ready" ? "success" : (readiness.state === "connecting" || readiness.state === "unconfigured" ? "default" : "error") }
     ])
   };
+}
+
+// ---- slskd's own web page -----------------------------------------------
+//
+// For testing and for slskd's own settings. The page asks for a sign-in that
+// is not the API key: a slskd Roadie installed sits behind a login Roadie
+// generated (user "roadie", a random password), which Roadie hands to an
+// approved app with the connection; a slskd the user set up has slskd's
+// defaults unless they changed web → authentication in slskd.yml, which the
+// plugin can't read. Fetched on the click and kept in memory only.
+//
+// webLogin: null (hidden) | { loading } | { error } | { username, password, note }
+var webLogin = null;
+var SLSKD_DEFAULT_LOGIN = { username: "slskd", password: "slskd" };
+
+// Pure: the login out of Roadie's `tool connection` answer, or null when this
+// Roadie predates it.
+function webLoginFromRoadie(json) {
+  var w = json && json.webLogin;
+  if (!w || !w.username || !w.password) return null;
+  return { username: String(w.username), password: String(w.password) };
+}
+
+async function revealWebLogin() {
+  if (settings.managedBy !== "roadie") {
+    webLogin = { username: SLSKD_DEFAULT_LOGIN.username, password: SLSKD_DEFAULT_LOGIN.password,
+      note: "slskd's defaults. If you changed web → authentication in slskd.yml, use those instead." };
+    rerenderWebLogin();
+    return;
+  }
+  webLogin = { loading: true };
+  rerenderWebLogin();
+  var r;
+  try {
+    r = await roadieExec(["tool", "connection", "slskd", "--consumer", ROADIE_CONSUMER]);
+  } catch (e) {
+    console.error("slskd: reading the web login from Roadie failed:", e);
+    webLogin = { error: String((e && e.message) || e) };
+    rerenderWebLogin();
+    return;
+  }
+  var login = r.code === 0 ? webLoginFromRoadie(r.json) : null;
+  if (login) {
+    webLogin = { username: login.username, password: login.password, note: "Roadie generated this login when it installed slskd." };
+  } else if (r.code !== 0) {
+    webLogin = { error: "Roadie: " + roadieFailure(r.code, r.json, r.stderr) };
+  } else {
+    webLogin = { error: "This Roadie doesn't hand out slskd's login yet. It arrives with a Roadie update (Settings → Dependencies)." };
+  }
+  rerenderWebLogin();
+}
+
+function rerenderWebLogin() {
+  render();
+  renderSettings();
+}
+
+// Selectable, so the user can copy them — the plugin API has no clipboard.
+function loginField(label, value) {
+  return { type: "settings-row", label: label,
+    control: { type: "text-input", action: "slskd-login-field", value: value } };
+}
+
+// Null until there's an address to open.
+function webPageSection() {
+  if (!settings.url) return null;
+  var rows = [optionRow("Open slskd's page",
+    settings.url + " — searches, transfers and slskd's own settings.",
+    actionButton("Open", "open-slskd"))];
+  var hide = actionButton("Hide login", "slskd-hide-login");
+  if (!webLogin) {
+    rows.push(optionRow("Sign-in", "The page asks for a username and password — not the API key.", actionButton("Show login", "slskd-show-login")));
+  } else if (webLogin.loading) {
+    rows.push(optionRow("Sign-in", "Asking Roadie…", hide));
+  } else if (webLogin.error) {
+    rows.push(optionRow("Sign-in", webLogin.error, hide));
+  } else {
+    rows.push(optionRow("Sign-in", webLogin.note, hide));
+    rows.push(loginField("Username", webLogin.username));
+    rows.push(loginField("Password", webLogin.password));
+  }
+  return { type: "section", title: "slskd web page", children: rows };
 }
 
 function statusLine() {
@@ -3542,6 +3851,11 @@ function searchTab() {
     children.push({
       type: "track-row-list",
       items: resultRows(),
+      // The rows' artist/album are guesses parsed out of strangers' file
+      // paths. Show art Viboplr already has, but never let a search make it
+      // fetch (and keep) a cover for every album that merely appeared in the
+      // results. Older hosts ignore the field and fetch as before.
+      artwork: "cached",
       showHeader: true,
       selectable: true,
       openOnClick: "title",
@@ -3835,6 +4149,7 @@ function render() {
     return;
   }
   if (readiness.state === "unconfigured") ensureSetupKey();
+  if (readiness.state === "ready") setupPage = "home";
   if (readiness.state !== "ready") {
     api.ui.setViewData(VIEW_ID, setupView(), { scrollKey: "setup" });
     return;
@@ -3858,6 +4173,8 @@ function render() {
 function renderSettings() {
   if (!api) return;
   var children = [connectionSection()];
+  var webPage = webPageSection();
+  if (webPage) children.push(webPage);
 
   children.push({
     type: "section",
@@ -4237,6 +4554,21 @@ function registerActions() {
     await loadCollections();
     api.network.openUrl(setupGuideUrl(settings.apiKey, localCollections)).catch(console.error);
   });
+  api.ui.onAction("setup-page", function (data) {
+    var page = data && data.page;
+    setupPage = SETUP_PAGES.indexOf(page) >= 0 ? page : "home";
+    // Entering the automatic page is when Roadie's answer matters; a fresh
+    // one means a Roadie installed a moment ago shows up without a restart.
+    if (setupPage === "install-auto") {
+      // Roadie's answer decides the form, and the collections are what it
+      // offers to share (they are otherwise loaded only once slskd is ready).
+      Promise.all([
+        probeRoadie(true).catch(function (e) { console.error("slskd: Roadie probe failed:", e); }),
+        loadCollections().catch(function (e) { console.error("slskd: loading collections failed:", e); })
+      ]).then(render);
+    }
+    render();
+  });
   api.ui.onAction("setup-connect", function () {
     if (!settings.url) settings.url = SETUP_DEFAULT_URL;
     saveSetting("url", settings.url);
@@ -4245,6 +4577,16 @@ function registerActions() {
   api.ui.onAction("open-slskd", function () {
     if (settings.url) api.network.openUrl(settings.url).catch(console.error);
   });
+  api.ui.onAction("slskd-show-login", function () {
+    revealWebLogin().catch(function (e) { console.error("slskd: show login failed:", e); });
+  });
+  api.ui.onAction("slskd-hide-login", function () {
+    webLogin = null;
+    rerenderWebLogin();
+  });
+  // The login fields are there to be selected and copied; what's typed into
+  // them goes nowhere.
+  api.ui.onAction("slskd-login-field", function () {});
 
   // Roadie. Every one of these is a click; Roadie then asks the user in its
   // own dialog before it installs slskd or hands this plugin a key.
@@ -4257,7 +4599,14 @@ function registerActions() {
     installSlskdWithRoadie().catch(function (e) { console.error("slskd: Roadie install failed:", e); });
   });
   api.ui.onAction("roadie-start", function () {
-    startSlskdWithRoadie().catch(function (e) { console.error("slskd: Roadie start failed:", e); });
+    startSlskdWithRoadie(false).catch(function (e) { console.error("slskd: Roadie start failed:", e); });
+  });
+  // The two buttons the warning toast can carry.
+  api.ui.onAction("roadie-start-from-notice", function () {
+    startSlskdWithRoadie(true).catch(function (e) { console.error("slskd: Roadie start failed:", e); });
+  });
+  api.ui.onAction("open-soulseek-view", function () {
+    api.ui.navigateToView(VIEW_ID);
   });
   api.ui.onAction("roadie-connect", function () {
     adoptRoadieConnection("button").then(function (ok) {
@@ -4275,6 +4624,10 @@ function registerActions() {
   });
   api.ui.onAction("roadie-setup-close", function () {
     roadie.setup = null;
+    render();
+  });
+  api.ui.onAction("roadie-set-share", function (data) {
+    roadieCreds.shareCollections = !!(data && data.value);
     render();
   });
   api.ui.onAction("roadie-set-autostart", function (data) {
@@ -4306,6 +4659,7 @@ function registerActions() {
   // A typed address or key is the user's own: it ends Roadie's management of
   // the connection, so nothing overwrites what they typed.
   function userSetsConnection(key, value) {
+    webLogin = null;
     if (settings.managedBy && value !== settings[key]) {
       settings.managedBy = null;
       api.storage.set("managedBy", null).catch(function (e) { console.error("slskd: couldn't save managedBy:", e); });
@@ -4780,15 +5134,22 @@ return {
   _randomApiKey: randomApiKey,
   _setupGuideUrl: setupGuideUrl,
   _whatIsThisUrl: whatIsThisUrl,
-  _setupBar: setupBar,
+  _setupHomeView: setupHomeView,
+  _webLoginFromRoadie: webLoginFromRoadie,
+  _notificationFor: notificationFor,
+  _collectionPaths: collectionPaths,
+  _installShareDirs: installShareDirs,
+  _roadieCanShareDirs: roadieCanShareDirs,
+  _describeFolders: describeFolders,
+  _installRows: installRows,
   _connectionSection: connectionSection,
   _roadieAutoConfigAction: roadieAutoConfigAction,
-  _roadieSetupButtons: roadieSetupButtons,
+  _autoInstallStage: autoInstallStage,
   _parseRoadieJson: parseRoadieJson,
   _roadieProgress: roadieProgress,
   _roadieInstallArgs: roadieInstallArgs,
   _roadieFailure: roadieFailure,
-  _showRoadieInstallForm: showRoadieInstallForm,
+  _roadieHasUnusedSlskd: roadieHasUnusedSlskd,
   _newSetup: newSetup,
   _advanceSetup: advanceSetup,
   _failSetup: failSetup,

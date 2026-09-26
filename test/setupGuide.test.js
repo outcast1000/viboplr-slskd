@@ -26,12 +26,11 @@ test("the about page URL carries the key the same way", () => {
   assert.equal(plugin._whatIsThisUrl("abc"), "https://outcast1000.github.io/viboplr-slskd/what-is-this.html#key=abc");
 });
 
-test("the setup bar is two buttons: the guide and connect", () => {
-  const bar = plugin._setupBar();
-  assert.equal(bar.type, "toolbar");
-  assert.deepEqual(bar.buttons.map((x) => x.action), ["setup-open-about", "setup-connect"]);
-  assert.equal(bar.buttons[0].label, "What is this?");
-  assert.equal(bar.buttons[1].label, "Connect to http://localhost:5030");
+test("the manual install option opens its own page, not the guide directly", () => {
+  const rows = plugin._installRows({ supported: false });
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].control.data.page, "install-manual");
+  assert.equal(rows[0].control.variant, "accent", "the only option is the primary one");
 });
 
 test("local collections ride in the fragment as newline-joined share paths, deduped", () => {

@@ -14,7 +14,7 @@ function fakeHost(opts) {
   const actions = {};
   const tools = {};
   const resolvers = {};
-  const calls = { requestAction: [], notifications: [], badges: [], resync: [], played: [], fetched: [], views: [], exec: [] };
+  const calls = { requestAction: [], notifications: [], notices: [], navigated: [], badges: [], resync: [], played: [], fetched: [], views: [], exec: [] };
   const responses = Object.assign({
     "/api/v0/application": {
       server: { state: "Connected, LoggedIn", isLoggedIn: true, isTransitioning: false, username: "me" },
@@ -49,9 +49,14 @@ function fakeHost(opts) {
     },
     ui: {
       setViewData: (viewId, data) => calls.views.push({ viewId, data }),
-      showNotification: (m) => calls.notifications.push(m),
+      // `notifications` keeps the text (what most tests read); `notices` keeps
+      // the options too, for the warning's one-click action.
+      showNotification: (m, options) => {
+        calls.notifications.push(m);
+        calls.notices.push({ message: m, options: options });
+      },
       onAction: (id, fn) => { actions[id] = fn; },
-      navigateToView() {},
+      navigateToView: (v) => calls.navigated.push(v),
       requestAction: (a, p) => calls.requestAction.push({ action: a, payload: p }),
       setBadge: (v, b) => calls.badges.push(b)
     },

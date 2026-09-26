@@ -74,6 +74,10 @@ test("nextReadiness notifies only on a transition INTO a bad state", () => {
   const repeat = plugin._nextReadiness({ kind: "unreachable" }, { state: "unreachable" });
   assert.equal(repeat.notify, false, "polling the same bad state must not re-notify");
   assert.equal(repeat.changed, false);
+
+  const firstTry = plugin._nextReadiness({ kind: "unreachable" }, { state: "unconfigured" });
+  assert.equal(firstTry.notify, false, "the user's own first Connect is answered by the screen they clicked in, not a toast");
+  assert.equal(plugin._nextReadiness({ kind: "unreachable" }, null).notify, true, "found down at launch still says so");
 });
 
 test("nextReadiness does not notify when entering a good state", () => {

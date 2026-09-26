@@ -296,6 +296,7 @@ test("Fill: compares each folder with the album's library rows and downloads onl
     h.actions["result-mode"]({ tabId: "files" });
     const list = findNodes(lastView(h), (n) => n.type === "track-row-list")[0];
     assert.deepEqual(list.items.map((i) => i.title), ["03 - Subterranean Homesick Alien.flac"]);
+    assert.equal(list.artwork, "cached", "search rows name albums by guesswork: never let them trigger an image fetch");
   } finally {
     p.deactivate();
   }

@@ -2,11 +2,38 @@
 
 ## 0.8.0
 
+- **"slskd not found" is a short screen with three ways forward.** Never set up: *Install
+  automatically* (Roadie, recommended), *Install manually* (the guide) or *Connect to your slskd*
+  (address and key). Set up but nothing answers: *Try again* and *Connection settings…*, then how to
+  start it, then the two ways to reinstall. Each way is its own page with a *Back*, so the account
+  form, the guide and the address fields are never on screen together. A slskd Roadie installed
+  and still has reads *slskd is stopped* with one **Start slskd** button. An slskd Roadie already
+  has is offered first (*Use Roadie's slskd*). Error details show only when they add something (an
+  HTTP status), and the self-signed-certificate hint only for an HTTPS address that is failing.
+- **The warning says what to do, with the button that does it.** A stopped slskd that Roadie
+  installed warns *slskd isn't running* with **Start slskd**, which starts it through Roadie
+  ("Starting slskd…", and Roadie's reason if it can't). Any other problem carries **Open Soulseek**.
+  Your own first *Connect* that finds nothing no longer adds a toast on top of the screen you
+  clicked in. Needs a Viboplr whose notifications take a button; on older ones the text is the same
+  and the button is left out.
+- **slskd's own web page, and its login.** Settings → Soulseek has an *slskd web page* section:
+  **Open** opens it, **Show login** reveals the username and password in selectable fields
+  (hidden again with *Hide login*; never stored). For a slskd Roadie installed, the login is the
+  one Roadie generated, read from Roadie (Roadie 0.2.0 or newer; older ones say so). For one you
+  run yourself it's slskd's default, `slskd` / `slskd`, unless you changed it in `slskd.yml`.
+- **Your Viboplr collections are shared by default.** Installing with Roadie now shares your local
+  collections as well as the downloads folder: the install form lists them under *Share my Viboplr
+  collections*, on unless you turn it off, and Roadie's approval dialog shows the folders. Needs
+  Roadie 0.3.0 or newer (it opens slskd's `shares.directories`); with an older Roadie the install
+  goes ahead without them. The manual guide already ticked every collection.
+- **Search results no longer download artwork.** Rows show album or artist art Viboplr already
+  has, but a search never makes it fetch (and keep) a cover for every album that merely appeared in
+  the results, since those names are guesses parsed from other people's file paths. Needs a
+  Viboplr that knows the list option; older ones fetch as before.
 - **Roadie now comes with Viboplr.** Viboplr carries Roadie's command-line release as a managed
   dependency (Settings → Dependencies), so the empty view no longer needs a separate Roadie app
-  running. *Set up slskd for me* opens Viboplr's own install modal for Roadie. With Roadie present,
-  the view shows an **Install slskd with Roadie** form (Soulseek username and password, both
-  optional): one Roadie run downloads slskd, asks you in Roadie's dialog, starts it on this
+  running. *Install automatically* first offers Viboplr's own install modal for Roadie when it's
+  missing. With Roadie present, it shows the install form (Soulseek account and choices): one Roadie run downloads slskd, asks you in Roadie's dialog, starts it on this
   computer only, and grants Viboplr its own key in the same approval. The plugin then connects by
   itself. The account is passed to Roadie once and never stored by the plugin.
 - **Setup is one screen with a checklist.** While Roadie sets slskd up, the view shows only
