@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.9.5
+
+- **More Upgrade targets, and FLAC 16-bit is the default.** Settings → Upgrade to now offers
+  *FLAC 16-bit (CD quality)*, *Hi-res lossless (24-bit)*, *Any lossless*, *MP3 320*,
+  *MP3 320 / V0*, *256 kbps or better* and *Best available*. FLAC 16 skips hi-res files, which
+  are several times the size; the Upgrades tab still offers one as "the best found" when nothing
+  at the target turns up. If you had already picked a target, your choice is kept.
+- **Fixed on Windows: "Only absolute paths may be specified (Parameter 'filename')".** slskd on
+  Windows can't save a partial download when the sharer's name, or any folder in the shared path,
+  ends in a dot or a space ("R.E.M.", "Vol. 2 "): Windows trims those, and slskd then rejects its
+  own path. Such files are no longer offered in Search, and the fallback, Upgrade and Fill skip
+  them. A transfer that still fails this way now says why in plain words. Other systems are
+  unaffected.
+
 ## 0.9.4
 
 - **Your local collections are shared by default, old installs included.** New installs already

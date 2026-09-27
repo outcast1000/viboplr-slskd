@@ -147,8 +147,12 @@ than by a long-running promise, because a stranger's queue can outlast a restart
 - **searching**: one `performSearch` (30 s cap, through `searchChain`), then `rankUpgrade`:
   `rankFallback`'s word match, **no unasked-for variant at all** (the fallback only marks it
   down), `isUpgradeOver` the library copy, then the **Upgrade target** (`upgradeTarget` setting:
-  `best` | `lossless` | `high` = MP3 320 / V0, which deliberately skips lossless). Sort: match
-  bucket → quality (MP3 first under `high`) → sharer ledger → free slot → speed → queue. No pick
+  a `UPGRADE_TARGETS` key, default `flac16`; every target but `best` is a **filter** in
+  `meetsQualityTarget`: `flac16` = FLAC, not hi-res (unreported depth counts as 16),
+  `hires` = reported 24-bit or >48 kHz, `lossless`, `mp3_320` (≥300 measured), `high` = MP3 320 / V0,
+  `lossy256` (≥240); the size-conscious ones deliberately skip better files). Sort: match
+  bucket → quality (MP3 first under `high`, FLAC under `lossless`) → sharer ledger → free slot →
+  speed → queue. No pick
   at the target but a better copy exists → **alternative** ("Take the best found").
 - **downloading**: one sharer at a time into `viboplr/upgrades/`, each sharer once, at most 4.
   No bytes for 10 min → cancelled, counted as a stall, next sharer. **Cancelled** by the user

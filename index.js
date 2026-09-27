@@ -127,7 +127,7 @@ var settings = {
   insecure: false,        // accept slskd's self-signed cert
   preferredFormats: "",   // comma-separated, "" = no preference
   fallbackQuality: "fast", // "fast" | "best" | "lossless" | "high" — see FALLBACK_MODES; preferredFormats orders within it
-  upgradeTarget: "best",  // "best" | "lossless" | "high" — what an automatic upgrade looks for
+  upgradeTarget: "flac16", // a UPGRADE_TARGETS key — what an automatic upgrade looks for
   batchSeq: 0,
   managedBy: null         // null | "roadie" — the address/key came from Roadie and follow it
 };
@@ -310,6 +310,31 @@ function formatRank(ext, preferred) {
   return i >= 0 ? i : preferred.length;
 }
 
+// Pure: would a Windows slskd refuse to download this file? slskd writes a
+// partial download to <incomplete>\<username>\<the sharer's folders>\<file> and
+// then insists that path is already normalized (`Path.GetFullPath(p) == p`).
+// On Windows GetFullPath trims a trailing dot or space off every segment, so a
+// sharer named "john." or a folder called "R.E.M." or "Vol. 2 " fails every
+// time with "Only absolute paths may be specified (Parameter 'filename')".
+// slskd's sanitizer turns invalid characters into "_" and "."/".." into "_"
+// first, so neither of those trips it; only a trailing dot/space survives.
+function windowsCantStore(username, filename) {
+  var segs = [String(username || "")].concat(String(filename || "").split(/[\\\/]/));
+  for (var i = 0; i < segs.length; i++) {
+    var s = segs[i];
+    if (!s || s === "." || s === "..") continue;
+    var last = s.charAt(s.length - 1);
+    if (last === "." || last === " ") return true;
+  }
+  return false;
+}
+
+// The same slskd failure as `windowsCantStore`, read back off a transfer that
+// hit it (a result listed before the check, or another client's download).
+function isWindowsPathBug(exception) {
+  return /Only absolute paths may be specified/.test(String(exception || ""));
+}
+
 // responses: slskd Search.responses[]. Availability lives on the response,
 // quality on the file, so the unit of ranking is a flattened (response, file).
 function rankResults(responses, prefs) {
@@ -337,6 +362,7 @@ function rankResults(responses, prefs) {
       var ext = fileExtension(file);
       if (AUDIO_EXTS.indexOf(ext) < 0) continue;
       if (known != null && file.length != null && Math.abs(file.length - known) > 5) continue;
+      if (prefs.windowsDaemon && windowsCantStore(resp.username || "", file.filename)) continue;
 
       var key = (resp.username || "") + KEY_SEP + file.filename;
       if (seen[key]) continue;
@@ -742,7 +768,9 @@ function transferSubtitle(t, rec, currentTier) {
     bits.push("from " + user);
     if (currentTier === "local" && !(rec && rec.resolvedPath)) bits.push("locating file…");
   } else if (phase === "failed") {
-    bits.push("Failed" + (t.exception ? " — " + t.exception : ""));
+    bits.push(isWindowsPathBug(t.exception)
+      ? "Failed — slskd on Windows can't save a file whose folder or sharer name ends in a dot or space; try another source"
+      : "Failed" + (t.exception ? " — " + t.exception : ""));
     if (t.attempts) bits.push("attempt " + t.attempts);
     bits.push("from " + user);
   } else if (phase === "cancelled") {
@@ -1575,7 +1603,8 @@ async function readResponses(path, field) {
 function viewPrefs(extra) {
   var prefs = {
     preferredFormats: parsePreferredFormats(settings.preferredFormats),
-    sharerTier: function (username) { return sharerTier(sharers[username]); }
+    sharerTier: function (username) { return sharerTier(sharers[username]); },
+    windowsDaemon: !!downloadsDir && isWindowsPath(downloadsDir)
   };
   if (extra && extra.knownDurationSecs != null) prefs.knownDurationSecs = extra.knownDurationSecs;
   return prefs;
@@ -5287,7 +5316,7 @@ function registerActions() {
 // `upgrades`: "t<trackId>" → {
 //   trackId, title, artist, album, trackNumber, durationSecs, path,
 //   current,        libraryQuality(row) — the copy in hand
-//   target,         "best" | "lossless" | "high" — the setting when it started
+//   target,         a UPGRADE_TARGETS key — the setting when it started
 //   state,          "searching" | "downloading" | "checking" | "ready" |
 //                   "alternative" | "none" | "failed" | "replaced"
 //   message,        the one line the row shows for a resting state
@@ -5303,36 +5332,77 @@ var upgradeSearchRunning = false;
 var upgradeAdvancing = false;  // the poll and a click can both advance; one at a time
 var lastReadyUpgrade = null;   // which entry the "ready" toast's button opens
 
+// In the Settings select's order, best-sounding first. Every target except
+// "best" is a FILTER (see `meetsQualityTarget`): it waits for the right file
+// rather than taking the next best, and the Upgrades tab offers the best better
+// copy it ruled out ("Take the best found").
 var UPGRADE_TARGETS = {
-  best: "Best available",
-  lossless: "Lossless",
-  high: "MP3 320 / V0"
+  flac16: "FLAC 16-bit (CD quality)",
+  hires: "Hi-res lossless (24-bit)",
+  lossless: "Any lossless",
+  mp3_320: "MP3 320",
+  high: "MP3 320 / V0",
+  lossy256: "256 kbps or better",
+  best: "Best available"
+};
+var UPGRADE_TARGET_DEFAULT = "flac16";
+
+var UPGRADE_TARGET_HELP = {
+  flac16: "FLAC at CD quality: 16-bit, 44.1 or 48 kHz. Hi-res files, several times the size, are skipped. A FLAC whose sharer reports no bit depth counts as CD quality, as nearly all are.",
+  hires: "Only lossless files the sharer reports as hi-res: 24-bit, or above 48 kHz. Rare on Soulseek, and large. A copy without those figures is skipped.",
+  lossless: "Any lossless file (FLAC, ALAC, WAV…), the most bits first and FLAC before other formats.",
+  mp3_320: "Only MP3 at 320 kbps, the format every player and device reads.",
+  high: "High-bitrate lossy, MP3 320 or V0 first: a better copy at a fraction of lossless's size. Lossless files are skipped.",
+  lossy256: "Any lossy file at 256 kbps or more (MP3, AAC, Opus, Ogg; V0 counts). Lossless files are skipped.",
+  best: "Lossless when someone has it, otherwise the best lossy file that beats your copy."
 };
 
 function upgradeTargetOf(value) {
-  return UPGRADE_TARGETS[value] ? value : "best";
+  return UPGRADE_TARGETS[value] ? value : UPGRADE_TARGET_DEFAULT;
 }
 
-// Pure: does a file reach the user's target? "best" takes anything better than
-// the copy in hand; "lossless" only lossless; "high" only high-bitrate lossy —
-// the size-conscious choice, so lossless is deliberately NOT accepted there.
+// Lossy thresholds sit a little under the nominal rate: the post-download check
+// measures a file as size ÷ duration (`measuredQuality`), and a real 320 lands
+// a few percent either side of 320 once tags and a rounded duration are in the
+// sum. V0 averages ~245, so 300 still tells a 320 from it.
+var MP3_320_MIN_KBPS = 300;
+var LOSSY_256_MIN_KBPS = 240;
+
+function isHiRes(c) {
+  return (c.bitDepth || 0) >= 24 || (c.sampleRate || 0) > 48000;
+}
+
+// Pure: does a file reach the target? A filter, not a preference: the
+// size-conscious targets (flac16 and the lossy ones) do NOT accept something
+// "better", because better is exactly the size the user said no to. Also
+// serves the fallback's "lossless" / "high" modes (`rankFallback`); its other
+// modes, and an unknown value, take anything.
 function meetsQualityTarget(c, target) {
   if (!c) return false;
-  var t = upgradeTargetOf(target);
-  if (t === "lossless") return c.qualityTier === T_LOSSLESS;
-  if (t === "high") return c.qualityTier === T_HIGH;
+  var lossless = c.qualityTier === T_LOSSLESS;
+  var ext = String(c.extension || "").toLowerCase();
+  var rate = c.bitRate || 0;
+  if (target === "flac16") return lossless && ext === "flac" && !isHiRes(c);
+  if (target === "hires") return lossless && isHiRes(c);
+  if (target === "lossless") return lossless;
+  if (target === "mp3_320") return ext === "mp3" && !lossless && rate >= MP3_320_MIN_KBPS;
+  if (target === "high") return c.qualityTier === T_HIGH;
+  if (target === "lossy256") return !lossless && rate >= LOSSY_256_MIN_KBPS;
   return true;
 }
 
 // Pure: how good a file is, as a sort key (lower first). Tier, then the figure
 // inside the tier: more bits / a higher sample rate for lossless, a higher rate
-// for lossy. Under "high", MP3 leads the high-bitrate tier — it is the format
-// the option names, and the one every player and device reads.
+// for lossy. The format an option names leads its tier — MP3 under "high",
+// FLAC under "lossless" — since a target is only ever that format's figures.
 function upgradeQualityKey(c, target) {
+  var t = upgradeTargetOf(target);
   var inner = c.qualityTier === T_LOSSLESS
     ? -((c.bitDepth || 16) * 1000 + Math.round((c.sampleRate || 44100) / 1000))
     : -(c.bitRate || 0);
-  var fmt = upgradeTargetOf(target) === "high" && c.extension !== "mp3" ? 1 : 0;
+  var fmt = 0;
+  if (t === "high" && c.extension !== "mp3") fmt = 1;
+  if (t === "lossless" && c.extension !== "flac") fmt = 1;
   return [c.qualityTier, fmt, inner];
 }
 
@@ -5444,7 +5514,7 @@ function setUpgradeState(e, state, message) {
 function upgradeLine(e, t) {
   var target = UPGRADE_TARGETS[upgradeTargetOf(e.target)];
   var have = "your copy " + (e.currentLabel || "?");
-  if (e.state === "searching") return "Searching Soulseek for " + target.toLowerCase() + " · " + have;
+  if (e.state === "searching") return "Searching Soulseek for " + target + " · " + have;
   if (e.state === "downloading" && e.active) {
     var pick = e.active;
     var bits = [qualityLabel(pick) + " from " + pick.username];
@@ -5555,7 +5625,7 @@ async function runUpgradeSearch(e) {
     api.log("info", "upgrade: “" + e.title + "” — " + ranked.length + " files, " + r.matched + " match, " + r.better + " better, " + r.picks.length + " at the target", "slskd");
     if (!e.candidates.length) {
       if (e.alternative) {
-        setUpgradeState(e, "alternative", "No " + UPGRADE_TARGETS[upgradeTargetOf(e.target)].toLowerCase() + " copy found; best better copy is " + qualityLabel(e.alternative));
+        setUpgradeState(e, "alternative", "No copy at " + UPGRADE_TARGETS[upgradeTargetOf(e.target)] + " found; best better copy is " + qualityLabel(e.alternative));
       } else {
         setUpgradeState(e, "none", r.matched ? "Nothing better than your copy on Soulseek right now" : "Nothing on Soulseek matched this track");
       }
@@ -5852,17 +5922,10 @@ function upgradeSettingsSection() {
     title: "Upgrades",
     children: [
       { type: "settings-row", label: "Upgrade to",
-        description: t === "lossless"
-          ? "Only lossless files (FLAC, ALAC, WAV…). When none turns up, the Upgrades tab offers the best better copy it did find."
-          : t === "high"
-            ? "Only high-bitrate lossy files — MP3 320 or V0 first — for a better copy at a fraction of lossless's size. Lossless files are skipped."
-            : "Lossless when someone has it, otherwise the best lossy file that beats your copy.",
+        description: UPGRADE_TARGET_HELP[t] +
+          (t === "best" ? "" : " When nothing at the target turns up, the Upgrades tab offers the best better copy it did find."),
         control: { type: "select", action: "set-upgrade-target", value: t,
-          options: [
-            { value: "best", label: "Best available" },
-            { value: "lossless", label: "Lossless only" },
-            { value: "high", label: "MP3 320 / V0" }
-          ] } }
+          options: Object.keys(UPGRADE_TARGETS).map(function (k) { return { value: k, label: UPGRADE_TARGETS[k] }; }) } }
     ]
   };
 }
@@ -6386,7 +6449,10 @@ return {
   _advanceUpgrades: advanceUpgrades,
   _upgrades: function () { return upgrades; },
   _meetsQualityTarget: meetsQualityTarget,
+  _windowsCantStore: windowsCantStore,
+  _isWindowsPathBug: isWindowsPathBug,
   _rankUpgrade: rankUpgrade,
+  _upgradeTargetOf: upgradeTargetOf,
   _measuredQuality: measuredQuality,
   _checkUpgrade: checkUpgrade,
   _upgradeLine: upgradeLine,

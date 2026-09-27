@@ -73,9 +73,10 @@ each with the fix.
   really 128 is set aside and the next sharer is asked. Then *Compare &
   replace…* opens Viboplr's compare → replace / keep both step. Nothing in
   your library changes until you confirm there.
-  **Soulseek → Settings → Upgrade to** picks what it looks for: *Best available*
-  (lossless when someone has it), *Lossless only*, or *MP3 320 / V0*
-  (a better copy at a fraction of lossless's size). When nothing meets the
+  **Soulseek → Settings → Upgrade to** picks what it looks for: *FLAC 16-bit
+  (CD quality)*, the default, which skips large hi-res files; *Hi-res lossless
+  (24-bit)*; *Any lossless*; *MP3 320*; *MP3 320 / V0*; *256 kbps or better*;
+  or *Best available* (lossless when someone has it). When nothing meets the
   target, the row offers the best better copy it did find. *Choose myself…*
   opens the search, filtered to better files, so you can pick one by hand.
 - **Right-click → Soulseek: Fill missing tracks…** on an album: every

@@ -38,7 +38,79 @@ test("meetsQualityTarget: best takes anything, lossless only lossless, MP3 320 /
   assert.equal(m(MP3_320, "high"), true);
   assert.equal(m(MP3_V0, "high"), true, "V0 is high-bitrate");
   assert.equal(m(FLAC, "high"), false, "the size-conscious option skips lossless");
-  assert.equal(m(MP3_320, "nonsense"), true, "an unknown value reads as best");
+  assert.equal(m(MP3_320, "nonsense"), true, "an unknown value filters nothing");
+});
+
+const FLAC_24 = cand({ username: "hires", bitDepth: 24, sampleRate: 96000, size: 120e6 });
+const FLAC_NO_DEPTH = cand({ username: "nodepth", bitDepth: null, sampleRate: null });
+const ALAC = cand({ username: "alac", filename: "m\\Radiohead\\06 - Karma Police.m4a", extension: "alac" });
+const AAC_256 = cand({ username: "aac", filename: "m\\Radiohead\\06 - Karma Police.m4a", size: 8.4e6, bitRate: 256, bitDepth: null, sampleRate: null, extension: "m4a", qualityTier: 1 });
+
+test("meetsQualityTarget: the finer targets — FLAC 16, hi-res, MP3 320, 256 kbps or better", () => {
+  const m = plugin._meetsQualityTarget;
+  assert.equal(m(FLAC, "flac16"), true);
+  assert.equal(m(FLAC_NO_DEPTH, "flac16"), true, "a FLAC with no reported depth is CD quality");
+  assert.equal(m(FLAC_24, "flac16"), false, "hi-res is skipped under CD quality");
+  assert.equal(m(ALAC, "flac16"), false, "the target names FLAC");
+  assert.equal(m(MP3_320, "flac16"), false);
+
+  assert.equal(m(FLAC_24, "hires"), true);
+  assert.equal(m(FLAC, "hires"), false);
+  assert.equal(m(FLAC_NO_DEPTH, "hires"), false, "hi-res has to be reported, not assumed");
+
+  assert.equal(m(MP3_320, "mp3_320"), true);
+  assert.equal(m(Object.assign({}, MP3_320, { bitRate: 318 }), "mp3_320"), true, "a measured 320 lands a little either side");
+  assert.equal(m(MP3_V0, "mp3_320"), false, "V0 is not 320");
+  assert.equal(m(OGG_320, "mp3_320"), false);
+
+  assert.equal(m(AAC_256, "lossy256"), true);
+  assert.equal(m(MP3_V0, "lossy256"), true, "V0 counts");
+  assert.equal(m(MP3_192_TWIN, "lossy256"), false);
+  assert.equal(m(FLAC, "lossy256"), false, "lossless is skipped");
+});
+
+test("rankUpgrade: FLAC 16 picks the CD-quality FLAC and offers hi-res as the alternative", () => {
+  const r = plugin._rankUpgrade([FLAC_24, MP3_320, FLAC, ALAC], ENTRY("flac16"));
+  assert.deepEqual(r.picks.map((c) => c.username), ["peer"]);
+  assert.equal(r.alternative.username, "hires", "the best better copy it ruled out");
+
+  const any = plugin._rankUpgrade([ALAC, FLAC], ENTRY("lossless"));
+  assert.deepEqual(any.picks.map((c) => c.username), ["peer", "alac"], "FLAC leads its tier under Any lossless");
+});
+
+test("the default Upgrade target is FLAC 16", () => {
+  assert.equal(plugin._upgradeTargetOf(undefined), "flac16");
+  assert.equal(plugin._upgradeTargetOf("nonsense"), "flac16");
+  assert.equal(plugin._upgradeTargetOf("hires"), "hires");
+});
+
+// --- slskd on Windows ---------------------------------------------------------
+// slskd rejects a download whose partial-file path Windows would normalize —
+// any segment ending in a dot or a space — with "Only absolute paths may be
+// specified (Parameter 'filename')". Such files are dropped, on Windows only.
+
+test("windowsCantStore: a trailing dot or space in the sharer's name or any folder", () => {
+  const w = plugin._windowsCantStore;
+  assert.equal(w("peer", "@@abcde\\Music\\R.E.M.\\Automatic\\01 Drive.flac"), true, "R.E.M.");
+  assert.equal(w("peer", "Music\\Greatest Hits Vol. 2 \\01.mp3"), true, "a trailing space");
+  assert.equal(w("john.", "Music\\Album\\01.mp3"), true, "the sharer's name is a folder too");
+  assert.equal(w("peer", "C:\\Music\\...And Justice for All\\01 Blackened.flac"), false, "leading dots are fine");
+  assert.equal(w("peer", "Music\\.\\Album\\01.mp3"), false, "slskd turns a lone dot into _");
+  assert.equal(w("peer", "Music\\Why?\\01.mp3"), false, "an invalid character becomes _");
+  assert.equal(plugin._isWindowsPathBug("Only absolute paths may be specified (Parameter 'filename')"), true);
+  assert.equal(plugin._isWindowsPathBug("Transfer rejected: Banned"), false);
+});
+
+test("rankResults drops files a Windows slskd can't store, and only on Windows", () => {
+  const responses = [
+    { username: "peer", hasFreeUploadSlot: true, files: [
+      { filename: "Music\\R.E.M.\\Automatic for the People\\01 Drive.flac", size: 3e7, extension: "flac" },
+      { filename: "Music\\REM\\Automatic for the People\\01 Drive.flac", size: 3e7, extension: "flac" }
+    ] }
+  ];
+  const win = plugin._rankResults(responses, { windowsDaemon: true });
+  assert.deepEqual(win.map((c) => c.filename), ["Music\\REM\\Automatic for the People\\01 Drive.flac"]);
+  assert.equal(plugin._rankResults(responses, {}).length, 2);
 });
 
 test("rankUpgrade: same recording, better than the copy, at the target — best first; the rest become the alternative", () => {
@@ -317,7 +389,7 @@ test("integration: nothing at the target → the best better copy is offered; Ta
     await h.actions["ctx:slskd-upgrade"]({ kind: "track", trackId: 42 });
     await waitFor(() => entryOf(p) && entryOf(p).state === "alternative", 8000, "the alternative");
     assert.equal(calls.batches.length, 0, "nothing downloaded that misses the target");
-    assert.ok(/No lossless copy found; best better copy is MP3 320kbps/.test(entryOf(p).message), entryOf(p).message);
+    assert.ok(/No copy at Any lossless found; best better copy is MP3 320kbps/.test(entryOf(p).message), entryOf(p).message);
 
     await h.actions["upgrade-take-alternative"]({ itemId: "t42" });
     await waitFor(() => calls.batches.length === 1, 2000, "the alternative's download");
@@ -357,7 +429,7 @@ test("integration: the Upgrade target is a setting, and Upgrade on a non-library
     h.actions["main-tab"]({ tabId: "settings" });
     const select = findNodes(lastView(h), (n) => n.type === "settings-row" && n.label === "Upgrade to")[0];
     assert.ok(select, "Settings shows the target");
-    assert.deepEqual(select.control.options.map((o) => o.value), ["best", "lossless", "high"]);
+    assert.deepEqual(select.control.options.map((o) => o.value), ["flac16", "hires", "lossless", "mp3_320", "high", "lossy256", "best"]);
     h.actions["set-upgrade-target"]({ value: "high" });
     await waitFor(() => h.store.upgradeTarget === "high", 2000, "the setting to save");
 
