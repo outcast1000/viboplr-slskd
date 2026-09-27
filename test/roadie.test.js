@@ -110,6 +110,14 @@ function fakeRoadie(state) {
       state.tool = state.startFails ? { ...installedApproved, running: false, conflictDetail: "Another copy of slskd is running on this computer." } : installedApproved;
       return { exitCode: 0, stdout: JSON.stringify({ status: "done" }), stderr: "" };
     }
+    if (cmd[0] === "tool" && cmd[1] === "uninstall") {
+      state.uninstallArgs = cmd;
+      if (opts && opts.onStart) opts.onStart({ cancel() { state.cancelled = true; } });
+      opts && opts.onOutput && opts.onOutput("roadie: asking the user in a dialog…", "stderr");
+      if (state.decline) return { exitCode: 2, stdout: JSON.stringify({ status: "declined" }), stderr: "" };
+      state.tool = { ...notInstalled };
+      return { exitCode: 0, stdout: JSON.stringify({ status: "done" }), stderr: "" };
+    }
     if (cmd[0] === "tool" && cmd[1] === "autostart") {
       state.tool = { ...state.tool, autostart: cmd[3] === "on" };
       return { exitCode: 0, stdout: JSON.stringify(state.tool), stderr: "" };
@@ -350,6 +358,61 @@ test("integration: a Roadie-managed slskd offers the login-item switch and chang
     await until(() => /"action":"roadie-autostart","checked":false/.test(views()));
     assert.deepEqual(host.calls.exec.at(-1).args.slice(2), ["tool", "autostart", "slskd", "off"]);
     assert.ok(/"action":"roadie-autostart","checked":false/.test(views()), "the switch follows Roadie's reply");
+  });
+});
+
+test("remove: the two choices Roadie's own window offers, then Roadie's progress in place of the button", () => {
+  assert.deepEqual(plugin._roadieUninstallArgs(true), ["tool", "uninstall", "slskd", "--keep-data"]);
+  assert.deepEqual(plugin._roadieUninstallArgs(false), ["tool", "uninstall", "slskd"]);
+  const rows = plugin._roadieRemoveRows;
+  assert.deepEqual(clickable(rows({ asking: false, error: null }, null)), ["roadie-remove-ask"]);
+  const asking = rows({ asking: true, error: null }, null);
+  assert.deepEqual(clickable(asking), ["roadie-remove", "roadie-remove", "roadie-remove-cancel"]);
+  assert.ok(JSON.stringify(asking).includes("downloads and shared folders stay"), "says what is never deleted");
+  const running = rows({ asking: false, error: null }, { kind: "uninstall", line: "Waiting…", cancel() {} });
+  assert.deepEqual(clickable(running), ["roadie-cancel"]);
+  assert.ok(JSON.stringify(rows({ asking: false, error: "You declined it in Roadie's dialog." }, null)).includes("Roadie: You declined"));
+  const other = rows({ asking: false, error: null }, { kind: "start", line: "Starting slskd…" });
+  assert.ok(JSON.stringify(other).includes('"disabled":true'), "one Roadie command at a time");
+});
+
+test("integration: Remove slskd uninstalls through Roadie and forgets the managed connection", async () => {
+  const state = { tool: { ...installedApproved } };
+  await withPlugin({
+    store: { url: "http://127.0.0.1:5030", apiKey: "r".repeat(48), managedBy: "roadie" },
+    dependencies: roadieHere,
+    exec: fakeRoadie(state)
+  }, async (host) => {
+    host.actions["main-tab"]({ tabId: "settings" });
+    assert.ok(lastView(host).includes('"action":"roadie-remove-ask"'), "offered for a slskd Roadie manages");
+    host.actions["roadie-remove-ask"]();
+    assert.ok(lastView(host).includes("Remove everything"));
+    await host.actions["roadie-remove"]({ keepData: true });
+    await until(() => host.store.managedBy === null);
+    assert.deepEqual(state.uninstallArgs, ["tool", "uninstall", "slskd", "--keep-data"]);
+    assert.equal(host.store.managedBy, null);
+    assert.equal(host.store.url, "");
+    assert.notEqual(host.store.apiKey, "r".repeat(48), "Roadie's key is dropped (the setup guide mints its own)");
+    await until(() => !lastView(host).includes("roadie-remove-ask"));
+    assert.ok(!lastView(host).includes("roadie-remove-ask"), "nothing left to remove");
+    assert.equal(host.calls.notifications.length, 0, "success is the view changing, not a toast");
+  });
+});
+
+test("integration: declining Roadie's dialog keeps slskd and says so under the button", async () => {
+  const state = { tool: { ...installedApproved }, decline: true };
+  await withPlugin({
+    store: { url: "http://127.0.0.1:5030", apiKey: "r".repeat(48), managedBy: "roadie" },
+    dependencies: roadieHere,
+    exec: fakeRoadie(state)
+  }, async (host) => {
+    host.actions["main-tab"]({ tabId: "settings" });
+    host.actions["roadie-remove-ask"]();
+    await host.actions["roadie-remove"]({ keepData: false });
+    await until(() => lastView(host).includes("Roadie: You declined"));
+    assert.deepEqual(state.uninstallArgs, ["tool", "uninstall", "slskd"]);
+    assert.ok(lastView(host).includes("Roadie: You declined"));
+    assert.equal(host.store.managedBy, "roadie", "still connected");
   });
 });
 

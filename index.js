@@ -3215,10 +3215,88 @@ function autostartRow(action, checked) {
 }
 
 // Rows the Connection section adds for a slskd that Roadie manages: the
-// login-item choice, changeable at any time (`roadie tool autostart`).
+// login-item choice, changeable at any time (`roadie tool autostart`), and
+// the way to remove it.
 function roadieManagedRows() {
   if (settings.managedBy !== "roadie" || !roadie.installed || !roadie.tool || !roadie.tool.installed) return [];
-  return [autostartRow("roadie-autostart", roadie.tool.autostart)];
+  return [autostartRow("roadie-autostart", roadie.tool.autostart)].concat(roadieRemoveRows(roadieRemove, roadie.job));
+}
+
+// ---- Removing slskd through Roadie ---------------------------------------
+//
+// `roadie tool uninstall slskd` stops slskd, drops its login item and
+// deletes its binaries; without --keep-data it also deletes the settings
+// Roadie keeps for it (the Soulseek login, the web login) and every app's
+// key. Folders slskd wrote to (downloads, shares) are never touched. The
+// plugin offers the same two choices Roadie's own window does; Roadie's
+// dialog is the confirmation on top of that, as for an install.
+//
+// asking: the choice is on screen; error: the last attempt's failure, kept
+// until the next one (the Roadie dialog may have been missed).
+var roadieRemove = { asking: false, error: null };
+
+// Pure: the remove row in each state — idle, choosing, running, failed.
+function roadieRemoveRows(rm, job) {
+  if (job && job.kind === "uninstall") {
+    var running = [mutedText(job.line)];
+    if (job.cancel) running.push(buttonRow([actionButton("Cancel", "roadie-cancel")]));
+    return running;
+  }
+  if (rm.asking) {
+    return [
+      { type: "settings-row", label: "Remove slskd?",
+        description: "Roadie stops slskd and deletes it. Your downloads and shared folders stay where they are. Keeping the settings keeps your Soulseek login for a reinstall." },
+      buttonRow([
+        actionButton("Remove, keep settings", "roadie-remove", "accent", { data: { keepData: true } }),
+        actionButton("Remove everything", "roadie-remove", "secondary", { data: { keepData: false } }),
+        actionButton("Cancel", "roadie-remove-cancel")
+      ])
+    ];
+  }
+  var rows = [
+    { type: "settings-row", label: "Remove slskd", description: "Roadie installed slskd, so Roadie removes it. It asks you first." },
+    buttonRow([actionButton("Remove slskd…", "roadie-remove-ask", "secondary", { disabled: !!job })])
+  ];
+  if (rm.error) rows.push(mutedText("Roadie: " + rm.error));
+  return rows;
+}
+
+// Pure: the arguments of the uninstall.
+function roadieUninstallArgs(keepData) {
+  var args = ["tool", "uninstall", "slskd"];
+  if (keepData) args.push("--keep-data");
+  return args;
+}
+
+// Success says nothing: the view falls back to the setup hub, which is the
+// answer. A decline or a failure stays under the button.
+async function uninstallSlskdWithRoadie(keepData) {
+  roadieRemove = { asking: false, error: null };
+  var r;
+  try {
+    r = await runRoadieJob("uninstall", roadieUninstallArgs(keepData), "Waiting for you to approve it in Roadie's dialog…");
+  } catch (e) {
+    console.error("slskd: Roadie uninstall failed:", e);
+    roadieRemove.error = String(e && e.message || e);
+    render();
+    return;
+  }
+  if (!r) return;
+  if (r.code !== 0) {
+    roadieRemove.error = roadieFailure(r.code, r.json, r.stderr);
+    api.log("warn", "Roadie uninstall of slskd: " + roadieRemove.error, "slskd");
+    render();
+    return;
+  }
+  api.log("info", "slskd removed through Roadie" + (keepData ? " (settings kept)" : ""), "slskd");
+  // Roadie said it's gone, so don't wait for the next status read to agree:
+  // a stale "installed" would keep pointing the plugin at a dead address.
+  webLogin = null;
+  downloadsDir = null;
+  await releaseRoadieConnection();
+  await probeRoadie(true);
+  await refreshReadiness();
+  render();
 }
 
 async function setRoadieAutostart(on) {
@@ -3237,8 +3315,10 @@ async function setRoadieAutostart(on) {
 
 // A Roadie command in flight (its latest line and percent), or the last one's
 // failure, which stays until the next attempt.
+// An uninstall shows under its own button (roadieRemoveRows), not here.
 function roadieJobNodes() {
   var nodes = [];
+  if (roadie.job && roadie.job.kind === "uninstall") return nodes;
   if (roadie.job) {
     nodes.push(mutedText(roadie.job.line));
     if (roadie.job.percent != null) nodes.push({ type: "progress-bar", value: roadie.job.percent, max: 100 });
@@ -4765,6 +4845,17 @@ function registerActions() {
   api.ui.onAction("roadie-autostart", function (data) {
     setRoadieAutostart(!!(data && data.value)).catch(function (e) { console.error("slskd: Roadie autostart change failed:", e); });
   });
+  api.ui.onAction("roadie-remove-ask", function () {
+    roadieRemove = { asking: true, error: null };
+    render();
+  });
+  api.ui.onAction("roadie-remove-cancel", function () {
+    roadieRemove.asking = false;
+    render();
+  });
+  api.ui.onAction("roadie-remove", function (data) {
+    uninstallSlskdWithRoadie(!!(data && data.keepData)).catch(function (e) { console.error("slskd: Roadie uninstall failed:", e); });
+  });
   // Every keystroke arrives; the view re-renders only when the Install
   // button's enabled state flips.
   function setCred(key, value) {
@@ -5884,6 +5975,8 @@ return {
   _parseRoadieJson: parseRoadieJson,
   _roadieProgress: roadieProgress,
   _roadieInstallArgs: roadieInstallArgs,
+  _roadieUninstallArgs: roadieUninstallArgs,
+  _roadieRemoveRows: roadieRemoveRows,
   _roadieFailure: roadieFailure,
   _roadieHasUnusedSlskd: roadieHasUnusedSlskd,
   _newSetup: newSetup,

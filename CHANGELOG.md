@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.9.1
+
+- **Remove slskd from the plugin.** When Roadie installed your slskd, Settings → Connection has a
+  *Remove slskd…* button with the same two choices as Roadie's own window: *Remove, keep
+  settings* (your Soulseek login stays for a reinstall) or *Remove everything*. Roadie still asks
+  you in its dialog before anything is removed, and your downloads and shared folders are never
+  deleted. Once it's gone the plugin forgets the connection and returns to the setup screen; a
+  declined or failed removal says why under the button.
+
 ## 0.9.0
 
 Needs Viboplr 1.0.72 or newer, which names the owning plugin on every plugin menu item — the

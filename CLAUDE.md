@@ -103,7 +103,9 @@ Owner decisions that must hold:
   guide in `docs/`) and **Roadie**, the separate tool manager whose CLI release the host carries
   as a managed dependency (`roadie` in `dependencies.rs`, with Viboplr's own `--data-dir`). The
   plugin drives it with `api.system.exec` (`tool status` / `install --consumer viboplr` /
-  `connection` / `start`, always `--as Viboplr`). Every install is a click here plus an
+  `connection` / `start` / `uninstall [--keep-data]`, always `--as Viboplr`). Removal is offered
+  only for a slskd Roadie manages (Connection section), goes through Roadie's dialog like an
+  install, and on success forgets the managed connection straight away. Every install is a click here plus an
   approval in Roadie's dialog, and `tool connection` runs automatically only once Viboplr is
   already approved (`roadieAutoConfigAction`), because an unapproved one opens that dialog.
   Everything is feature-detected: `getDependency("roadie")` is null on hosts without it.
