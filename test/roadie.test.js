@@ -376,6 +376,50 @@ test("remove: the two choices Roadie's own window offers, then Roadie's progress
   assert.ok(JSON.stringify(other).includes('"disabled":true'), "one Roadie command at a time");
 });
 
+test("files: each place Roadie reports gets a row; the settings file is revealed, never opened", () => {
+  const rows = plugin._roadieFileRows;
+  const tool = { ...installedApproved, installDir: "/r/tools/slskd/versions/0.26.0", dataDir: "/r/tools/slskd/data",
+    logsDir: "/r/tools/slskd/logs", configFiles: [{ path: "/r/tools/slskd/data/slskd.yml", secret: true }] };
+  const out = rows(tool, true);
+  const buttons = [];
+  const walk = (n) => { if (!n || typeof n !== "object") return; if (Array.isArray(n)) return n.forEach(walk);
+    if (n.type === "button") buttons.push(n); walk(n.children); };
+  walk(out);
+  assert.deepEqual(buttons.map((b) => [b.label, b.data.path, b.data.reveal]), [
+    ["Show in folder", "/r/tools/slskd/data/slskd.yml", true],
+    ["Open folder", "/r/tools/slskd/versions/0.26.0", false],
+    ["Open folder", "/r/tools/slskd/data", false],
+    ["Open folder", "/r/tools/slskd/logs", false]
+  ]);
+  assert.deepEqual(rows(installedApproved, true), [], "an older Roadie reports no paths → no rows");
+  assert.deepEqual(rows(tool, false), [], "a host that can't open paths → no rows");
+});
+
+test("integration: Open folder goes through the host, and a failure says so", async () => {
+  const state = { tool: { ...installedApproved, dataDir: "/r/data", configFiles: [{ path: "/r/data/slskd.yml", secret: true }] } };
+  const opened = [];
+  const host = fakeHost({
+    store: { url: "http://127.0.0.1:5030", apiKey: "r".repeat(48), managedBy: "roadie" },
+    dependencies: roadieHere,
+    exec: fakeRoadie(state)
+  });
+  host.api.system.openPath = async (p) => { opened.push(["open", p]); if (p === "/r/data") throw new Error("no such folder"); };
+  host.api.system.revealPath = async (p) => { opened.push(["reveal", p]); };
+  const p = loadPlugin();
+  try {
+    await p.activate(host.api);
+    host.actions["main-tab"]({ tabId: "settings" });
+    assert.ok(lastView(host).includes('"action":"roadie-open-path"'), "rows shown for a Roadie-managed slskd");
+    await host.actions["roadie-open-path"]({ path: "/r/data/slskd.yml", reveal: true });
+    await host.actions["roadie-open-path"]({ path: "/r/data", reveal: false });
+    await until(() => host.calls.notifications.length > 0);
+    assert.deepEqual(opened, [["reveal", "/r/data/slskd.yml"], ["open", "/r/data"]]);
+    assert.match(JSON.stringify(host.calls.notifications.at(-1)), /Couldn't open \/r\/data: no such folder/);
+  } finally {
+    p.deactivate();
+  }
+});
+
 test("integration: Remove slskd uninstalls through Roadie and forgets the managed connection", async () => {
   const state = { tool: { ...installedApproved } };
   await withPlugin({

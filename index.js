@@ -3219,7 +3219,54 @@ function autostartRow(action, checked) {
 // the way to remove it.
 function roadieManagedRows() {
   if (settings.managedBy !== "roadie" || !roadie.installed || !roadie.tool || !roadie.tool.installed) return [];
-  return [autostartRow("roadie-autostart", roadie.tool.autostart)].concat(roadieRemoveRows(roadieRemove, roadie.job));
+  return [autostartRow("roadie-autostart", roadie.tool.autostart)]
+    .concat(roadieFileRows(roadie.tool, canOpenPaths()))
+    .concat(roadieRemoveRows(roadieRemove, roadie.job));
+}
+
+// ---- Where Roadie keeps slskd --------------------------------------------
+//
+// Roadie's `tool status` names the install folder, the private data folder,
+// the logs folder and the config file it renders (Roadie 0.5.0+; older ones
+// send none of it and the rows stay away). The config file is revealed in its
+// folder rather than opened: it holds the Soulseek password, and opening a
+// .yml hands it to whatever editor is associated.
+
+// Pure: the host can open and reveal local paths.
+function canOpenPaths() {
+  return !!(api && api.system && typeof api.system.openPath === "function" && typeof api.system.revealPath === "function");
+}
+
+// Pure: one row per location Roadie reported. `reveal` selects the file in
+// its folder instead of opening it.
+function roadieFileRows(tool, canOpen) {
+  if (!canOpen || !tool) return [];
+  var places = [];
+  var files = Array.isArray(tool.configFiles) ? tool.configFiles : [];
+  for (var i = 0; i < files.length; i++) {
+    if (files[i] && files[i].path) places.push({ label: files.length > 1 ? "Settings file " + (i + 1) : "Settings file", path: files[i].path, reveal: true });
+  }
+  if (tool.installDir) places.push({ label: "Installed in", path: tool.installDir, reveal: false });
+  if (tool.dataDir) places.push({ label: "Data folder", path: tool.dataDir, reveal: false });
+  if (tool.logsDir) places.push({ label: "Logs", path: tool.logsDir, reveal: false });
+  if (!places.length) return [];
+  var rows = [{ type: "settings-row", label: "slskd's files", description: "Where Roadie keeps slskd on this computer. The settings file holds your Soulseek password; Roadie rewrites it, so change settings through Roadie rather than by hand." }];
+  for (var j = 0; j < places.length; j++) {
+    var p = places[j];
+    rows.push({ type: "settings-row", label: p.label, description: p.path });
+    rows.push(buttonRow([actionButton(p.reveal ? "Show in folder" : "Open folder", "roadie-open-path", "secondary", { data: { path: p.path, reveal: p.reveal } })]));
+  }
+  return rows;
+}
+
+async function openRoadiePath(path, reveal) {
+  try {
+    if (reveal) await api.system.revealPath(path);
+    else await api.system.openPath(path);
+  } catch (e) {
+    console.error("slskd: couldn't open " + path + ":", e);
+    api.ui.showNotification("Couldn't open " + path + ": " + String(e && e.message || e));
+  }
 }
 
 // ---- Removing slskd through Roadie ---------------------------------------
@@ -4845,6 +4892,10 @@ function registerActions() {
   api.ui.onAction("roadie-autostart", function (data) {
     setRoadieAutostart(!!(data && data.value)).catch(function (e) { console.error("slskd: Roadie autostart change failed:", e); });
   });
+  api.ui.onAction("roadie-open-path", function (data) {
+    if (!data || !data.path || !canOpenPaths()) return;
+    openRoadiePath(String(data.path), !!data.reveal).catch(function (e) { console.error("slskd: open path failed:", e); });
+  });
   api.ui.onAction("roadie-remove-ask", function () {
     roadieRemove = { asking: true, error: null };
     render();
@@ -5977,6 +6028,7 @@ return {
   _roadieInstallArgs: roadieInstallArgs,
   _roadieUninstallArgs: roadieUninstallArgs,
   _roadieRemoveRows: roadieRemoveRows,
+  _roadieFileRows: roadieFileRows,
   _roadieFailure: roadieFailure,
   _roadieHasUnusedSlskd: roadieHasUnusedSlskd,
   _newSetup: newSetup,

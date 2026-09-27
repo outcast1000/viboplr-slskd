@@ -105,7 +105,10 @@ Owner decisions that must hold:
   plugin drives it with `api.system.exec` (`tool status` / `install --consumer viboplr` /
   `connection` / `start` / `uninstall [--keep-data]`, always `--as Viboplr`). Removal is offered
   only for a slskd Roadie manages (Connection section), goes through Roadie's dialog like an
-  install, and on success forgets the managed connection straight away. Every install is a click here plus an
+  install, and on success forgets the managed connection straight away.
+  The same section lists slskd's files from `tool status` (`configFiles`, `installDir`, `dataDir`,
+  `logsDir` — Roadie 0.5.0+, rows absent before) with `api.system.openPath` / `revealPath`; the
+  config file is only ever *revealed*, since it holds the Soulseek password. Every install is a click here plus an
   approval in Roadie's dialog, and `tool connection` runs automatically only once Viboplr is
   already approved (`roadieAutoConfigAction`), because an unapproved one opens that dialog.
   Everything is feature-detected: `getDependency("roadie")` is null on hosts without it.

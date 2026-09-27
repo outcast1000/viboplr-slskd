@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9.2
+
+- **See where slskd lives.** When Roadie installed your slskd, Settings → Connection lists its
+  files: the settings file (*Show in folder*), the install folder, Roadie's data folder for it and
+  its logs (*Open folder*). The settings file is only ever shown in its folder, never opened: it
+  holds your Soulseek password, and Roadie rewrites it, so change settings through Roadie. Needs
+  Roadie 0.5.0, which Viboplr fetches on its own; with an older Roadie the list stays hidden.
+
 ## 0.9.1
 
 - **Remove slskd from the plugin.** When Roadie installed your slskd, Settings → Connection has a
