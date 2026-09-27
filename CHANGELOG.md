@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.9.4
+
+- **Your local collections are shared by default, old installs included.** New installs already
+  shared them; an slskd installed before Roadie 0.3.0, or a collection added since, was left out.
+  The slskd card now lists what isn't shared yet with a *Share…* button. Roadie's dialog shows the
+  folders before anything becomes public, and once you approve, slskd is asked to rescan so the
+  files count right away. The "not sharing any folders" warning offers the same button.
+- **A calmer screen when slskd isn't ready.** For the slskd Roadie runs, the problem and its fix sit
+  on top, and everything else is one short "slskd from Roadie" card: address and Test, start at
+  login, sharing, slskd's files (folded), connection details (folded: Roadie filled them in, and
+  editing them stops using Roadie's slskd), and Remove last. The Settings tab uses the same card.
+
 ## 0.9.3
 
 - **"slskd rejected the API key" now fixes itself in one click when Roadie has slskd.** A key

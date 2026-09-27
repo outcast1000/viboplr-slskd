@@ -115,7 +115,16 @@ Owner decisions that must hold:
   "Key rejected" + an approved Roadie slskd offers *Use Roadie's slskd* (`roadie-connect`) — never
   auto-adopt over a typed address. "Signed out" on Roadie's slskd reads the reason from
   `tool logs` (1000 lines; a refused key logs a warning a minute) and offers `tool restart`: a
-  **kick** ("another client logged in using the same username") is final until slskd restarts. Every install is a click here plus an
+  **kick** ("another client logged in using the same username") is final until slskd restarts.
+  For Roadie's slskd the Connection section is the **"slskd from Roadie" card**
+  (`roadieConnectionSection`): address + Test, start at login, **Sharing**, files (folded), connection
+  details (folded; the address/key form, since typing into it ends Roadie's management), Remove last.
+  **Sharing:** every local collection is shared by default — the install sends them, and an older
+  install or a collection added later shows up as a gap (`shareGap`) on the card with *Share…*,
+  which re-runs `tool install slskd --set shares.directories=[current ∪ gap]` (adds only). Roadie's
+  dialog lists the folders, so the plugin never raises it unprompted; after approval the plugin
+  `PUT /api/v0/shares` once slskd is signed in again (`rescanPending`), because slskd can restore
+  an empty share cache from backup instead of scanning. Every install is a click here plus an
   approval in Roadie's dialog, and `tool connection` runs automatically only once Viboplr is
   already approved (`roadieAutoConfigAction`), because an unapproved one opens that dialog.
   Everything is feature-detected: `getDependency("roadie")` is null on hosts without it.

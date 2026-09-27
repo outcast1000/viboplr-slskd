@@ -1414,14 +1414,17 @@ async function refreshReadiness() {
   }
 
   if (next.state === "ready" && !downloadsDir) await loadDownloadsDir();
-  if (next.state === "ready") await loadCollections();
+  if (next.state === "ready" || settings.managedBy === "roadie") await loadCollections();
+  await rescanSharesIfPending();
 
   // Sharing drives queue priority. A leeching setup produces slow downloads that
   // read as "this plugin is broken", so say it once, informationally.
   if (next.state === "ready" && readiness.shareCount === 0 && !sharesWarned) {
     sharesWarned = true;
     await api.storage.set("sharesWarned", true);
-    api.ui.showNotification("slskd isn't sharing any folders. Soulseek prioritises users who share, so downloads may be slow or queue for a long time.");
+    var canShare = settings.managedBy === "roadie" && shareGap(localCollections, roadie.tool).length > 0;
+    api.ui.showNotification("slskd isn't sharing any folders. Soulseek prioritises users who share, so downloads may be slow or queue for a long time.",
+      canShare ? { action: { label: "Share collections", id: "roadie-share-collections" } } : undefined);
   }
 
   render();
@@ -3208,6 +3211,121 @@ function roadieInstallSection() {
   };
 }
 
+// ---- Sharing the user's collections through Roadie ----------------------
+//
+// New installs share every local collection (the install form's switch, on
+// by default). An slskd installed before Roadie opened `shares.directories`
+// (0.3.0), or a collection added since, is left out; the card says which and
+// offers one click. The click is an install request for the same slskd with
+// the new folder list, so Roadie's dialog shows the folders before anything
+// is shared: nothing becomes public without that approval, and the plugin
+// never raises the dialog on its own.
+
+// Pure: a path with its trailing separators dropped, for comparing folders.
+function trimDir(p) {
+  var s = String(p || "");
+  while (s.length > 1 && /[\\/]$/.test(s)) s = s.slice(0, -1);
+  return s;
+}
+
+// Pure: `path` is `dir` or inside it.
+function isUnder(path, dir) {
+  var a = trimDir(path), b = trimDir(dir);
+  if (!a || !b) return false;
+  return a === b || a.indexOf(b + "/") === 0 || a.indexOf(b + "\\") === 0;
+}
+
+// Pure: the collection folders slskd doesn't share yet, given what Roadie
+// shares (its `shares.directories`) and, when shared, the downloads folder.
+function shareGap(collections, tool) {
+  if (!tool || !roadieCanShareDirs(tool)) return [];
+  var shared = (tool.config["shares.directories"] || []).slice();
+  if (tool.config.shareDownloads && tool.config.downloadsDir) shared.push(tool.config.downloadsDir);
+  return collectionPaths(collections).filter(function (p) {
+    return !shared.some(function (d) { return isUnder(p, d); });
+  });
+}
+
+// Pure: the list sent to Roadie: what it shares now plus the gap. Adding
+// only: a folder the user shared some other way is never dropped.
+function sharedDirsWith(tool, gap) {
+  var current = (tool && tool.config && tool.config["shares.directories"]) || [];
+  var out = current.slice();
+  for (var i = 0; i < gap.length; i++) if (out.indexOf(gap[i]) < 0) out.push(gap[i]);
+  return out;
+}
+
+// { error } of the last attempt, shown on the row until the next one.
+var roadieShare = { error: null };
+// A rescan owed to slskd once it answers again: Roadie restarts it with the
+// new folders, and it may restore its share list from a backup instead of
+// scanning them.
+var rescanPending = false;
+
+// Pure: the Sharing row(s) on the card.
+function sharingRows(tool, collections, job, share) {
+  if (!tool || !roadieCanShareDirs(tool)) return [];
+  if (job && job.kind === "share") {
+    var running = [mutedText(job.line)];
+    if (job.cancel) running.push(buttonRow([actionButton("Cancel", "roadie-cancel")]));
+    return running;
+  }
+  var gap = shareGap(collections, tool);
+  var rows;
+  if (gap.length) {
+    rows = [optionRow("Sharing", "Not shared yet: " + describeFolders(gap) + ". Everyone on Soulseek can browse and download what you share, and Soulseek serves people who share first.",
+      actionButton("Share…", "roadie-share-collections", "accent", { disabled: !!job }))];
+  } else {
+    var dirs = sharedDirsWith(tool, []);
+    if (tool.config.shareDownloads && tool.config.downloadsDir) dirs = [tool.config.downloadsDir].concat(dirs);
+    rows = [{ type: "settings-row", label: "Sharing", description: dirs.length ? "Shared: " + describeFolders(dirs) + "." : "Nothing is shared." }];
+  }
+  if (share && share.error) rows.push(mutedText("Roadie: " + share.error));
+  return rows;
+}
+
+async function shareCollectionsWithRoadie() {
+  await loadCollections();
+  var tool = roadie.tool;
+  var gap = shareGap(localCollections, tool);
+  if (!gap.length) { render(); return; }
+  roadieShare = { error: null };
+  var args = ["tool", "install", "slskd", "--set", SHARES_ENTRY + "=" + JSON.stringify(sharedDirsWith(tool, gap))];
+  var r;
+  try {
+    r = await runRoadieJob("share", args, "Waiting for you to approve it in Roadie's dialog…");
+  } catch (e) {
+    console.error("slskd: Roadie share change failed:", e);
+    roadieShare.error = String(e && e.message || e);
+    render();
+    return;
+  }
+  if (!r) return;
+  if (r.code !== 0) {
+    roadieShare.error = roadieFailure(r.code, r.json, r.stderr);
+    api.log("warn", "Roadie share change: " + roadieShare.error, "slskd");
+    render();
+    return;
+  }
+  api.log("info", "sharing " + gap.length + " more folder(s) through Roadie", "slskd");
+  rescanPending = true;
+  await probeRoadie(true);
+  await refreshReadiness();
+}
+
+// Ask slskd to scan its shares; once, after a change, when it is signed in.
+async function rescanSharesIfPending() {
+  if (!rescanPending || readiness.state !== "ready") return;
+  rescanPending = false;
+  try {
+    var res = await slskd("PUT", "/api/v0/shares");
+    if (res.status >= 300) console.error("slskd: share rescan answered HTTP " + res.status);
+    else api.log("info", "asked slskd to rescan its shares", "slskd");
+  } catch (e) {
+    console.error("slskd: share rescan failed:", e);
+  }
+}
+
 // Pure: "/Users/a/Music, D:\\Rock and 3 more" — the folders by name, briefly.
 function describeFolders(paths) {
   var shown = paths.slice(0, 3).join(", ");
@@ -3240,9 +3358,15 @@ function roadieManagedRows() {
   if (!roadie.installed || !roadie.tool || !roadie.tool.installed) return [];
   var managed = settings.managedBy === "roadie";
   return (managed ? [autostartRow("roadie-autostart", roadie.tool.autostart)] : [])
-    .concat(roadieFileRows(roadie.tool, canOpenPaths()))
+    .concat(roadieFileRows(roadie.tool, canOpenPaths(), roadieShowFiles))
     .concat(managed ? roadieRemoveRows(roadieRemove, roadie.job) : []);
 }
+
+// What the Connection section folds away: the file list, and (for Roadie's
+// slskd) the address/key form Roadie filled in. Both stay out of the way of
+// the one thing a not-ready screen is for, which is the fix at the top.
+var roadieShowFiles = false;
+var roadieShowDetails = false;
 
 // Pure: the address the plugin talks to is Roadie's slskd: a loopback host
 // on the port Roadie reports. "localhost:5030" typed by hand and Roadie's
@@ -3317,10 +3441,10 @@ function canOpenPaths() {
   return !!(api && api.system && typeof api.system.openPath === "function" && typeof api.system.revealPath === "function");
 }
 
-// Pure: one row per location Roadie reported. `reveal` selects the file in
-// its folder instead of opening it.
-function roadieFileRows(tool, canOpen) {
-  if (!canOpen || !tool) return [];
+// Pure: the locations Roadie reported, in the order a user looks for them.
+// `reveal` selects the file in its folder instead of opening it.
+function roadieFilePlaces(tool) {
+  if (!tool) return [];
   var places = [];
   var files = Array.isArray(tool.configFiles) ? tool.configFiles : [];
   for (var i = 0; i < files.length; i++) {
@@ -3329,12 +3453,23 @@ function roadieFileRows(tool, canOpen) {
   if (tool.installDir) places.push({ label: "Installed in", path: tool.installDir, reveal: false });
   if (tool.dataDir) places.push({ label: "Data folder", path: tool.dataDir, reveal: false });
   if (tool.logsDir) places.push({ label: "Logs", path: tool.logsDir, reveal: false });
+  return places;
+}
+
+// Pure: one folded row, and when `open` one row per location with its button
+// on the row itself.
+function roadieFileRows(tool, canOpen, open) {
+  if (!canOpen) return [];
+  var places = roadieFilePlaces(tool);
   if (!places.length) return [];
-  var rows = [{ type: "settings-row", label: "slskd's files", description: "Where Roadie keeps slskd on this computer. The settings file holds your Soulseek password; Roadie rewrites it, so change settings through Roadie rather than by hand." }];
+  var rows = [optionRow("slskd's files", open ? "Where Roadie keeps slskd on this computer." : "Install folder, settings file, data and logs.",
+    actionButton(open ? "Hide" : "Show", "roadie-files-toggle"))];
+  if (!open) return rows;
   for (var j = 0; j < places.length; j++) {
     var p = places[j];
-    rows.push({ type: "settings-row", label: p.label, description: p.path });
-    rows.push(buttonRow([actionButton(p.reveal ? "Show in folder" : "Open folder", "roadie-open-path", "secondary", { data: { path: p.path, reveal: p.reveal } })]));
+    var desc = p.reveal ? p.path + " — holds your Soulseek password, and Roadie rewrites it: change settings through Roadie, not here." : p.path;
+    rows.push(optionRow(p.label, desc,
+      actionButton(p.reveal ? "Show in folder" : "Open folder", "roadie-open-path", "secondary", { data: { path: p.path, reveal: p.reveal } })));
   }
   return rows;
 }
@@ -3380,10 +3515,8 @@ function roadieRemoveRows(rm, job) {
       ])
     ];
   }
-  var rows = [
-    { type: "settings-row", label: "Remove slskd", description: "Roadie installed slskd, so Roadie removes it. It asks you first." },
-    buttonRow([actionButton("Remove slskd…", "roadie-remove-ask", "secondary", { disabled: !!job })])
-  ];
+  var rows = [optionRow("Remove slskd", "Roadie installed it, so Roadie removes it. It asks you first.",
+    actionButton("Remove…", "roadie-remove-ask", "secondary", { disabled: !!job }))];
   if (rm.error) rows.push(mutedText("Roadie: " + rm.error));
   return rows;
 }
@@ -3442,10 +3575,10 @@ async function setRoadieAutostart(on) {
 
 // A Roadie command in flight (its latest line and percent), or the last one's
 // failure, which stays until the next attempt.
-// An uninstall shows under its own button (roadieRemoveRows), not here.
+// An uninstall or a share change shows on its own row, not here.
 function roadieJobNodes() {
   var nodes = [];
-  if (roadie.job && roadie.job.kind === "uninstall") return nodes;
+  if (roadie.job && (roadie.job.kind === "uninstall" || roadie.job.kind === "share")) return nodes;
   if (roadie.job) {
     nodes.push(mutedText(roadie.job.line));
     if (roadie.job.percent != null) nodes.push({ type: "progress-bar", value: roadie.job.percent, max: 100 });
@@ -3660,7 +3793,6 @@ function setupView() {
     children.push({ type: "loading", message: "slskd is connecting to Soulseek…" });
   }
   children = children.concat(roadieJobNodes());
-  children.push({ type: "spacer" });
   children.push(connectionSection());
   var webPage = webPageSection();
   if (webPage) children.push(webPage);
@@ -3716,11 +3848,9 @@ function ensureSetupKey() {
   api.storage.set("apiKey", settings.apiKey).catch(function (e) { console.error("slskd: couldn't save apiKey:", e); });
 }
 
-function connectionSection() {
-  return {
-    type: "section",
-    title: "Connection",
-    children: roadieManagedRows().concat([
+// Pure: the address/key form, for a slskd the user runs, or unfolded.
+function connectionFormRows() {
+  return [
       { type: "settings-row", label: "slskd address", description: "e.g. http://localhost:5030",
         control: { type: "text-input", placeholder: "http://localhost:5030", action: "set-url", value: settings.url } },
       { type: "settings-row", label: "API key", description: "Must appear in slskd.yml under web → authentication → api_keys. The setup guide writes it in for you.",
@@ -3731,9 +3861,35 @@ function connectionSection() {
           { label: "Test connection", action: "test-connection", variant: "accent" },
           { label: "Open setup guide", action: "setup-open-guide", variant: "secondary" }
         ],
-        status: statusLine(), statusVariant: readiness.state === "ready" ? "success" : (readiness.state === "connecting" || readiness.state === "unconfigured" ? "default" : "error") }
-    ])
-  };
+        status: statusLine(), statusVariant: statusVariant() }
+  ];
+}
+
+function statusVariant() {
+  var st = readiness.state;
+  return st === "ready" ? "success" : (st === "connecting" || st === "unconfigured" ? "default" : "error");
+}
+
+function connectionSection() {
+  if (settings.managedBy === "roadie" && roadie.installed && roadie.tool && roadie.tool.installed) return roadieConnectionSection();
+  return { type: "section", title: "Connection", children: roadieManagedRows().concat(connectionFormRows()) };
+}
+
+// A slskd Roadie runs for this plugin: Roadie filled in the address and key,
+// so the form is folded away (typing into it ends Roadie's management) and
+// the card is what Roadie can do: test, start at login, files, remove.
+function roadieConnectionSection() {
+  // Remove goes last: the one destructive row sits below everything else.
+  var rows = [optionRow("Address", settings.url + " · " + statusLine(), actionButton("Test", "test-connection")),
+    autostartRow("roadie-autostart", roadie.tool.autostart)]
+    .concat(sharingRows(roadie.tool, localCollections, roadie.job, roadieShare))
+    .concat(roadieFileRows(roadie.tool, canOpenPaths(), roadieShowFiles))
+    .concat([optionRow("Connection details", roadieShowDetails
+      ? "Roadie filled these in. Changing them stops using Roadie's slskd."
+      : "The address and key Roadie handed over.", actionButton(roadieShowDetails ? "Hide" : "Show", "roadie-details-toggle"))]);
+  if (roadieShowDetails) rows = rows.concat(connectionFormRows());
+  rows = rows.concat(roadieRemoveRows(roadieRemove, roadie.job));
+  return { type: "section", title: "slskd from Roadie", children: rows };
 }
 
 // ---- slskd's own web page -----------------------------------------------
@@ -4523,7 +4679,7 @@ function settingsTab() {
     });
   }
 
-  if (readiness.state === "ready" && readiness.shareCount === 0) {
+  if (readiness.state === "ready" && readiness.shareCount === 0 && !(settings.managedBy === "roadie" && roadieCanShareDirs(roadie.tool))) {
     children.push({
       type: "section",
       title: "Sharing",
@@ -5004,6 +5160,17 @@ function registerActions() {
   });
   api.ui.onAction("roadie-autostart", function (data) {
     setRoadieAutostart(!!(data && data.value)).catch(function (e) { console.error("slskd: Roadie autostart change failed:", e); });
+  });
+  api.ui.onAction("roadie-share-collections", function () {
+    shareCollectionsWithRoadie().catch(function (e) { console.error("slskd: sharing collections failed:", e); });
+  });
+  api.ui.onAction("roadie-files-toggle", function () {
+    roadieShowFiles = !roadieShowFiles;
+    render();
+  });
+  api.ui.onAction("roadie-details-toggle", function () {
+    roadieShowDetails = !roadieShowDetails;
+    render();
   });
   api.ui.onAction("roadie-restart", function () {
     restartSlskdWithRoadie().catch(function (e) { console.error("slskd: Roadie restart failed:", e); });
@@ -6145,6 +6312,10 @@ return {
   _roadieUninstallArgs: roadieUninstallArgs,
   _roadieRemoveRows: roadieRemoveRows,
   _roadieFileRows: roadieFileRows,
+  _roadieFilePlaces: roadieFilePlaces,
+  _shareGap: shareGap,
+  _sharedDirsWith: sharedDirsWith,
+  _sharingRows: sharingRows,
   _roadieOwnsAddress: roadieOwnsAddress,
   _unauthorizedNodes: unauthorizedNodes,
   _disconnectedNodes: disconnectedNodes,

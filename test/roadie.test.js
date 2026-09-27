@@ -98,6 +98,17 @@ function fakeRoadie(state) {
       return { exitCode: 0, stdout: JSON.stringify(state.tool), stderr: "" };
     }
     if (cmd[0] === "tool" && cmd[1] === "logs") return { exitCode: 0, stdout: JSON.stringify({ lines: state.logLines || [] }), stderr: "" };
+    if (cmd[0] === "tool" && cmd[1] === "install" && state.tool && state.tool.installed) {
+      state.reinstallArgs = cmd;
+      if (opts && opts.onStart) opts.onStart({ cancel() { state.cancelled = true; } });
+      opts && opts.onOutput && opts.onOutput("roadie: asking the user in a dialog…", "stderr");
+      if (state.decline) return { exitCode: 2, stdout: JSON.stringify({ status: "declined" }), stderr: "" };
+      const i = cmd.indexOf("--set");
+      const kv = cmd[i + 1];
+      const eq = kv.indexOf("=");
+      state.tool = { ...state.tool, config: { ...state.tool.config, [kv.slice(0, eq)]: JSON.parse(kv.slice(eq + 1)) } };
+      return { exitCode: 0, stdout: JSON.stringify({ status: "done" }), stderr: "" };
+    }
     if (cmd[0] === "tool" && cmd[1] === "install") {
       state.installArgs = cmd;
       if (opts && opts.onStart) opts.onStart({ cancel() { state.cancelled = true; } });
@@ -385,19 +396,21 @@ test("files: each place Roadie reports gets a row; the settings file is revealed
   const rows = plugin._roadieFileRows;
   const tool = { ...installedApproved, installDir: "/r/tools/slskd/versions/0.26.0", dataDir: "/r/tools/slskd/data",
     logsDir: "/r/tools/slskd/logs", configFiles: [{ path: "/r/tools/slskd/data/slskd.yml", secret: true }] };
-  const out = rows(tool, true);
+  assert.deepEqual(clickable(rows(tool, true, false)), ["roadie-files-toggle"], "folded: one row, one Show");
+  const out = rows(tool, true, true);
   const buttons = [];
   const walk = (n) => { if (!n || typeof n !== "object") return; if (Array.isArray(n)) return n.forEach(walk);
-    if (n.type === "button") buttons.push(n); walk(n.children); };
+    if (n.type === "button" && n.action === "roadie-open-path") buttons.push(n); walk(n.children); walk(n.control); };
   walk(out);
+  assert.equal(out.length, 5, "one row per place plus the toggle; buttons ride on the rows");
   assert.deepEqual(buttons.map((b) => [b.label, b.data.path, b.data.reveal]), [
     ["Show in folder", "/r/tools/slskd/data/slskd.yml", true],
     ["Open folder", "/r/tools/slskd/versions/0.26.0", false],
     ["Open folder", "/r/tools/slskd/data", false],
     ["Open folder", "/r/tools/slskd/logs", false]
   ]);
-  assert.deepEqual(rows(installedApproved, true), [], "an older Roadie reports no paths → no rows");
-  assert.deepEqual(rows(tool, false), [], "a host that can't open paths → no rows");
+  assert.deepEqual(rows(installedApproved, true, true), [], "an older Roadie reports no paths → no rows");
+  assert.deepEqual(rows(tool, false, true), [], "a host that can't open paths → no rows");
 });
 
 test("integration: Open folder goes through the host, and a failure says so", async () => {
@@ -414,6 +427,8 @@ test("integration: Open folder goes through the host, and a failure says so", as
   try {
     await p.activate(host.api);
     host.actions["main-tab"]({ tabId: "settings" });
+    assert.ok(!lastView(host).includes('"action":"roadie-open-path"'), "folded until asked");
+    host.actions["roadie-files-toggle"]();
     assert.ok(lastView(host).includes('"action":"roadie-open-path"'), "rows shown for a Roadie-managed slskd");
     await host.actions["roadie-open-path"]({ path: "/r/data/slskd.yml", reveal: true });
     await host.actions["roadie-open-path"]({ path: "/r/data", reveal: false });
@@ -808,7 +823,7 @@ test("integration: the owner's case — a guide key on Roadie's slskd, then a ki
     await until(() => lastView(host).includes("slskd rejected the API key"));
     const v = lastView(host);
     assert.ok(v.includes('"action":"roadie-connect"'), "offers Roadie's slskd");
-    assert.ok(v.includes('"action":"roadie-open-path"'), "and shows where Roadie keeps it, though not connected through Roadie");
+    assert.ok(v.includes('"action":"roadie-files-toggle"'), "and offers where Roadie keeps it, though not connected through Roadie");
     assert.ok(!v.includes('"action":"roadie-remove-ask"'), "Remove stays with a Roadie-managed connection");
 
     await host.actions["roadie-connect"]();
@@ -824,5 +839,80 @@ test("integration: the owner's case — a guide key on Roadie's slskd, then a ki
     await until(() => !lastView(host).includes("isn't signed in"));
     assert.equal(state.restartCalls, 1);
     assert.ok(!lastView(host).includes("isn't signed in"), "signed in after the restart");
+  });
+});
+
+test("Roadie's slskd, signed out: the fix on top, one short card, no address/key form", async () => {
+  const state = { tool: { ...installedApproved, config: { soulseekUsername: "outcast1000" },
+    installDir: "/r/versions/0.26.0", dataDir: "/r/data", logsDir: "/r/logs", configFiles: [{ path: "/r/data/slskd.yml", secret: true }] },
+    logLines: LOG_KICKED };
+  await withPlugin({
+    store: { url: "http://127.0.0.1:5030", apiKey: "r".repeat(48), managedBy: "roadie" },
+    dependencies: roadieHere,
+    exec: fakeRoadie(state),
+    responses: { "/api/v0/application": { server: { state: "Disconnected", isLoggedIn: false, isTransitioning: false }, version: { current: "0.26.0" } } }
+  }, async (host) => {
+    await until(() => lastView(host).includes("another app signed in"));
+    const view = host.calls.views.filter((v) => v.viewId === "slskd-browse").at(-1).data;
+    assert.deepEqual(clickable(view), ["roadie-restart", "open-slskd", "test-connection", "roadie-files-toggle",
+      "roadie-details-toggle", "roadie-remove-ask", "open-slskd", "slskd-show-login"], "fix, then the card top to bottom, Remove last");
+    const text = JSON.stringify(view);
+    assert.ok(text.includes('"title":"slskd from Roadie"'));
+    assert.ok(!text.includes('"action":"set-url"') && !text.includes('"action":"set-key"'), "no address/key form until Connection details is opened");
+    host.actions["roadie-details-toggle"]();
+    assert.ok(lastView(host).includes('"action":"set-key"'), "the form is one click away");
+  });
+});
+
+const sharingTool = (dirs, extra) => ({ ...installedApproved,
+  config: { downloadsDir: "/Users/a/Music/Soulseek", shareDownloads: true, soulseekUsername: "bj", "shares.directories": dirs }, ...(extra || {}) });
+
+test("sharing: the gap is the collections slskd doesn't cover yet", () => {
+  const gap = plugin._shareGap;
+  const cols = [{ id: 1, name: "Downloads", path: "/Users/a/Downloads" }, { id: 2, name: "Music", path: "/Volumes/NAS/Music/" }];
+  assert.deepEqual(gap(cols, sharingTool([])), ["/Users/a/Downloads", "/Volumes/NAS/Music/"]);
+  assert.deepEqual(gap(cols, sharingTool(["/Volumes/NAS/Music"])), ["/Users/a/Downloads"], "trailing slash is the same folder");
+  assert.deepEqual(gap(cols, sharingTool(["/Users/a"])), ["/Volumes/NAS/Music/"], "inside a shared folder is shared");
+  assert.deepEqual(gap([{ path: "/Users/a/Music/Soulseek/rock" }], sharingTool([])), [], "inside the shared downloads folder");
+  assert.deepEqual(gap(cols, { ...installedApproved, config: {} }), [], "a Roadie without the setting → nothing to offer");
+  assert.deepEqual(plugin._sharedDirsWith(sharingTool(["/x"]), ["/y", "/x"]), ["/x", "/y"], "adds, never drops");
+});
+
+test("sharing row: offers the gap, then says what's shared; a running change shows on the row", () => {
+  const rows = plugin._sharingRows;
+  const cols = [{ path: "/Users/a/Downloads" }];
+  const offer = rows(sharingTool([]), cols, null, { error: null });
+  assert.deepEqual(clickable(offer), ["roadie-share-collections"]);
+  assert.ok(JSON.stringify(offer).includes("Not shared yet: /Users/a/Downloads"));
+  const done = rows(sharingTool(["/Users/a/Downloads"]), cols, null, { error: null });
+  assert.deepEqual(clickable(done), []);
+  assert.ok(JSON.stringify(done).includes("Shared: /Users/a/Music/Soulseek, /Users/a/Downloads"));
+  assert.deepEqual(clickable(rows(sharingTool([]), cols, { kind: "share", line: "Waiting…", cancel() {} }, { error: null })), ["roadie-cancel"]);
+  assert.ok(JSON.stringify(rows(sharingTool([]), cols, null, { error: "You declined it in Roadie's dialog." })).includes("Roadie: You declined"));
+});
+
+test("integration: Share… sends Roadie the folder list, then slskd is asked to rescan", async () => {
+  const state = { tool: sharingTool([]) };
+  const puts = [];
+  await withPlugin({
+    store: { url: "http://127.0.0.1:5030", apiKey: "r".repeat(48), managedBy: "roadie" },
+    dependencies: roadieHere,
+    exec: fakeRoadie(state),
+    collections: [{ id: 1, name: "Downloads", path: "/Users/a/Downloads" }],
+    fetch: async (url, init) => {
+      if (url.includes("/api/v0/shares") && init && init.method === "PUT") { puts.push(url); return { status: 204, text: async () => "" }; }
+      return undefined;
+    }
+  }, async (host) => {
+    host.actions["main-tab"]({ tabId: "settings" });
+    await until(() => lastView(host).includes('"action":"roadie-share-collections"'));
+    assert.ok(lastView(host).includes("Not shared yet: /Users/a/Downloads"));
+    await host.actions["roadie-share-collections"]();
+    await until(() => puts.length > 0);
+    assert.deepEqual(state.reinstallArgs, ["tool", "install", "slskd", "--set", 'shares.directories=["/Users/a/Downloads"]']);
+    assert.equal(puts.length, 1, "one rescan after the change");
+    assert.ok(!lastView(host).includes('"action":"roadie-share-collections"'), "nothing left to share");
+    assert.ok(lastView(host).includes("Shared: /Users/a/Music/Soulseek, /Users/a/Downloads"));
+    assert.equal(host.calls.notifications.length, 0, "success is the row changing");
   });
 });
