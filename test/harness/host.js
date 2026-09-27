@@ -14,7 +14,7 @@ function fakeHost(opts) {
   const actions = {};
   const tools = {};
   const resolvers = {};
-  const calls = { requestAction: [], notifications: [], notices: [], navigated: [], badges: [], resync: [], played: [], fetched: [], views: [], exec: [] };
+  const calls = { requestAction: [], notifications: [], notices: [], navigated: [], badges: [], resync: [], played: [], fetched: [], views: [], exec: [], opened: [] };
   const responses = Object.assign({
     "/api/v0/application": {
       server: { state: "Connected, LoggedIn", isLoggedIn: true, isTransitioning: false, username: "me" },
@@ -86,7 +86,11 @@ function fakeHost(opts) {
     // host that doesn't know the binary); `o.exec(program, args, opts)` answers
     // api.system.exec. Every exec is logged in `calls.exec`.
     system: Object.assign(
-      { readAudioTags: async (paths) => paths.map(() => null) },
+      {
+        readAudioTags: async (paths) => paths.map(() => null),
+        openPath: async (p) => { calls.opened.push(["open", p]); },
+        revealPath: async (p) => { calls.opened.push(["reveal", p]); }
+      },
       o.dependencies ? { getDependency: async (name) => (o.dependencies[name] !== undefined ? o.dependencies[name] : null) } : {},
       o.exec ? {
         exec: async (program, args, execOpts) => {

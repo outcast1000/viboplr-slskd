@@ -1373,7 +1373,7 @@ async function refreshReadiness() {
   // A Roadie-managed slskd is asked even when ready (cached, one short exec
   // a minute at most): its port can move, and Settings shows its login-item
   // choice.
-  if (p.kind !== "ok" || settings.managedBy === "roadie") {
+  if (p.kind !== "ok" || settings.managedBy === "roadie" || p.isLoggedIn === false) {
     try {
       await probeRoadie();
       if (await reconcileRoadie()) p = await probe();
@@ -1405,6 +1405,13 @@ async function refreshReadiness() {
     notifiedState = next.state;
   }
   if (!next.notify && next.changed) notifiedState = null;
+
+  try {
+    await refreshSigninWhy();
+  } catch (e) {
+    console.error("slskd: couldn't read why slskd is signed out:", e);
+    signinWhy = null;
+  }
 
   if (next.state === "ready" && !downloadsDir) await loadDownloadsDir();
   if (next.state === "ready") await loadCollections();
@@ -2941,12 +2948,20 @@ function signinProgress(serverState, secs) {
 
 // Pure: the reason slskd's own log gives for not signing in, newest first,
 // as { kind, message } — or null when the log says nothing we can name.
-// "rejected" is final (slskd won't get in by retrying); "network" is what a
-// VPN or firewall looks like from here.
+// "rejected" is final (slskd won't get in by retrying); "kicked" means
+// another client signed in with the same account, and slskd does not sign in
+// again by itself after that; "network" is what a VPN or firewall looks like
+// from here. A sign-in newer than any failure means the failure is history.
 function signinReasonFromLog(lines, username) {
   var list = Array.isArray(lines) ? lines : [];
   for (var i = list.length - 1; i >= 0; i--) {
     var l = String(list[i] || "");
+    if (/Logged in to the Soulseek server/i.test(l)) return null;
+    // Checked before the network case: the line starts "Disconnected from
+    // the Soulseek server" too, and was once reported as a firewall.
+    if (/another client logged in using the same username/i.test(l)) {
+      return { kind: "kicked", message: "Soulseek signed slskd out because another app signed in" + (username ? " as " + username : "") + " (Nicotine+, SoulseekQt, or slskd on another computer). Soulseek allows one sign-in per account: close the other one or give it a different account, then restart slskd. slskd doesn't sign in again by itself after this." };
+    }
     if (/INVALIDPASS|rejected (the )?login|invalid (user(name)?|password)/i.test(l)) {
       return { kind: "rejected", message: "The Soulseek server refused to sign in" + (username ? " as " + username : "") + ": the password is wrong, or someone else already uses that username." };
     }
@@ -2960,9 +2975,11 @@ function signinReasonFromLog(lines, username) {
   return null;
 }
 
+// 1000 lines: a slskd whose key is being refused writes a warning a minute,
+// which buries the sign-in lines that say what went wrong.
 async function slskdLogLines() {
   try {
-    var r = await roadieExec(["tool", "logs", "slskd", "--lines", "200"]);
+    var r = await roadieExec(["tool", "logs", "slskd", "--lines", "1000"]);
     return r.code === 0 && r.json && Array.isArray(r.json.lines) ? r.json.lines : [];
   } catch (e) {
     console.error("slskd: couldn't read slskd's log through Roadie:", e);
@@ -3214,14 +3231,77 @@ function autostartRow(action, checked) {
     control: { type: "toggle", label: "", action: action, checked: !!checked } };
 }
 
-// Rows the Connection section adds for a slskd that Roadie manages: the
-// login-item choice, changeable at any time (`roadie tool autostart`), and
-// the way to remove it.
+// Rows the Connection section adds when Roadie has slskd. Where its files
+// are is shown whenever Roadie has one, connected or not: a user stuck on a
+// rejected key is exactly the one looking for them. The login-item choice
+// (`roadie tool autostart`) and Remove only when this plugin uses Roadie's
+// slskd, since both act on that one.
 function roadieManagedRows() {
-  if (settings.managedBy !== "roadie" || !roadie.installed || !roadie.tool || !roadie.tool.installed) return [];
-  return [autostartRow("roadie-autostart", roadie.tool.autostart)]
+  if (!roadie.installed || !roadie.tool || !roadie.tool.installed) return [];
+  var managed = settings.managedBy === "roadie";
+  return (managed ? [autostartRow("roadie-autostart", roadie.tool.autostart)] : [])
     .concat(roadieFileRows(roadie.tool, canOpenPaths()))
-    .concat(roadieRemoveRows(roadieRemove, roadie.job));
+    .concat(managed ? roadieRemoveRows(roadieRemove, roadie.job) : []);
+}
+
+// Pure: the address the plugin talks to is Roadie's slskd: a loopback host
+// on the port Roadie reports. "localhost:5030" typed by hand and Roadie's
+// "127.0.0.1:5030" are the same slskd.
+function isLoopbackHost(h) {
+  return h === "localhost" || h === "127.0.0.1" || h === "::1" || h === "[::1]";
+}
+function hostPort(u) {
+  var m = /^\s*(https?):\/\/(\[[^\]]+\]|[^:\/]+)(?::(\d+))?/i.exec(String(u || ""));
+  if (!m) return null;
+  return { host: m[2].toLowerCase(), port: m[3] ? Number(m[3]) : (m[1].toLowerCase() === "https" ? 443 : 80) };
+}
+function roadieOwnsAddress(url, tool) {
+  if (!tool || !tool.installed || !tool.url) return false;
+  var a = hostPort(url), b = hostPort(tool.url);
+  return !!(a && b && a.port === b.port && isLoopbackHost(a.host) && isLoopbackHost(b.host));
+}
+
+// Pure: Roadie has an slskd it will hand this plugin a key for without asking
+// (Viboplr is already approved), so switching to it is one click.
+function roadieCanHandOver(tool) {
+  return !!(tool && tool.installed && Array.isArray(tool.approvedConsumers) && tool.approvedConsumers.indexOf(ROADIE_CONSUMER) >= 0);
+}
+
+// Why Roadie's slskd isn't signed in, read from its log on each readiness
+// pass while it isn't: { kind, message } or null.
+var signinWhy = null;
+
+async function refreshSigninWhy() {
+  if (readiness.state !== "disconnected" || !roadie.installed || !roadieOwnsAddress(settings.url, roadie.tool)) {
+    signinWhy = null;
+    return;
+  }
+  var user = roadie.tool.config && roadie.tool.config.soulseekUsername;
+  signinWhy = signinReasonFromLog(await slskdLogLines(), user ? String(user) : null);
+}
+
+// A kicked slskd stays signed out until it restarts. Quiet on success: the
+// readiness pass that follows is the answer.
+async function restartSlskdWithRoadie() {
+  var r;
+  try {
+    r = await runRoadieJob("restart", ["tool", "restart", "slskd"], "Restarting slskd…");
+  } catch (e) {
+    console.error("slskd: Roadie restart failed:", e);
+    roadie.error = String(e && e.message || e);
+    render();
+    return;
+  }
+  if (!r) return;
+  if (r.code !== 0) {
+    roadie.error = roadieFailure(r.code, r.json, r.stderr);
+    render();
+    return;
+  }
+  if (r.json && r.json.installed != null) { roadie.tool = r.json; roadie.checkedAt = Date.now(); }
+  api.log("info", "slskd restarted through Roadie", "slskd");
+  signinWhy = null;
+  await refreshReadiness();
 }
 
 // ---- Where Roadie keeps slskd --------------------------------------------
@@ -3573,16 +3653,9 @@ function setupView() {
 
   children = [];
   if (st === "unauthorized") {
-    children.push(headingText("slskd rejected the API key"));
-    children.push({ type: "text", content: "slskd is running, but its settings file doesn't list the key below. Add it under web → authentication → api_keys in slskd.yml and restart slskd — the setup guide's Configure step shows the exact lines with this key already in them." });
-    children.push({ type: "button", label: "Open setup guide", action: "setup-open-guide", variant: "accent" });
+    children = children.concat(unauthorizedNodes(settings, roadie));
   } else if (st === "disconnected") {
-    children.push(headingText("slskd isn't signed in to Soulseek"));
-    children.push({ type: "text", content: "slskd is running and the key works, but it isn't connected to the Soulseek network. Check the Soulseek username and password under soulseek: in slskd.yml (the guide's Configure step) and restart slskd, or sign in from slskd's own page." });
-    children.push({ type: "toolbar", buttons: [
-      { label: "Open setup guide", action: "setup-open-guide", variant: "accent" },
-      { label: "Open slskd", action: "open-slskd", variant: "secondary" }
-    ] });
+    children = children.concat(disconnectedNodes(settings, roadie, signinWhy));
   } else if (st === "connecting") {
     children.push({ type: "loading", message: "slskd is connecting to Soulseek…" });
   }
@@ -3592,6 +3665,46 @@ function setupView() {
   var webPage = webPageSection();
   if (webPage) children.push(webPage);
   return { type: "layout", direction: "vertical", children: children };
+}
+
+// Pure: the "key rejected" screen. When Roadie has slskd, the fix is
+// Roadie's own key, not an edit to a file Roadie rewrites.
+function unauthorizedNodes(cfg, r) {
+  var tool = r && r.installed ? r.tool : null;
+  var nodes = [headingText("slskd rejected the API key")];
+  if (roadieCanHandOver(tool)) {
+    var ours = roadieOwnsAddress(cfg.url, tool);
+    nodes.push({ type: "text", content: ours
+      ? "This is the slskd Roadie installed, and it only accepts the key Roadie gave Viboplr. The key below is a different one. Use Roadie's slskd to switch to Roadie's address and key; Viboplr is already allowed, so Roadie asks nothing."
+      : "slskd is running, but it doesn't accept the key below. Roadie also has an slskd on this computer, which Viboplr is already allowed to use: switch to it, or fix the key for this one." });
+    nodes.push(buttonRow([actionButton("Use Roadie's slskd", "roadie-connect", "accent"),
+      actionButton("Open setup guide", "setup-open-guide")]));
+    return nodes;
+  }
+  nodes.push({ type: "text", content: "slskd is running, but its settings file doesn't list the key below. Add it under web → authentication → api_keys in slskd.yml and restart slskd — the setup guide's Configure step shows the exact lines with this key already in them." });
+  nodes.push({ type: "button", label: "Open setup guide", action: "setup-open-guide", variant: "accent" });
+  return nodes;
+}
+
+// Pure: the "not signed in" screen. For Roadie's slskd the reason comes from
+// its log and the fix is a restart through Roadie; the account lives in
+// Roadie, so there is no yml to send the user to.
+function disconnectedNodes(cfg, r, why) {
+  var tool = r && r.installed ? r.tool : null;
+  var nodes = [headingText("slskd isn't signed in to Soulseek")];
+  if (roadieOwnsAddress(cfg.url, tool)) {
+    nodes.push({ type: "text", content: why ? why.message
+      : "slskd is running and the key works, but it isn't signed in to the Soulseek network, and its log doesn't say why. Restarting slskd makes it sign in again." });
+    nodes.push(buttonRow([actionButton("Restart slskd", "roadie-restart", "accent", { disabled: !!(r && r.job) }),
+      actionButton("Open slskd", "open-slskd")]));
+    return nodes;
+  }
+  nodes.push({ type: "text", content: "slskd is running and the key works, but it isn't connected to the Soulseek network. Check the Soulseek username and password under soulseek: in slskd.yml (the guide's Configure step) and restart slskd, or sign in from slskd's own page." });
+  nodes.push({ type: "toolbar", buttons: [
+    { label: "Open setup guide", action: "setup-open-guide", variant: "accent" },
+    { label: "Open slskd", action: "open-slskd", variant: "secondary" }
+  ] });
+  return nodes;
 }
 
 // The guide shows a key and the yml carries it, so a key must exist before the
@@ -4892,6 +5005,9 @@ function registerActions() {
   api.ui.onAction("roadie-autostart", function (data) {
     setRoadieAutostart(!!(data && data.value)).catch(function (e) { console.error("slskd: Roadie autostart change failed:", e); });
   });
+  api.ui.onAction("roadie-restart", function () {
+    restartSlskdWithRoadie().catch(function (e) { console.error("slskd: Roadie restart failed:", e); });
+  });
   api.ui.onAction("roadie-open-path", function (data) {
     if (!data || !data.path || !canOpenPaths()) return;
     openRoadiePath(String(data.path), !!data.reveal).catch(function (e) { console.error("slskd: open path failed:", e); });
@@ -6029,6 +6145,9 @@ return {
   _roadieUninstallArgs: roadieUninstallArgs,
   _roadieRemoveRows: roadieRemoveRows,
   _roadieFileRows: roadieFileRows,
+  _roadieOwnsAddress: roadieOwnsAddress,
+  _unauthorizedNodes: unauthorizedNodes,
+  _disconnectedNodes: disconnectedNodes,
   _roadieFailure: roadieFailure,
   _roadieHasUnusedSlskd: roadieHasUnusedSlskd,
   _newSetup: newSetup,

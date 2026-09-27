@@ -122,6 +122,11 @@ function fakeRoadie(state) {
       state.tool = { ...state.tool, autostart: cmd[3] === "on" };
       return { exitCode: 0, stdout: JSON.stringify(state.tool), stderr: "" };
     }
+    if (cmd[0] === "tool" && cmd[1] === "restart") {
+      state.restartCalls = (state.restartCalls || 0) + 1;
+      if (state.onRestart) state.onRestart();
+      return { exitCode: 0, stdout: JSON.stringify(state.tool), stderr: "" };
+    }
     if (cmd[0] === "tool" && cmd[1] === "start") {
       state.startCalls = (state.startCalls || 0) + 1;
       if (state.startCmdFails) return { exitCode: 1, stdout: JSON.stringify({ error: state.startCmdFails }), stderr: "" };
@@ -723,5 +728,101 @@ test("integration: a slskd the user runs warns with Open Soulseek, which opens t
     assert.equal(notice.options.action.label, "Open Soulseek");
     await host.actions[notice.options.action.id]();
     assert.deepEqual(host.calls.navigated, ["slskd-browse"]);
+  });
+});
+
+// Lines from the owner's slskd on 2026-09-27: kicked by another client using
+// the same account, after which slskd never signed in again.
+const LOG_KICKED = [
+  "[03:03:01 INF] Logged in to the Soulseek server as outcast1000",
+  "[08:47:10 INF] Kicked from server.",
+  "[08:47:10 ERR] Disconnected from the Soulseek server: Remote connection closed",
+  "[08:47:12 INF] Logged in to the Soulseek server as outcast1000",
+  "[08:47:20 INF] Kicked from server.",
+  "[08:47:20 ERR] Disconnected from the Soulseek server: another client logged in using the same username",
+  "[08:48:18 WRN] Unauthorized request from IP address 127.0.0.1: Unknown API key beginning with: 544e"
+];
+
+test("sign-in reason: a kick is named as a kick, not a firewall; a newer sign-in clears old failures", () => {
+  const why = plugin._signinReasonFromLog;
+  const kicked = why(LOG_KICKED, "outcast1000");
+  assert.equal(kicked.kind, "kicked");
+  assert.match(kicked.message, /another app signed in as outcast1000/);
+  assert.match(kicked.message, /restart slskd/);
+  assert.equal(why(LOG_KICKED.slice(0, 4), "outcast1000"), null, "signed in again after the first drop → nothing to report");
+  assert.equal(why(LOG_TIMEOUT.concat(["[12:20:00 INF] Logged in to the Soulseek server as bj"]), "bj"), null);
+});
+
+test("Roadie's slskd is recognised whatever loopback name the address uses", () => {
+  const owns = plugin._roadieOwnsAddress;
+  const tool = { installed: true, url: "http://127.0.0.1:5030" };
+  assert.equal(owns("http://localhost:5030", tool), true);
+  assert.equal(owns("http://127.0.0.1:5030/", tool), true);
+  assert.equal(owns("http://localhost:5031", tool), false, "another port is another slskd");
+  assert.equal(owns("http://nas.local:5030", tool), false);
+  assert.equal(owns("http://localhost:5030", { ...tool, installed: false }), false);
+});
+
+test("key rejected + an approved Roadie slskd → Use Roadie's slskd, not a yml edit", () => {
+  const r = { installed: true, tool: { ...installedApproved } };
+  const nodes = plugin._unauthorizedNodes({ url: "http://localhost:5030", managedBy: null }, r);
+  assert.deepEqual(clickable(nodes), ["roadie-connect", "setup-open-guide"]);
+  assert.ok(!JSON.stringify(nodes).includes("api_keys in slskd.yml"), "no advice to edit a file Roadie rewrites");
+  const plain = plugin._unauthorizedNodes({ url: "http://localhost:5030", managedBy: null }, { installed: false });
+  assert.deepEqual(clickable(plain), ["setup-open-guide"], "no Roadie → the guide, as before");
+});
+
+test("signed out, Roadie's slskd → the log's reason and Restart slskd", () => {
+  const r = { installed: true, tool: { ...installedApproved } };
+  const why = plugin._signinReasonFromLog(LOG_KICKED, "outcast1000");
+  const nodes = plugin._disconnectedNodes({ url: "http://127.0.0.1:5030" }, r, why);
+  assert.deepEqual(clickable(nodes), ["roadie-restart", "open-slskd"]);
+  assert.ok(JSON.stringify(nodes).includes("another app signed in as outcast1000"));
+  const own = plugin._disconnectedNodes({ url: "http://nas.local:5030" }, r, why);
+  assert.deepEqual(clickable(own), ["setup-open-guide", "open-slskd"], "a slskd the user runs keeps the yml advice");
+});
+
+test("integration: the owner's case — a guide key on Roadie's slskd, then a kick, fixed from the screen", async () => {
+  const state = { tool: { ...installedApproved, config: { soulseekUsername: "outcast1000" },
+    installDir: "/r/versions/0.26.0", dataDir: "/r/data", logsDir: "/r/logs", configFiles: [{ path: "/r/data/slskd.yml", secret: true }] },
+    logLines: LOG_KICKED };
+  let loggedIn = false;
+  const roadieKey = "r".repeat(48);
+  const keyOf = (init) => {
+    const h = (init && init.headers) || {};
+    for (const k of Object.keys(h)) if (k.toLowerCase() === "x-api-key") return h[k];
+    return null;
+  };
+  await withPlugin({
+    store: { url: "http://localhost:5030", apiKey: "544e" + "0".repeat(38), managedBy: null },
+    dependencies: roadieHere,
+    exec: fakeRoadie(state),
+    fetch: async (url, init) => {
+      if (!url.includes("/api/v0/application")) return undefined;
+      if (keyOf(init) !== roadieKey) return { status: 401, text: async () => JSON.stringify("unauthorized") };
+      const server = loggedIn ? { state: "Connected, LoggedIn", isLoggedIn: true, isTransitioning: false, username: "outcast1000" }
+        : { state: "Disconnected", isLoggedIn: false, isTransitioning: false };
+      return { status: 200, text: async () => JSON.stringify({ server, version: { current: "0.26.0" }, shares: { directories: 1 } }) };
+    }
+  }, async (host) => {
+    await until(() => lastView(host).includes("slskd rejected the API key"));
+    const v = lastView(host);
+    assert.ok(v.includes('"action":"roadie-connect"'), "offers Roadie's slskd");
+    assert.ok(v.includes('"action":"roadie-open-path"'), "and shows where Roadie keeps it, though not connected through Roadie");
+    assert.ok(!v.includes('"action":"roadie-remove-ask"'), "Remove stays with a Roadie-managed connection");
+
+    await host.actions["roadie-connect"]();
+    await until(() => lastView(host).includes("slskd isn't signed in to Soulseek"));
+    assert.equal(host.store.managedBy, "roadie");
+    assert.equal(host.store.apiKey, roadieKey);
+    const signedOut = lastView(host);
+    assert.ok(signedOut.includes("another app signed in as outcast1000"), signedOut.slice(0, 400));
+    assert.ok(signedOut.includes('"action":"roadie-restart"'));
+
+    state.onRestart = () => { loggedIn = true; };
+    await host.actions["roadie-restart"]();
+    await until(() => !lastView(host).includes("isn't signed in"));
+    assert.equal(state.restartCalls, 1);
+    assert.ok(!lastView(host).includes("isn't signed in"), "signed in after the restart");
   });
 });

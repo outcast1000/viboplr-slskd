@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.9.3
+
+- **"slskd rejected the API key" now fixes itself in one click when Roadie has slskd.** A key
+  from the manual setup guide doesn't work on the slskd Roadie installed, and the old advice
+  (add it to `slskd.yml`) couldn't stick, because Roadie rewrites that file. The screen now offers
+  *Use Roadie's slskd*, which switches to Roadie's address and key without asking anything (Viboplr
+  is already allowed).
+- **Signed out of Soulseek says why, and Restart slskd signs it back in.** When another app signs
+  in with the same account (Nicotine+, SoulseekQt, slskd on another computer), Soulseek signs slskd
+  out and slskd stays out. The screen now says so, instead of pointing at your password or a
+  firewall, and *Restart slskd* restarts it through Roadie.
+- **slskd's files are listed whenever Roadie has slskd**, including while the connection is
+  broken, which is when you go looking for them.
+
 ## 0.9.2
 
 - **See where slskd lives.** When Roadie installed your slskd, Settings → Connection lists its

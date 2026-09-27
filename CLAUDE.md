@@ -108,7 +108,14 @@ Owner decisions that must hold:
   install, and on success forgets the managed connection straight away.
   The same section lists slskd's files from `tool status` (`configFiles`, `installDir`, `dataDir`,
   `logsDir` — Roadie 0.5.0+, rows absent before) with `api.system.openPath` / `revealPath`; the
-  config file is only ever *revealed*, since it holds the Soulseek password. Every install is a click here plus an
+  config file is only ever *revealed*, since it holds the Soulseek password.
+  Those rows show whenever Roadie has slskd (`roadieManagedRows`), not only when the connection is
+  Roadie's; start-at-login and Remove still need `managedBy === "roadie"`. `roadieOwnsAddress`
+  treats any loopback host on Roadie's port as Roadie's slskd (`localhost:5030` = `127.0.0.1:5030`).
+  "Key rejected" + an approved Roadie slskd offers *Use Roadie's slskd* (`roadie-connect`) — never
+  auto-adopt over a typed address. "Signed out" on Roadie's slskd reads the reason from
+  `tool logs` (1000 lines; a refused key logs a warning a minute) and offers `tool restart`: a
+  **kick** ("another client logged in using the same username") is final until slskd restarts. Every install is a click here plus an
   approval in Roadie's dialog, and `tool connection` runs automatically only once Viboplr is
   already approved (`roadieAutoConfigAction`), because an unapproved one opens that dialog.
   Everything is feature-detected: `getDependency("roadie")` is null on hosts without it.
