@@ -14,7 +14,7 @@ function fakeHost(opts) {
   const actions = {};
   const tools = {};
   const resolvers = {};
-  const calls = { requestAction: [], notifications: [], notices: [], navigated: [], badges: [], resync: [], played: [], fetched: [], views: [], exec: [], opened: [] };
+  const calls = { requestAction: [], notifications: [], notices: [], navigated: [], badges: [], resync: [], played: [], fetched: [], views: [], exec: [], opened: [], headers: [] };
   const responses = Object.assign({
     "/api/v0/application": {
       server: { state: "Connected, LoggedIn", isLoggedIn: true, isTransitioning: false, username: "me" },
@@ -58,7 +58,9 @@ function fakeHost(opts) {
       onAction: (id, fn) => { actions[id] = fn; },
       navigateToView: (v) => calls.navigated.push(v),
       requestAction: (a, p) => calls.requestAction.push({ action: a, payload: p }),
-      setBadge: (v, b) => calls.badges.push(b)
+      setBadge: (v, b) => calls.badges.push(b),
+      // Absent when a test asks for an older host (`noViewHeader: true`).
+      setViewHeader: o.noViewHeader ? undefined : (v, h) => calls.headers.push({ viewId: v, header: h })
     },
     playback: {
       onResolveStreamByUri: (scheme, fn) => { resolvers["stream:" + scheme] = fn; },

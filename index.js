@@ -1410,6 +1410,49 @@ function readinessBanner(st, cfg, r) {
     children: [{ type: "text", content: text }, buttonRow(buttons)] };
 }
 
+// Pure: the host-drawn header over the view (api.ui.setViewHeader). It says
+// whether slskd works, in one word, plus where it is; the fix for a problem
+// stays in `readinessBanner`, which is larger and carries the button.
+// `rd` is `readiness`; `setup` is `roadie.setup` (the install checklist).
+function viewHeaderFor(rd, cfg, r, tierNow, setup) {
+  var st = rd.state;
+  var url = cfg.url || "";
+  var roadieSlskd = cfg.managedBy === "roadie";
+  var open = url ? [{ label: "Open slskd", action: "open-slskd" }] : [];
+  if (setup) {
+    return { subtitle: "Setting up slskd with Roadie", status: { variant: "muted", label: "Setting up" }, actions: [] };
+  }
+  if (st === "unconfigured") {
+    return { subtitle: "Search and download from the Soulseek network", status: { variant: "muted", label: "Not set up" }, actions: [] };
+  }
+  var where = (roadieSlskd ? "slskd from Roadie · " : "") + url;
+  if (st === "ready") {
+    var sub = "Connected as " + (rd.username || "?") + (rd.version ? " · slskd " + rd.version : "");
+    if (tierNow !== "local") sub += " · on another computer";
+    return { subtitle: sub, status: { variant: "success", label: "Ready" }, actions: open };
+  }
+  if (st === "unreachable") {
+    return roadieSlskd
+      ? { subtitle: where, status: { variant: "warning", label: "Not running" }, actions: [] }
+      : { subtitle: where, status: { variant: "error", label: "Unreachable" }, actions: [] };
+  }
+  if (st === "unauthorized") return { subtitle: where, status: { variant: "error", label: "Key rejected" }, actions: open };
+  if (st === "disconnected") return { subtitle: where, status: { variant: "warning", label: "Signed out" }, actions: open };
+  return { subtitle: where, status: { variant: "muted", label: "Connecting…" }, actions: open };
+}
+
+// Sends the header only when it changed: render() runs on every poll tick,
+// and each setViewHeader re-renders the host.
+var lastViewHeader = null;
+function pushViewHeader() {
+  if (!api || !api.ui || typeof api.ui.setViewHeader !== "function") return; // older hosts
+  var header = viewHeaderFor(readiness, settings, roadie, tier, roadie.setup);
+  var key = JSON.stringify(header);
+  if (key === lastViewHeader) return;
+  lastViewHeader = key;
+  api.ui.setViewHeader(VIEW_ID, header);
+}
+
 // Pure: the full "what's wrong and how to fix it" for a state that isn't
 // ready, on top of the Settings tab (the banner's "Fix…").
 function fixNodes(st, cfg, r, detail, why) {
@@ -4627,6 +4670,7 @@ function fallbackSettingsSection() {
 
 function render() {
   if (!api) return;
+  pushViewHeader();
   if (roadie.setup) {
     api.ui.setViewData(VIEW_ID, setupProgressView(), { scrollKey: "setup" });
     return;
@@ -6373,6 +6417,7 @@ return {
   _wantsSetupScreen: wantsSetupScreen,
   _webLoginFromRoadie: webLoginFromRoadie,
   _readinessBanner: readinessBanner,
+  _viewHeaderFor: viewHeaderFor,
   _fixNodes: fixNodes,
   _collectionPaths: collectionPaths,
   _installShareDirs: installShareDirs,

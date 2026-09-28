@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9.7
+
+- **The Soulseek view says whether slskd works, at the top.** On a Viboplr that draws a header on
+  plugin views, the header shows one word (*Ready*, *Not running*, *Unreachable*, *Key rejected*,
+  *Signed out*, *Connecting…*, *Not set up*) and where slskd is ("Connected as outcast1000 · slskd
+  0.26.0", or its address), with **Open slskd** when there's a page to open. Problems and their
+  fix stay in the notice under the tabs. Older Viboplr versions show the view as before.
+
 ## 0.9.6
 
 - **No more popup when slskd isn't running.** The plugin used to raise a notification at every

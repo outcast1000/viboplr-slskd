@@ -721,6 +721,69 @@ test("the banner: Start for a stopped Roadie slskd, Try again + Fix for everythi
   assert.equal(banner("unreachable", roadieCfg, { ...r, job: { kind: "start" } }).children[1].children[0].disabled, true, "no second start while one runs");
 });
 
+// The host's view header says whether slskd works in one word; the fix stays
+// in the banner below the tabs.
+test("the header: one status word per state, the address, and Open slskd when there's a page to open", () => {
+  const header = plugin._viewHeaderFor;
+  const user = { url: "http://localhost:5030", managedBy: null };
+  const roadieCfg = { url: "http://127.0.0.1:5030", managedBy: "roadie" };
+  const r = { supported: true, installed: true, tool: stopped };
+
+  const ready = header({ state: "ready", username: "outcast1000", version: "0.26.0" }, user, r, "local", null);
+  assert.deepEqual(ready, {
+    subtitle: "Connected as outcast1000 · slskd 0.26.0",
+    status: { variant: "success", label: "Ready" },
+    actions: [{ label: "Open slskd", action: "open-slskd" }]
+  });
+  assert.match(header({ state: "ready", username: "me" }, user, r, "remote", null).subtitle, /on another computer$/);
+
+  const label = (st, cfg) => header({ state: st }, cfg, r, "local", null).status;
+  assert.deepEqual(label("unreachable", roadieCfg), { variant: "warning", label: "Not running" }, "Roadie's slskd is only stopped");
+  assert.deepEqual(label("unreachable", user), { variant: "error", label: "Unreachable" });
+  assert.deepEqual(label("unauthorized", user), { variant: "error", label: "Key rejected" });
+  assert.deepEqual(label("disconnected", roadieCfg), { variant: "warning", label: "Signed out" });
+  assert.deepEqual(label("connecting", user), { variant: "muted", label: "Connecting…" });
+  assert.deepEqual(label("unconfigured", { url: "" }), { variant: "muted", label: "Not set up" });
+
+  assert.equal(header({ state: "unreachable" }, roadieCfg, r, "local", null).subtitle, "slskd from Roadie · http://127.0.0.1:5030");
+  assert.deepEqual(header({ state: "unreachable" }, user, r, "local", null).actions, [], "nothing answers, so no page to open");
+  assert.deepEqual(header({ state: "unconfigured" }, { url: "" }, r, "local", { step: 1 }).status, { variant: "muted", label: "Setting up" });
+});
+
+test("integration: the header follows readiness and is sent only when it changes", async () => {
+  let up = true;
+  await withPlugin({
+    store: { url: "http://localhost:5030", apiKey: "k".repeat(40) },
+    dependencies: {}, exec: async () => { throw new Error("no exec"); },
+    fetch: async (url) => {
+      if (!url.includes("/api/v0/application")) return undefined;
+      if (!up) throw new Error("connection refused");
+      return { status: 200, text: async () => JSON.stringify({ server: { state: "Connected, LoggedIn", isLoggedIn: true, isTransitioning: false, username: "me" }, version: { current: "0.26.0" }, shares: { directories: 1 } }) };
+    }
+  }, async (host) => {
+    await until(() => host.calls.headers.some((h) => h.header.status.label === "Ready"));
+    const last = host.calls.headers.at(-1);
+    assert.equal(last.viewId, "slskd-browse");
+    assert.equal(last.header.subtitle, "Connected as me · slskd 0.26.0");
+    const sent = host.calls.headers.length;
+    host.actions["main-tab"]({ tabId: "settings" });
+    host.actions["main-tab"]({ tabId: "search" });
+    assert.equal(host.calls.headers.length, sent, "re-rendering the same state sends nothing new");
+
+    up = false;
+    await host.actions["test-connection"]();
+    await until(() => host.calls.headers.at(-1).header.status.label === "Unreachable");
+    assert.ok(bannerOf(host), "the problem and its fix are still the banner");
+  });
+});
+
+test("integration: an older host without setViewHeader just doesn't get a header", async () => {
+  await withPlugin({ store: managedStore, fetch: nothingAnswers, dependencies: roadieHere, exec: fakeRoadie({ tool: stopped }), noViewHeader: true }, async (host) => {
+    await until(() => bannerOf(host));
+    assert.equal(host.calls.headers.length, 0);
+  });
+});
+
 test("the full-page setup screen is the first run, or a setup page the user opened", () => {
   const wants = plugin._wantsSetupScreen;
   assert.equal(wants("unconfigured", "home"), true);

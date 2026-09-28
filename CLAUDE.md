@@ -105,6 +105,12 @@ Owner decisions that must hold:
   explanation above the Connection card. The first run (`unconfigured`) and the hub's own pages
   stay full-page (`wantsSetupScreen`). The sidebar dot (`badgeFor`) is the only signal outside the
   view. Do not bring back a readiness `showNotification`, at launch or on a state change.
+- **The host view header carries the status word, the banner carries the fix.** `viewHeaderFor`
+  (pure) → `pushViewHeader`, called at the top of `render()` and change-gated on the JSON, since
+  `render()` runs on every poll tick and each `api.ui.setViewHeader` re-renders the host. It is
+  feature-detected (older hosts have no header), so it needs no `minAppVersion` bump; the manifest's
+  `viewHeader.subtitle` is the fallback before the first render. Keep the header to state + where
+  slskd is + *Open slskd*; a fix button belongs in `readinessBanner`, not in the header.
 - **The user owns slskd; Roadie runs it for them, never Viboplr.** The host never installs,
   launches, supervises or configures a third-party daemon itself (a host-managed slskd sidecar
   was built and rejected). The two ways to get slskd are the guided setup (the GitHub Pages
