@@ -97,6 +97,14 @@ resolver, then plugins in load order) and gives each one **60 seconds**. Everyth
 
 Owner decisions that must hold:
 
+- **slskd not ready is a banner, never a toast** (2026-09-28). The owner found the launch toast
+  ("slskd isn't running…") annoying and asked for the yt-dlp / TIDAL pattern: once slskd has been
+  set up, a state that isn't ready keeps the tabbed view and puts a `ds-banner` row on top
+  (`readinessBanner`) with the one click that fixes it (*Start slskd* / *Restart slskd* through
+  Roadie, *Try again*) plus *Fix…*, which opens the Settings tab where `fixNodes` puts the full
+  explanation above the Connection card. The first run (`unconfigured`) and the hub's own pages
+  stay full-page (`wantsSetupScreen`). The sidebar dot (`badgeFor`) is the only signal outside the
+  view. Do not bring back a readiness `showNotification`, at launch or on a state change.
 - **The user owns slskd; Roadie runs it for them, never Viboplr.** The host never installs,
   launches, supervises or configures a third-party daemon itself (a host-managed slskd sidecar
   was built and rejected). The two ways to get slskd are the guided setup (the GitHub Pages

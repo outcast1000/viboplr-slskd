@@ -686,63 +686,111 @@ test("integration: turned off, the install shares no collections", async () => {
   });
 });
 
-// The launch warning carries the one click that fixes it.
+// Not ready is a banner on top of the normal view, like yt-dlp's — never a
+// toast, at launch or later.
 const stopped = { ...installedApproved, running: false };
 const nothingAnswers = async (url) => { if (url.includes("/api/v0/application")) throw new Error("connection refused"); };
 const managedStore = { url: "http://127.0.0.1:5030", apiKey: "r".repeat(48), managedBy: "roadie" };
+const findNodes = (n, pred, out = []) => {
+  if (!n || typeof n !== "object") return out;
+  if (Array.isArray(n)) { n.forEach((c) => findNodes(c, pred, out)); return out; }
+  if (pred(n)) out.push(n);
+  findNodes(n.children, pred, out);
+  return out;
+};
+const bannerOf = (host) => {
+  const view = host.calls.views.filter((v) => v.viewId === "slskd-browse").at(-1).data;
+  return findNodes(view, (n) => /\bds-banner\b/.test(n.className || ""))[0] || null;
+};
 
-test("the warning offers Start for a stopped Roadie slskd, Open Soulseek for everything else", () => {
-  const note = plugin._notificationFor;
+test("the banner: Start for a stopped Roadie slskd, Try again + Fix for everything else, nothing when ready", () => {
+  const banner = plugin._readinessBanner;
   const r = { supported: true, installed: true, tool: stopped };
-  assert.deepEqual(note("unreachable", { managedBy: "roadie" }, r).action, { label: "Start slskd", id: "roadie-start-from-notice" });
-  assert.equal(note("unreachable", { managedBy: null }, r).action.id, "open-soulseek-view", "a slskd the user runs: Viboplr can't start it");
-  assert.equal(note("unreachable", { managedBy: "roadie" }, { ...r, tool: notInstalled }).action.id, "open-soulseek-view", "Roadie says it's gone: nothing to start");
-  assert.equal(note("unreachable", { managedBy: "roadie" }, { supported: true, installed: false }).action.id, "open-soulseek-view");
-  assert.equal(note("unauthorized", {}, r).action.id, "open-soulseek-view");
-  assert.equal(note("ready", {}, r), null);
-  assert.match(note("unreachable", { managedBy: "roadie" }, r).message, /start it from Soulseek/, "the text still says what to do on a host that drops the button");
+  const roadieCfg = { url: "http://127.0.0.1:5030", managedBy: "roadie" };
+  assert.deepEqual(clickable(banner("unreachable", roadieCfg, r)), ["roadie-start"]);
+  assert.match(banner("unreachable", roadieCfg, r).className, /ds-banner--warning/);
+  assert.deepEqual(clickable(banner("unreachable", { url: "http://nas:5030", managedBy: null }, r)), ["test-connection", "slskd-show-fix"], "a slskd the user runs: Viboplr can't start it");
+  assert.match(JSON.stringify(banner("unreachable", { url: "http://nas:5030", managedBy: null }, r)), /Can't reach slskd at http:\/\/nas:5030/);
+  assert.deepEqual(clickable(banner("unreachable", roadieCfg, { ...r, tool: notInstalled })), ["test-connection", "slskd-show-fix"], "Roadie says it's gone: nothing to start");
+  assert.deepEqual(clickable(banner("unauthorized", roadieCfg, r)), ["slskd-show-fix"]);
+  assert.deepEqual(clickable(banner("disconnected", roadieCfg, r)), ["roadie-restart", "slskd-show-fix"], "Roadie's slskd restarts to sign in again");
+  assert.deepEqual(clickable(banner("disconnected", { url: "http://nas:5030" }, r)), ["slskd-show-fix"]);
+  assert.deepEqual(clickable(banner("connecting", roadieCfg, r)), []);
+  assert.equal(banner("ready", roadieCfg, r), null);
+  assert.equal(banner("unconfigured", roadieCfg, r), null, "the first run is the setup hub, not a banner");
+  assert.equal(banner("unreachable", roadieCfg, { ...r, job: { kind: "start" } }).children[1].children[0].disabled, true, "no second start while one runs");
 });
 
-test("integration: at launch a stopped Roadie slskd warns with Start, and Start runs Roadie", async () => {
+test("the full-page setup screen is the first run, or a setup page the user opened", () => {
+  const wants = plugin._wantsSetupScreen;
+  assert.equal(wants("unconfigured", "home"), true);
+  assert.equal(wants("unreachable", "home"), false, "stopped after it worked → the tabs with a banner");
+  assert.equal(wants("unreachable", "connect"), true);
+  assert.equal(wants("unauthorized", "connect"), false);
+  assert.equal(wants("ready", "home"), false);
+});
+
+test("integration: at launch a stopped Roadie slskd shows the banner, no toast, and Start runs Roadie", async () => {
   const state = { tool: stopped };
   await withPlugin({ store: managedStore, fetch: nothingAnswers, dependencies: roadieHere, exec: fakeRoadie(state) }, async (host) => {
-    await until(() => host.calls.notices.length > 0);
-    const notice = host.calls.notices[0];
-    assert.equal(notice.options.action.label, "Start slskd", JSON.stringify(notice));
-    await host.actions[notice.options.action.id]();
+    await until(() => bannerOf(host));
+    assert.ok(lastView(host).includes('"type":"tabs"'), "the view stays usable");
+    assert.deepEqual(clickable(bannerOf(host)), ["roadie-start"]);
+    await host.actions["roadie-start"]();
     await until(() => state.startCalls);
     assert.equal(state.startCalls, 1);
-    assert.ok(host.calls.notifications.includes("Starting slskd…"), "says it's starting where the user is");
+    assert.equal(host.calls.notices.length, 0, "never a toast");
   });
 });
 
-test("integration: a start Roadie refuses says why, where the user is", async () => {
+test("integration: a start Roadie refuses says why, under the banner", async () => {
   const state = { tool: stopped, startCmdFails: "Another copy of slskd is running on this computer." };
   await withPlugin({ store: managedStore, fetch: nothingAnswers, dependencies: roadieHere, exec: fakeRoadie(state) }, async (host) => {
-    await until(() => host.calls.notices.length > 0);
-    await host.actions["roadie-start-from-notice"]();
-    await until(() => host.calls.notifications.some((m) => m.startsWith("Roadie couldn't start slskd")));
-    const fail = host.calls.notices.find((n) => n.message.startsWith("Roadie couldn't start slskd"));
-    assert.ok(fail.message.includes("Another copy of slskd"), fail.message);
-    assert.equal(fail.options.action.id, "open-soulseek-view");
+    await until(() => bannerOf(host));
+    await host.actions["roadie-start"]();
+    await until(() => lastView(host).includes("Roadie: Another copy of slskd"));
+    assert.ok(bannerOf(host), "still not running, still says so");
+    assert.equal(host.calls.notices.length, 0);
   });
 });
 
 test("integration: the user's own first Connect that finds nothing raises no toast", async () => {
   await withPlugin({ store: { url: "", apiKey: "" }, fetch: nothingAnswers, dependencies: {}, exec: async () => { throw new Error("no exec"); } }, async (host) => {
+    await host.actions["setup-page"]({ page: "install-manual" });
     await host.actions["setup-connect"]();
     await until(() => lastView(host).includes("Nothing answered"));
+    assert.ok(!lastView(host).includes('"type":"tabs"'), "still on the page they clicked in");
     assert.equal(host.calls.notices.length, 0, "the screen they clicked in already says it");
   });
 });
 
-test("integration: a slskd the user runs warns with Open Soulseek, which opens the view", async () => {
+test("integration: a slskd the user runs that stopped answering: banner, Fix opens the explanation in Settings", async () => {
   await withPlugin({ store: { url: "http://localhost:5030", apiKey: "k".repeat(40) }, fetch: nothingAnswers, dependencies: {}, exec: async () => { throw new Error("no exec"); } }, async (host) => {
-    await until(() => host.calls.notices.length > 0);
-    const notice = host.calls.notices[0];
-    assert.equal(notice.options.action.label, "Open Soulseek");
-    await host.actions[notice.options.action.id]();
-    assert.deepEqual(host.calls.navigated, ["slskd-browse"]);
+    await until(() => bannerOf(host));
+    assert.match(JSON.stringify(bannerOf(host)), /Can't reach slskd at http:\/\/localhost:5030/);
+    host.actions["slskd-show-fix"]();
+    const v = lastView(host);
+    assert.ok(v.includes("Not installed any more?") && v.includes('"action":"set-url"'), "the hub's ways forward, then the Connection form");
+    assert.equal(host.calls.notices.length, 0);
+  });
+});
+
+test("integration: slskd dying mid-session turns into the banner, not a toast", async () => {
+  let up = true;
+  await withPlugin({
+    store: { url: "http://localhost:5030", apiKey: "k".repeat(40) },
+    dependencies: {}, exec: async () => { throw new Error("no exec"); },
+    fetch: async (url) => {
+      if (!url.includes("/api/v0/application")) return undefined;
+      if (!up) throw new Error("connection refused");
+      return { status: 200, text: async () => JSON.stringify({ server: { state: "Connected, LoggedIn", isLoggedIn: true, isTransitioning: false, username: "me" }, version: { current: "0.26.0" }, shares: { directories: 1 } }) };
+    }
+  }, async (host) => {
+    await until(() => lastView(host).includes('"type":"tabs"') && !bannerOf(host));
+    up = false;
+    await host.actions["test-connection"]();
+    await until(() => bannerOf(host));
+    assert.equal(host.calls.notices.length, 0);
   });
 });
 
@@ -821,6 +869,8 @@ test("integration: the owner's case — a guide key on Roadie's slskd, then a ki
     }
   }, async (host) => {
     await until(() => lastView(host).includes("slskd rejected the API key"));
+    assert.deepEqual(clickable(bannerOf(host)), ["slskd-show-fix"]);
+    host.actions["slskd-show-fix"]();
     const v = lastView(host);
     assert.ok(v.includes('"action":"roadie-connect"'), "offers Roadie's slskd");
     assert.ok(v.includes('"action":"roadie-files-toggle"'), "and offers where Roadie keeps it, though not connected through Roadie");
@@ -852,10 +902,14 @@ test("Roadie's slskd, signed out: the fix on top, one short card, no address/key
     exec: fakeRoadie(state),
     responses: { "/api/v0/application": { server: { state: "Disconnected", isLoggedIn: false, isTransitioning: false }, version: { current: "0.26.0" } } }
   }, async (host) => {
+    await until(() => bannerOf(host));
+    assert.deepEqual(clickable(bannerOf(host)), ["roadie-restart", "slskd-show-fix"], "the one-click fix is on top of every tab");
+    host.actions["slskd-show-fix"]();
     await until(() => lastView(host).includes("another app signed in"));
     const view = host.calls.views.filter((v) => v.viewId === "slskd-browse").at(-1).data;
-    assert.deepEqual(clickable(view), ["roadie-restart", "open-slskd", "test-connection", "roadie-files-toggle",
-      "roadie-details-toggle", "roadie-remove-ask", "open-slskd", "slskd-show-login"], "fix, then the card top to bottom, Remove last");
+    const settings = view.children.at(-1);
+    assert.deepEqual(clickable(settings).slice(0, 8), ["roadie-restart", "open-slskd", "test-connection", "roadie-files-toggle",
+      "roadie-details-toggle", "roadie-remove-ask", "open-slskd", "slskd-show-login"], "Settings: fix, then the card top to bottom, Remove last");
     const text = JSON.stringify(view);
     assert.ok(text.includes('"title":"slskd from Roadie"'));
     assert.ok(!text.includes('"action":"set-url"') && !text.includes('"action":"set-key"'), "no address/key form until Connection details is opened");

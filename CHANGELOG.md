@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.9.6
+
+- **No more popup when slskd isn't running.** The plugin used to raise a notification at every
+  launch without slskd, and again whenever slskd stopped. Now the Soulseek view stays usable
+  and shows a notice across the top, like the yt-dlp plugin does when yt-dlp is missing:
+  *slskd isn't running* with **Start slskd** for the slskd Roadie installed, *Can't reach slskd*
+  with **Try again** for one you run yourself, and *Fix…* for the full explanation in the
+  Settings tab. The Downloads, Upgrades, Fallback and Settings tabs stay reachable while slskd
+  is down. The red dot on the sidebar entry is still there.
+
 ## 0.9.5
 
 - **More Upgrade targets, and FLAC 16-bit is the default.** Settings → Upgrade to now offers

@@ -63,33 +63,14 @@ test("nextReadiness treats Connecting/LoggingIn as transitional, not disconnecte
   const b = plugin._nextReadiness({ kind: "ok", serverState: "Connected, LoggingIn" }, null);
   assert.equal(a.state, "connecting");
   assert.equal(b.state, "connecting");
-  assert.equal(a.notify, false, "a transitional state must never alarm the user");
-  assert.equal(b.notify, false);
 });
 
-test("nextReadiness notifies only on a transition INTO a bad state", () => {
+test("nextReadiness reports a change of state, and never asks for a toast", () => {
   const first = plugin._nextReadiness({ kind: "unreachable" }, { state: "ready" });
-  assert.equal(first.notify, true, "ready -> unreachable should notify");
-
-  const repeat = plugin._nextReadiness({ kind: "unreachable" }, { state: "unreachable" });
-  assert.equal(repeat.notify, false, "polling the same bad state must not re-notify");
-  assert.equal(repeat.changed, false);
-
-  const firstTry = plugin._nextReadiness({ kind: "unreachable" }, { state: "unconfigured" });
-  assert.equal(firstTry.notify, false, "the user's own first Connect is answered by the screen they clicked in, not a toast");
-  assert.equal(plugin._nextReadiness({ kind: "unreachable" }, null).notify, true, "found down at launch still says so");
-});
-
-test("nextReadiness does not notify when entering a good state", () => {
-  const r = plugin._nextReadiness({ kind: "ok", serverState: "Connected, LoggedIn" }, { state: "unreachable" });
-  assert.equal(r.state, "ready");
-  assert.equal(r.notify, false);
-  assert.equal(r.changed, true);
-});
-
-test("nextReadiness notifies again when one bad state becomes a different bad state", () => {
-  const r = plugin._nextReadiness({ kind: "unauthorized" }, { state: "unreachable" });
-  assert.equal(r.notify, true);
+  assert.equal(first.changed, true);
+  assert.equal("notify" in first, false, "not ready is the view's banner, not a toast");
+  assert.equal(plugin._nextReadiness({ kind: "unreachable" }, { state: "unreachable" }).changed, false, "polling the same state");
+  assert.equal(plugin._nextReadiness({ kind: "ok", serverState: "Connected, LoggedIn" }, { state: "unreachable" }).changed, true);
 });
 
 test("nextReadiness passes through identity and share details", () => {
@@ -138,6 +119,5 @@ test("nextReadiness reads a real signed-out slskd payload as disconnected", () =
     shareCount: 0
   }, { state: "ready" });
   assert.equal(r.state, "disconnected");
-  assert.equal(r.notify, true);
   assert.equal(r.shareCount, 0, "a zero share count must survive as 0, not become null");
 });

@@ -133,12 +133,10 @@ var settings = {
 };
 
 var readiness = { state: "unconfigured", detail: null, username: null, version: null, shareCount: null };
-var probedOnce = false; // `readiness` above is a placeholder until the first probe
 // slskd's own word for its Soulseek connection ("Connecting", "Connected,
 // LoggedIn", "Disconnected"…) from the last probe; the setup's sign-in step
 // shows it while it waits.
 var lastServerState = null;
-var notifiedState = null;
 var sharesWarned = false;
 
 var downloadsDir = null;
@@ -560,22 +558,17 @@ function nextReadiness(probe, prev) {
     else state = "disconnected";
   }
 
-  var bad = state === "unreachable" || state === "unauthorized" || state === "disconnected";
-  var changed = state !== prevState;
-
+  // No toast for any of these: a state that isn't ready is the banner at the
+  // top of the view (`readinessBanner`) and the sidebar dot, like yt-dlp's
+  // missing-binary banner. A toast at every launch without slskd was the
+  // complaint that replaced it.
   return {
     state: state,
     detail: detail,
     username: probe && probe.username != null ? probe.username : null,
     version: probe && probe.version != null ? probe.version : null,
     shareCount: probe && probe.shareCount != null ? probe.shareCount : null,
-    changed: changed,
-    // Notify only on a TRANSITION INTO a bad state — polling must never spam.
-    // "connecting" is transitional and never alarms. Leaving "unconfigured"
-    // never alarms either: only the user's own Connect (or typed address) in
-    // the plugin's screen does that, and the screen already shows the result —
-    // a toast telling them to "open Soulseek" while it's open is noise.
-    notify: changed && bad && prevState !== "unconfigured"
+    changed: state !== prevState
   };
 }
 
@@ -1378,19 +1371,52 @@ function badgeFor(state) {
   return null;
 }
 
-// Pure: the warning for a state change, with the one click that fixes it.
-// A slskd Roadie installed and still has is only stopped, and Roadie can
-// start it, so the warning starts it. Anything else needs the Soulseek view,
-// so the warning opens it. The text stands alone: older hosts drop the button.
-function notificationFor(state, cfg, r) {
-  var open = { label: "Open Soulseek", id: "open-soulseek-view" };
-  if (state === "unreachable" && cfg && cfg.managedBy === "roadie" && r && r.installed && r.tool && r.tool.installed) {
-    return { message: "slskd isn't running — start it from Soulseek in the sidebar.", action: { label: "Start slskd", id: "roadie-start-from-notice" } };
+// Pure: the notice across the top of the view while slskd is set up but not
+// ready, or null. One line saying what's wrong, the one click that fixes it
+// when there is one, and "Fix…" to the Settings tab, where the full
+// explanation sits above the Connection card. A slskd Roadie installed and
+// still has is only stopped, so the notice starts it.
+function readinessBanner(st, cfg, r) {
+  var tool = r && r.installed ? r.tool : null;
+  var busy = !!(r && r.job);
+  var fix = actionButton("Fix…", "slskd-show-fix");
+  var text, variant, buttons;
+  if (st === "unreachable" && cfg.managedBy === "roadie" && tool && tool.installed) {
+    text = "slskd isn't running. Search, downloads and the playback fallback need it.";
+    variant = "warning";
+    buttons = [actionButton("Start slskd", "roadie-start", "accent", { disabled: busy })];
+  } else if (st === "unreachable") {
+    text = "Can't reach slskd at " + (cfg.url || "the saved address") + ". It may be stopped.";
+    variant = "error";
+    buttons = [actionButton("Try again", "test-connection"), fix];
+  } else if (st === "unauthorized") {
+    text = "slskd rejected the API key.";
+    variant = "error";
+    buttons = [fix];
+  } else if (st === "disconnected") {
+    text = "slskd is running but isn't signed in to Soulseek.";
+    variant = "warning";
+    buttons = roadieOwnsAddress(cfg.url, tool)
+      ? [actionButton("Restart slskd", "roadie-restart", "accent", { disabled: busy }), fix]
+      : [fix];
+  } else if (st === "connecting") {
+    text = "slskd is connecting to Soulseek…";
+    variant = "warning";
+    buttons = [];
+  } else {
+    return null;
   }
-  if (state === "unreachable") return { message: "slskd isn't reachable — open Soulseek in the sidebar to fix the address, or start slskd.", action: open };
-  if (state === "unauthorized") return { message: "slskd rejected the API key — update it in Soulseek → Settings.", action: open };
-  if (state === "disconnected") return { message: "slskd is running but isn't signed in to Soulseek.", action: open };
-  return null;
+  return { type: "layout", direction: "horizontal", className: "ds-banner ds-banner--" + variant,
+    children: [{ type: "text", content: text }, buttonRow(buttons)] };
+}
+
+// Pure: the full "what's wrong and how to fix it" for a state that isn't
+// ready, on top of the Settings tab (the banner's "Fix…").
+function fixNodes(st, cfg, r, detail, why) {
+  if (st === "unreachable") return setupHomeView(st, cfg, r, detail);
+  if (st === "unauthorized") return unauthorizedNodes(cfg, r);
+  if (st === "disconnected") return disconnectedNodes(cfg, r, why);
+  return [];
 }
 
 async function refreshReadiness() {
@@ -1409,11 +1435,7 @@ async function refreshReadiness() {
       console.error("slskd: Roadie probe failed:", e);
     }
   }
-  // Before the first probe `readiness` is a placeholder, not an answer: pass
-  // no previous state, so a slskd found down at launch still warns. (Leaving a
-  // *probed* "unconfigured" never warns — that is the user's own Connect.)
-  var next = nextReadiness(p, probedOnce ? readiness : null);
-  probedOnce = true;
+  var next = nextReadiness(p, readiness);
   readiness = {
     state: next.state,
     detail: next.detail,
@@ -1424,15 +1446,6 @@ async function refreshReadiness() {
   tier = detectTier(settings.url, settings.tierOverride);
 
   api.ui.setBadge(VIEW_ID, badgeFor(next.state));
-
-  // The setup checklist is already saying what's going on; a toast on top
-  // of it would be the same news twice.
-  if (next.notify && notifiedState !== next.state && !roadie.setup) {
-    var note = notificationFor(next.state, settings, roadie);
-    if (note) api.ui.showNotification(note.message, { action: note.action });
-    notifiedState = next.state;
-  }
-  if (!next.notify && next.changed) notifiedState = null;
 
   try {
     await refreshSigninWhy();
@@ -3169,25 +3182,21 @@ function setupProgressView() {
   return { type: "layout", direction: "vertical", children: children };
 }
 
-// `fromNotice`: started from the warning toast, so the user is likely not
-// looking at the Soulseek view — say it's starting, and say so if it fails.
-// Success stays quiet (the sidebar dot clearing is the answer).
-async function startSlskdWithRoadie(fromNotice) {
-  if (fromNotice) api.ui.showNotification("Starting slskd…");
+// Started from the view (the banner or the Settings tab), so the progress and
+// any failure show there, under the banner. Success is the banner clearing.
+async function startSlskdWithRoadie() {
   var r;
   try {
     r = await runRoadieJob("start", ["tool", "start", "slskd"], "Starting slskd…");
   } catch (e) {
     console.error("slskd: Roadie start failed:", e);
     roadie.error = String(e && e.message || e);
-    if (fromNotice) api.ui.showNotification("Roadie couldn't start slskd: " + roadie.error, { action: { label: "Open Soulseek", id: "open-soulseek-view" } });
     render();
     return;
   }
   if (!r) return;
   if (r.code !== 0) {
     roadie.error = roadieFailure(r.code, r.json, r.stderr);
-    if (fromNotice) api.ui.showNotification("Roadie couldn't start slskd: " + roadie.error, { action: { label: "Open Soulseek", id: "open-soulseek-view" } });
     render();
     return;
   }
@@ -3799,33 +3808,23 @@ function connectView() {
   return children;
 }
 
-// The screen for a slskd that isn't ready. Not found → the hub or one of its
-// pages; found but not usable (key rejected, not signed in, connecting) → what
-// to fix in slskd, with the Connection section below.
+// The full-page screen: the first-run hub, or one of its pages (also reached
+// from the "Can't reach slskd" explanation on the Settings tab). Any other
+// state that isn't ready is the normal view with a banner on top (`render`).
 function setupView() {
-  var st = readiness.state;
   var children;
-  if (st === "unconfigured" || st === "unreachable") {
-    if (setupPage === "install-auto") children = installAutoView();
-    else if (setupPage === "install-manual") children = installManualView();
-    else if (setupPage === "connect") children = connectView();
-    else children = setupHomeView(st, settings, roadie, readiness.detail).concat(roadieJobNodes());
-    return { type: "layout", direction: "vertical", children: children };
-  }
-
-  children = [];
-  if (st === "unauthorized") {
-    children = children.concat(unauthorizedNodes(settings, roadie));
-  } else if (st === "disconnected") {
-    children = children.concat(disconnectedNodes(settings, roadie, signinWhy));
-  } else if (st === "connecting") {
-    children.push({ type: "loading", message: "slskd is connecting to Soulseek…" });
-  }
-  children = children.concat(roadieJobNodes());
-  children.push(connectionSection());
-  var webPage = webPageSection();
-  if (webPage) children.push(webPage);
+  if (setupPage === "install-auto") children = installAutoView();
+  else if (setupPage === "install-manual") children = installManualView();
+  else if (setupPage === "connect") children = connectView();
+  else children = setupHomeView(readiness.state, settings, roadie, readiness.detail).concat(roadieJobNodes());
   return { type: "layout", direction: "vertical", children: children };
+}
+
+// Pure: whether `render` shows the full-page setup screen rather than the
+// tabs. The first run always does; a slskd that stopped answering does only
+// while the user is on one of the hub's pages (install, connect).
+function wantsSetupScreen(st, page) {
+  return st === "unconfigured" || (st === "unreachable" && page !== "home");
 }
 
 // Pure: the "key rejected" screen. When Roadie has slskd, the fix is
@@ -4632,14 +4631,26 @@ function render() {
     api.ui.setViewData(VIEW_ID, setupProgressView(), { scrollKey: "setup" });
     return;
   }
-  if (readiness.state === "unconfigured") ensureSetupKey();
-  if (readiness.state === "ready") setupPage = "home";
-  if (readiness.state !== "ready") {
+  var st = readiness.state;
+  if (st === "unconfigured") ensureSetupKey();
+  if (wantsSetupScreen(st, setupPage)) {
     api.ui.setViewData(VIEW_ID, setupView(), { scrollKey: "setup" });
     return;
   }
+  // Left a setup page because the state moved on (the key is now the
+  // problem, or slskd answered): land on the explanation, not a blank Search.
+  if (setupPage !== "home" && st !== "ready") activeTab = "settings";
+  setupPage = "home";
   var mainTab = mainTabFor(activeTab);
-  var body = [{
+  var body = [];
+  // Not ready, like yt-dlp without its binary: the view stays, the problem
+  // is one line on top with the click that fixes it.
+  var banner = readinessBanner(st, settings, roadie);
+  if (banner) {
+    body.push(banner);
+    body = body.concat(roadieJobNodes());
+  }
+  body.push({
     type: "tabs",
     tabs: [
       { id: "search", label: "Search" },
@@ -4650,7 +4661,7 @@ function render() {
     ],
     activeTab: mainTab,
     action: "main-tab"
-  }];
+  });
   body.push(mainTab === "transfers" ? transfersTab()
     : mainTab === "upgrades" ? upgradesTab()
     : mainTab === "fallback" ? fallbackTab()
@@ -4674,7 +4685,8 @@ function renderSettings() {
 }
 
 function settingsTab() {
-  var children = [connectionSection()];
+  var children = fixNodes(readiness.state, settings, roadie, readiness.detail, signinWhy);
+  children.push(connectionSection());
   var webPage = webPageSection();
   if (webPage) children.push(webPage);
 
@@ -5152,14 +5164,13 @@ function registerActions() {
     installSlskdWithRoadie().catch(function (e) { console.error("slskd: Roadie install failed:", e); });
   });
   api.ui.onAction("roadie-start", function () {
-    startSlskdWithRoadie(false).catch(function (e) { console.error("slskd: Roadie start failed:", e); });
+    startSlskdWithRoadie().catch(function (e) { console.error("slskd: Roadie start failed:", e); });
   });
-  // The two buttons the warning toast can carry.
-  api.ui.onAction("roadie-start-from-notice", function () {
-    startSlskdWithRoadie(true).catch(function (e) { console.error("slskd: Roadie start failed:", e); });
-  });
-  api.ui.onAction("open-soulseek-view", function () {
-    api.ui.navigateToView(VIEW_ID);
+  // The not-ready banner's "Fix…": the explanation is on top of Settings.
+  api.ui.onAction("slskd-show-fix", function () {
+    activeTab = "settings";
+    render();
+    schedulePoll(false);
   });
   api.ui.onAction("roadie-connect", function () {
     adoptRoadieConnection("button").then(function (ok) {
@@ -6359,8 +6370,10 @@ return {
   _setupGuideUrl: setupGuideUrl,
   _whatIsThisUrl: whatIsThisUrl,
   _setupHomeView: setupHomeView,
+  _wantsSetupScreen: wantsSetupScreen,
   _webLoginFromRoadie: webLoginFromRoadie,
-  _notificationFor: notificationFor,
+  _readinessBanner: readinessBanner,
+  _fixNodes: fixNodes,
   _collectionPaths: collectionPaths,
   _installShareDirs: installShareDirs,
   _roadieCanShareDirs: roadieCanShareDirs,
