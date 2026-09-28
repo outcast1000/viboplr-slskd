@@ -140,6 +140,9 @@ var lastServerState = null;
 var sharesWarned = false;
 
 var downloadsDir = null;
+// slskd's own directories.incomplete, read alongside downloadsDir. Only used to
+// tell a misconfigured slskd from a bad source when a download fails.
+var incompleteDir = null;
 var tier = "remote";
 
 var activeTab = "search";
@@ -335,6 +338,27 @@ function windowsCantStore(username, filename) {
 function isWindowsPathBug(exception) {
   return /Only absolute paths may be specified/.test(String(exception || ""));
 }
+
+// Pure: is this a Windows absolute path with a forward slash in it? slskd
+// builds every partial download under directories.incomplete and demands the
+// result already be normalized, so a configured folder like
+// `C:\Users\x\Music\Soulseek/.incomplete` (what Roadie's slskd recipe wrote before it normalized paths)
+// fails EVERY download with the same "Only absolute paths" error as
+// `windowsCantStore` — no source is at fault and none will work.
+function windowsPathNotNormalized(p) {
+  var s = String(p == null ? "" : p);
+  return (/^[A-Za-z]:[\\\/]/.test(s) || /^\\\\/.test(s)) && s.indexOf("/") >= 0;
+}
+
+// The slskd folder that makes every Windows download fail, or null.
+function misconfiguredSlskdDir(downloads, incomplete) {
+  if (windowsPathNotNormalized(incomplete)) return incomplete;
+  if (windowsPathNotNormalized(downloads)) return downloads;
+  return null;
+}
+
+var MISCONFIGURED_DIR_TEXT = "slskd's download folder mixes / and \\, so slskd on Windows rejects every download. " +
+  "Update Roadie and restart slskd, or fix directories in slskd.yml";
 
 // responses: slskd Search.responses[]. Availability lives on the response,
 // quality on the file, so the unit of ranking is a flattened (response, file).
@@ -764,9 +788,11 @@ function transferSubtitle(t, rec, currentTier) {
     bits.push("from " + user);
     if (currentTier === "local" && !(rec && rec.resolvedPath)) bits.push("locating file…");
   } else if (phase === "failed") {
-    bits.push(isWindowsPathBug(t.exception)
-      ? "Failed — slskd on Windows can't save a file whose folder or sharer name ends in a dot or space; try another source"
-      : "Failed" + (t.exception ? " — " + t.exception : ""));
+    bits.push(!isWindowsPathBug(t.exception)
+      ? "Failed" + (t.exception ? " — " + t.exception : "")
+      : misconfiguredSlskdDir(downloadsDir, incompleteDir)
+        ? "Failed — " + MISCONFIGURED_DIR_TEXT
+        : "Failed — slskd on Windows can't save a file whose folder or sharer name ends in a dot or space; try another source");
     if (t.attempts) bits.push("attempt " + t.attempts);
     bits.push("from " + user);
   } else if (phase === "cancelled") {
@@ -1331,6 +1357,7 @@ async function loadDownloadsDir() {
     var res = await slskd("GET", "/api/v0/options");
     if (res.status >= 200 && res.status < 300 && res.json && res.json.directories) {
       downloadsDir = res.json.directories.downloads || null;
+      incompleteDir = res.json.directories.incomplete || null;
     }
   } catch (e) {
     console.error("slskd: couldn't read options:", e);
@@ -2169,6 +2196,9 @@ function renderIfFallback() {
 }
 
 function recordSharer(username, event, bytes) {
+  // With slskd's own folder misconfigured every download fails here; that
+  // says nothing about the sharer, so don't let it sink their standing.
+  if (event === "failed" && misconfiguredSlskdDir(downloadsDir, incompleteDir)) return;
   noteSharer(sharers, username, event, bytes);
   api.storage.set("sharers", sharers).catch(function (e) { console.error("slskd: couldn't save the sharer ledger:", e); });
 }
@@ -2899,6 +2929,7 @@ async function adoptRoadieConnection(reason) {
   ]).catch(function (e) { console.error("slskd: couldn't save Roadie connection:", e); });
   api.log("info", "connected to slskd through Roadie (" + reason + ") at " + c.url, "slskd");
   downloadsDir = null;
+  incompleteDir = null;
   roadie.error = null;
   return true;
 }
@@ -3651,6 +3682,7 @@ async function uninstallSlskdWithRoadie(keepData) {
   // a stale "installed" would keep pointing the plugin at a dead address.
   webLogin = null;
   downloadsDir = null;
+  incompleteDir = null;
   await releaseRoadieConnection();
   await probeRoadie(true);
   await refreshReadiness();
@@ -4763,7 +4795,9 @@ function settingsTab() {
         description: "Comma-separated, best first — e.g. \"flac, mp3\". Leave empty to rank purely by quality.",
         control: { type: "text-input", placeholder: "flac, mp3", action: "set-formats", value: settings.preferredFormats } },
       { type: "settings-row", label: "Downloads folder",
-        description: downloadsDir || "Read from slskd once connected." }
+        description: misconfiguredSlskdDir(downloadsDir, incompleteDir)
+          ? downloadsDir + " — " + MISCONFIGURED_DIR_TEXT + "."
+          : downloadsDir || "Read from slskd once connected." }
     ]
   });
 
@@ -6386,6 +6420,7 @@ function saveSetting(key, value) {
     api.storage.set(key, value).catch(function (e) { console.error("slskd: couldn't save " + key + ":", e); });
     if (key === "url" || key === "apiKey" || key === "insecure") {
       downloadsDir = null;
+      incompleteDir = null;
       refreshReadiness().catch(function (e) { console.error("slskd probe failed:", e); });
     } else {
       tier = detectTier(settings.url, settings.tierOverride);
@@ -6651,6 +6686,7 @@ return {
   _upgrades: function () { return upgrades; },
   _meetsQualityTarget: meetsQualityTarget,
   _windowsCantStore: windowsCantStore,
+  _misconfiguredSlskdDir: misconfiguredSlskdDir,
   _isWindowsPathBug: isWindowsPathBug,
   _rankUpgrade: rankUpgrade,
   _upgradeTargetOf: upgradeTargetOf,

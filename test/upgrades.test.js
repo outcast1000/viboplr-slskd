@@ -101,6 +101,19 @@ test("windowsCantStore: a trailing dot or space in the sharer's name or any fold
   assert.equal(plugin._isWindowsPathBug("Transfer rejected: Banned"), false);
 });
 
+// The same error with no bad segment at all: slskd's own incomplete folder is
+// mixed (`…\Soulseek/.incomplete`), so every download fails whatever the source.
+test("misconfiguredSlskdDir: a Windows slskd folder with a forward slash in it", () => {
+  const m = plugin._misconfiguredSlskdDir;
+  const dl = "C:\\Users\\x\\Music\\Soulseek";
+  assert.equal(m(dl, dl + "/.incomplete"), dl + "/.incomplete", "the incomplete folder is the one slskd checks");
+  assert.equal(m("C:/Users/x/Music", "C:\\Users\\x\\Music\\.incomplete"), "C:/Users/x/Music", "all-forward counts too");
+  assert.equal(m("\\\\nas\\music", "\\\\nas\\music/.incomplete"), "\\\\nas\\music/.incomplete", "UNC");
+  assert.equal(m(dl, dl + "\\.incomplete"), null, "normalized is fine");
+  assert.equal(m("/home/x/Music", "/home/x/Music/.incomplete"), null, "not Windows");
+  assert.equal(m(null, null), null, "not read yet");
+});
+
 test("rankResults drops files a Windows slskd can't store, and only on Windows", () => {
   const responses = [
     { username: "peer", hasFreeUploadSlot: true, files: [

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.10.1
+
+- **Windows: a misconfigured slskd is no longer blamed on the source.** slskd rejects every
+  download with "Only absolute paths may be specified" when its own download folder mixes `/`
+  and `\` (Roadie's slskd recipe wrote `…\Soulseek/.incomplete`; fixed in Roadie 0.5.1). The failed
+  row and Settings → Downloads folder now say so and what to do (update Roadie and restart
+  slskd), instead of "try another source", and those failures no longer count against the
+  sharers.
+
 ## 0.10.0
 
 - **An AI assistant can upgrade your tracks from Soulseek.** Over Viboplr's AI control (API or
