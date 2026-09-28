@@ -57,7 +57,7 @@ call's shape.
 | Context menu `slskd-search` | track / album / artist | "Search…" (shown as "Soulseek: Search…") |
 | Context menu `slskd-upgrade` | track | "Upgrade" (shown as "Soulseek: Upgrade") — **automatic**: `queueUpgrade` adds an entry to the Upgrades tab, which finds, downloads and checks a better copy (see *Automatic upgrades* below); "Choose myself…" on the row opens the old interactive search (`startUpgrade`, filtered by `isUpgradeOver`). Both stamp the download `upgrade: { trackId }`, and "Compare & replace…" / the Downloads row's "Replace in library…" hand the host modal `libraryTrackId` |
 | Context menu `slskd-fill-album` | album | "Fill missing tracks…" (shown as "Soulseek: Fill missing tracks…") — folders compared against the album's library rows (`ownedTrackFor`); "Fill" downloads only the missing files |
-| Assistant tools | `status`, `search`, `download`, `list_downloads` | for the host's control API / MCP |
+| Assistant tools | `status`, `search` (+ `upgradeFor`), `download`, `list_downloads` (+ `uri`), `upgrade`, `list_upgrades` | for the host's control API / MCP; uris are `toolUri` (percent-encoded), resolvers `decodeRef` them |
 
 `test/transfers.test.js` ("activate registers every surface the manifest declares") fails
 if a declared surface has no handler — add both together.
@@ -215,7 +215,7 @@ The running app exposes a localhost **control API**; port and bearer token are i
 `~/Library/Application Support/com.alex.viboplr/profiles/default/control-api.json`.
 Useful calls (`Authorization: Bearer <token>`):
 
-- `POST /v1/assistant/invoke {"pluginId":"slskd","tool":"status"|"search"|"download"|"list_downloads","args":{…}}`
+- `POST /v1/assistant/invoke {"pluginId":"slskd","tool":"status"|"search"|"download"|"list_downloads"|"upgrade"|"list_upgrades","args":{…}}`
 - `POST /v1/search/plugin {"provider":"spotify-browse:spotify","query":…}` then
   `POST /v1/queue/play-search {"searchId":…,"indices":[0],"mode":"next"}` and
   `POST /v1/playback {"action":"next"}` — a metadata-only track that exercises the

@@ -186,6 +186,9 @@ var searchChain = Promise.resolve();
 // The last ranked list the assistant `search` tool produced, keyed by candidate
 // id, so `download` can be handed ids instead of (user, filename, size) triples.
 var toolResults = {};
+// The upgrade mode of the assistant's last search (null for a plain one) —
+// what its `download` stamps onto the tracked record.
+var toolMode = null;
 
 var readinessTimer = null;
 var transferTimer = null;
@@ -2093,6 +2096,20 @@ async function currentPath(ref, rec) {
 
 function findTrackedByRef(ref) {
   return tracked[ref] || null;
+}
+
+// The slsk:// URIs handed to an ASSISTANT are percent-encoded (`toolUri`): a
+// model can't be trusted to echo the NUL inside a key back byte for byte. The
+// resolvers decode before looking up; a raw key (what every host-internal
+// caller passes) has a NUL or no "%" at all and is left alone.
+function decodeRef(ref) {
+  var s = String(ref || "");
+  if (s.indexOf(KEY_SEP) >= 0 || s.indexOf("%") < 0) return s;
+  try { return decodeURIComponent(s); } catch (e) { return s; }
+}
+
+function toolUri(key) {
+  return SCHEME + "://" + encodeURIComponent(key);
 }
 
 // ---------------------------------------------------------------------------
@@ -4243,8 +4260,8 @@ function modeHeader() {
 
 // What a download started from a mode carries into its tracked record — see
 // `enqueueBatch`'s `recExtra`.
-function modeRecExtra() {
-  var m = search.mode;
+function modeRecExtra(mode) {
+  var m = mode === undefined ? search.mode : mode;
   if (!m) return null;
   if (m.kind === "upgrade") {
     return {
@@ -5626,11 +5643,17 @@ async function queueUpgrade(target) {
     return plainSearch({ kind: "track", title: row.title, artistName: row.artist_name },
       "Upgrade replaces a local file, and “" + row.title + "” isn't one — searching Soulseek for it instead.");
   }
+  await beginUpgrade(row);
+}
+
+// Start (or restart) the automatic upgrade of one local library row. Returns
+// the entry, or null when one is already running for it.
+async function beginUpgrade(row) {
   var key = upgradeKey(row.id);
   var open = { label: "Show", id: "open-upgrades" };
   if (upgradeIsBusy(upgrades[key])) {
     api.ui.showNotification("“" + row.title + "” is already being upgraded.", { action: open });
-    return;
+    return null;
   }
   var current = libraryQuality(row);
   upgrades[key] = {
@@ -5662,6 +5685,7 @@ async function queueUpgrade(target) {
   render();
   if (readiness.state === "ready") advanceUpgrades().catch(function (e) { console.error("slskd: advancing upgrades failed:", e); });
   schedulePoll(true);
+  return upgrades[key];
 }
 
 // Run the search for one entry. Not awaited by the poll: it takes up to
@@ -6127,7 +6151,10 @@ function toolTransfer(t) {
   var key = trackKeyOf(t);
   var rec = tracked[key];
   var meta = (rec && rec.meta) || parseTrackMeta(t.filename);
+  var finished = transferPhase(t.state) === "succeeded" && tier === "local" && rec && rec.resolvedPath;
   return {
+    uri: finished ? toolUri(key) : null,
+    upgradeFor: rec && rec.upgrade ? rec.upgrade.trackId : null,
     user: t.username,
     filename: basenameRemote(t.filename),
     title: meta.title || null,
@@ -6144,6 +6171,58 @@ function toolTransfer(t) {
     attempts: t.attempts || null,
     localPath: (rec && rec.resolvedPath && tier === "local") ? rec.resolvedPath : null,
     startedByViboplr: !!rec
+  };
+}
+
+// The library row an assistant names for an upgrade, or a readable refusal —
+// the same two checks the context-menu Upgrade makes, as errors instead of a
+// fallback to plain search (a model asked for an upgrade, not a search).
+async function upgradableRow(trackId) {
+  var id = Number(trackId);
+  if (!isFinite(id)) throw new Error('"trackId" (a library track id) is required');
+  if (!api.library || typeof api.library.getTrackById !== "function") throw new Error("this Viboplr can't read library tracks for plugins");
+  var row = await api.library.getTrackById(id);
+  if (!row) throw new Error("no library track with id " + id);
+  if (!row.path || String(row.path).indexOf("file://") !== 0) {
+    throw new Error("track " + id + " (“" + row.title + "”) isn't a local file — only a local file can be upgraded");
+  }
+  return row;
+}
+
+function upgradeModeFor(row) {
+  return {
+    kind: "upgrade",
+    trackId: row.id,
+    title: row.title,
+    artist: row.artist_name || null,
+    album: row.album_title || null,
+    trackNumber: row.track_number || null,
+    current: libraryQuality(row),
+    showAll: false
+  };
+}
+
+// One Upgrades entry for an assistant. A ready entry carries the finished
+// file's `uri` — what the host's replace verb takes.
+function toolUpgrade(e) {
+  var t = e.active ? transferByKey(e.active.key) : null;
+  var ready = e.state === "ready" && e.file;
+  return {
+    trackId: e.trackId,
+    title: e.title,
+    artist: e.artist || null,
+    state: e.state,
+    message: e.message || null,
+    current: e.currentLabel || null,
+    target: UPGRADE_TARGETS[upgradeTargetOf(e.target)] || e.target,
+    downloading: e.state === "downloading" && e.active ? {
+      user: e.active.username,
+      quality: qualityLabel(e.active),
+      progress: t ? transferProgress(t) : null,
+      placeInQueue: t && t.placeInQueue != null ? t.placeInQueue : null
+    } : null,
+    ready: ready ? { quality: qualityLabel(e.file.quality), sizeBytes: e.file.size || null, uri: toolUri(e.file.key) } : null,
+    alternative: e.state === "alternative" && e.alternative ? qualityLabel(e.alternative) : null
   };
 }
 
@@ -6172,21 +6251,44 @@ function registerAssistantTools() {
 
   api.assistant.onTool("search", async function (args) {
     var q = typeof args.query === "string" ? args.query.trim() : "";
-    if (!q) throw new Error('"query" (string) is required');
+    // Upgrade mode: the library row sets the query, the duration filter and
+    // the bar a result has to clear — the view's "Upgrade with Soulseek…".
+    var mode = null;
+    var known = args.durationSecs != null && !isNaN(Number(args.durationSecs)) ? Number(args.durationSecs) : null;
+    if (args.upgradeFor != null) {
+      var row = await upgradableRow(args.upgradeFor);
+      mode = upgradeModeFor(row);
+      if (!q) q = searchQueryForTarget({ kind: "track", title: row.title, artistName: row.artist_name });
+      if (known == null && row.duration_secs > 0) known = row.duration_secs;
+    }
+    if (!q) throw new Error('"query" (string) is required, unless upgradeFor names a library track');
     if (readiness.state !== "ready") throw new Error("slskd is not ready (" + readiness.state + ") — see the status tool");
     var limit = Math.min(100, Math.max(1, parseInt(args.limit, 10) || 25));
-    var prefs = viewPrefs(args.durationSecs != null && !isNaN(Number(args.durationSecs))
-      ? { knownDurationSecs: Number(args.durationSecs) } : null);
+    var prefs = viewPrefs(known != null ? { knownDurationSecs: known } : null);
     var ranked = await performSearch(q, prefs, null, null);
     if (ranked === null) ranked = [];
+    annotateForMode(ranked, mode);
     toolResults = {};
+    toolMode = mode;
     for (var i = 0; i < ranked.length; i++) toolResults[candidateId(ranked[i])] = ranked[i];
-    return {
+    var shown = mode && !args.showAll ? ranked.filter(function (c) { return c.better; }) : ranked;
+    var out = {
       query: q,
       total: ranked.length,
       note: "Ranked best-first: preferred format, then quality tier, then who can send it soonest. Pass ids to download; every file of a folder from one user = the whole album.",
-      results: ranked.slice(0, limit).map(toolCandidate)
+      results: shown.slice(0, limit).map(function (c) {
+        var r = toolCandidate(c);
+        if (mode) r.better = !!c.better;
+        return r;
+      })
     };
+    if (mode) {
+      out.upgradeFor = { trackId: mode.trackId, title: mode.title, artist: mode.artist, current: currentLabelFor(mode.current) };
+      out.better = ranked.filter(function (c) { return c.better; }).length;
+      out.note = (args.showAll ? "Every file found; better = beats the library copy. " : "Only files that beat the library copy (showAll=true for everything). ") +
+        "download stamps the file as this track's upgrade; once finished, list_downloads gives its uri for the host's replace_track_file.";
+    }
+    return out;
   });
 
   api.assistant.onTool("download", async function (args) {
@@ -6209,7 +6311,7 @@ function registerAssistantTools() {
     for (var u = 0; u < users.length; u++) {
       var files = byUser[users[u]];
       var label = basenameRemote(dirnameRemote(files[0].filename));
-      var out = await enqueueBatch(users[u], files, label);
+      var out = await enqueueBatch(users[u], files, label, null, modeRecExtra(toolMode));
       for (var q = 0; q < out.queued.length; q++) queued.push({ user: users[u], filename: basenameRemote(out.queued[q].filename) });
       for (var f = 0; f < out.failures.length; f++) failures.push({ user: users[u], filename: basenameRemote(out.failures[f].filename), message: out.failures[f].message || "refused" });
     }
@@ -6232,7 +6334,47 @@ function registerAssistantTools() {
         console.error("slskd: list_downloads refresh failed:", e);
       }
     }
-    return { downloads: transfers.map(toolTransfer) };
+    return {
+      downloads: transfers.map(toolTransfer),
+      note: "A finished file's uri is what Viboplr's replace_track_file (upgradeFor rows) or download_plugin_track takes."
+    };
+  });
+
+  api.assistant.onTool("upgrade", async function (args) {
+    var action = args.action || "start";
+    var key = upgradeKey(Number(args.trackId));
+    if (action === "start") {
+      var row = await upgradableRow(args.trackId);
+      var e = await beginUpgrade(row);
+      if (!e) return { started: false, note: "already being upgraded", upgrade: toolUpgrade(upgrades[key]) };
+      return { started: true, upgrade: toolUpgrade(e),
+        note: "Runs in the background (search, download, then a size-over-duration check); watch list_upgrades until state is ready." };
+    }
+    var existing = upgrades[key];
+    if (!existing) throw new Error("no upgrade for track " + args.trackId + " — start one with action=start");
+    if (action === "retry") await retryUpgrade(key);
+    else if (action === "take_alternative") await takeUpgradeAlternative(key);
+    else if (action === "remove") { await removeUpgrade(key); return { removed: true, trackId: existing.trackId }; }
+    else throw new Error('unknown action "' + action + '" — start, retry, take_alternative or remove');
+    return { upgrade: toolUpgrade(upgrades[key]) };
+  });
+
+  api.assistant.onTool("list_upgrades", async function () {
+    var keys = Object.keys(upgrades);
+    var changed = false;
+    for (var i = 0; i < keys.length; i++) {
+      var e = upgrades[keys[i]];
+      if (!e || e.state !== "ready") continue;
+      // A replace done through the host's API (not this view's dialog) is
+      // noticed here and, via replaceRequested, by the poll from now on.
+      if (await detectReplaced(e)) { changed = true; continue; }
+      if (!e.replaceRequested) { e.replaceRequested = true; changed = true; }
+    }
+    if (changed) await saveUpgrades();
+    return {
+      upgrades: keys.map(function (k) { return upgrades[k]; }).filter(Boolean).map(toolUpgrade),
+      note: "When state is ready, show the user current vs ready.quality and pass ready.uri to Viboplr's replace_track_file (it stages, compares, and replaces only on confirm)."
+    };
   });
 }
 
@@ -6313,6 +6455,7 @@ async function activate(hostApi) {
   // raw substring(7), so the path must NOT be percent-encoded.
   api.playback.onResolveStreamByUri(SCHEME, async function (ref) {
     if (tier !== "local") return null;
+    ref = decodeRef(ref);
     var rec = findTrackedByRef(ref);
     if (!rec) return null;
     var path = await currentPath(ref, rec);
@@ -6333,7 +6476,7 @@ async function activate(hostApi) {
   // There is still no metadata-based DOWNLOAD provider: a download the user
   // asked for by hand deserves a picked file, not the fallback's best guess.
   api.downloads.onResolveByUri(PROVIDER_ID, async function (uri) {
-    var ref = String(uri || "").replace(/^slsk:\/\//, "");
+    var ref = decodeRef(String(uri || "").replace(/^slsk:\/\//, ""));
     var rec = findTrackedByRef(ref);
     var path = await currentPath(ref, rec);
     if (!path) return null;

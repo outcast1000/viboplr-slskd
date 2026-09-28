@@ -1,7 +1,7 @@
 {
   "id": "slskd",
   "name": "Soulseek",
-  "version": "0.9.7",
+  "version": "0.10.0",
   "author": "Viboplr",
   "description": "Search and download from the Soulseek network via a slskd daemon: ranked results, whole-album grabs, live transfer progress, finished files that play and reach your library, and a playback fallback that fetches a missing track from Soulseek.",
   "minAppVersion": "1.0.72",
@@ -30,7 +30,7 @@
   ],
   "contributes": {
     "assistant": {
-      "instructions": "Fetch music from the Soulseek peer-to-peer network through the user's slskd daemon. Flow: status (connected? signed in? where do downloads land?) → search (a real network search, ~5-30s; results are ranked best-first and carry an id) → download with one or more result ids. A download sits in another user's upload queue — it can take minutes or hours — so watch it with list_downloads rather than waiting. download is a real transfer the user's daemon performs: only download what the user actually asked for. Finished files play from the Downloads tab, and land in the library automatically when slskd's downloads folder is inside a collection.",
+      "instructions": "Fetch music from the Soulseek peer-to-peer network through the user's slskd daemon. Flow: status (connected? signed in? where do downloads land?) → search (a real network search, ~5-30s; results are ranked best-first and carry an id) → download with one or more result ids. A download sits in another user's upload queue — it can take minutes or hours — so watch it with list_downloads rather than waiting. download is a real transfer the user's daemon performs: only download what the user actually asked for. Finished files play from the Downloads tab, and land in the library automatically when slskd's downloads folder is inside a collection. Upgrading a library track to a better copy, two ways: (a) interactive — search with upgradeFor=<library track id> (only files that beat the copy in hand), let the user pick, download, watch list_downloads until the row has a uri; (b) automatic — upgrade with the track id (this plugin searches, downloads and checks the file itself), watch list_upgrades until state is ready. Either way the finished file's uri goes to Viboplr's replace_track_file, which stages it and shows current vs new; replace only after the user says yes.",
       "tools": [
         {
           "name": "status",
@@ -44,9 +44,10 @@
             "properties": {
               "query": { "type": "string", "description": "Free text — artist, album and/or track. Soulseek matches on file and folder names" },
               "limit": { "type": "number", "description": "1-100, default 25" },
-              "durationSecs": { "type": "number", "description": "Expected track length; candidates more than 5s off are dropped (catches mislabeled files)" }
-            },
-            "required": ["query"]
+              "durationSecs": { "type": "number", "description": "Expected track length; candidates more than 5s off are dropped (catches mislabeled files)" },
+              "upgradeFor": { "type": "number", "description": "Library track id of a LOCAL file to upgrade: query and duration default to that track, and only results that beat its quality are returned. A download from this search is stamped as that track's upgrade" },
+              "showAll": { "type": "boolean", "description": "With upgradeFor: return every result, each flagged better true/false" }
+            }
           }
         },
         {
@@ -62,7 +63,23 @@
         },
         {
           "name": "list_downloads",
-          "description": "The downloads slskd is managing: file, user, phase (requested / queued / starting / downloading / succeeded / failed / cancelled), progress (0-1), place in the other user's queue, speed, error, and — once finished and slskd runs on this computer — the local path"
+          "description": "The downloads slskd is managing: file, user, phase (requested / queued / starting / downloading / succeeded / failed / cancelled), progress (0-1), place in the other user's queue, speed, error, upgradeFor (the library track it was fetched to upgrade), and — once finished and slskd runs on this computer — the local path and a uri for Viboplr's replace_track_file / download_plugin_track"
+        },
+        {
+          "name": "upgrade",
+          "description": "The automatic Upgrade (the Upgrades tab): action=start looks for a better copy of a LOCAL library track in the background — search, pick, download from a sharer, then check the real bitrate — at the user's Upgrade target setting. Also retry, take_alternative (accept the best better copy that missed the target) and remove. Never replaces anything itself",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "trackId": { "type": "number", "description": "Library track id" },
+              "action": { "type": "string", "enum": ["start", "retry", "take_alternative", "remove"], "description": "Default start" }
+            },
+            "required": ["trackId"]
+          }
+        },
+        {
+          "name": "list_upgrades",
+          "description": "Every automatic upgrade: state (searching / downloading / checking / ready / alternative / none / failed / replaced), message, the library copy's quality, live download progress, and — when ready — the checked file's quality and the uri for Viboplr's replace_track_file"
         }
       ]
     },

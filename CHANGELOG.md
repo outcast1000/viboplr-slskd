@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.10.0
+
+- **An AI assistant can upgrade your tracks from Soulseek.** Over Viboplr's AI control (API or
+  MCP), `search` takes `upgradeFor: <library track id>` and returns only files that beat your
+  copy, and a download from that search counts as that track's upgrade. The new `upgrade` and
+  `list_upgrades` tools run the Upgrades tab's automatic flow. Finished files now come with a
+  `uri` that Viboplr's new `replace_track_file` takes: it shows your copy and the new one side by
+  side and replaces only after you say yes, sending the old file to the Trash. The `uri` is
+  percent-encoded, so an assistant never has to copy the invisible separator inside download
+  keys. Replacing needs a Viboplr with `replace_track_file`; everything else works on the
+  current one.
+
 ## 0.9.7
 
 - **The Soulseek view says whether slskd works, at the top.** On a Viboplr that draws a header on

@@ -440,3 +440,95 @@ test("integration: the Upgrade target is a setting, and Upgrade on a non-library
     p.deactivate();
   }
 });
+
+// --- the assistant surface ---------------------------------------------------
+// The host's replace_track_file takes a plugin uri. These tools hand one out,
+// percent-encoded because a model can't be trusted to echo a NUL back, and the
+// download resolver must take that form as readily as the raw key.
+
+const FLAC_AND_TWIN = [
+  { username: "peer", hasFreeUploadSlot: true, queueLength: 0, uploadSpeed: 1000, files: [
+    { filename: "m\\Radiohead\\06 - Karma Police.flac", size: 30e6, length: 264, bitDepth: 16, sampleRate: 44100 },
+    { filename: "m\\Radiohead\\06 - Karma Police (192).mp3", size: 6.3e6, length: 264, bitRate: 192 }] }
+];
+
+test("assistant: search upgradeFor returns only better files, download stamps the upgrade, list_downloads hands out a resolvable uri", async () => {
+  const p = loadPlugin();
+  const { h, calls } = upgradeHost({ responses: FLAC_AND_TWIN });
+  await p.activate(h.api);
+  try {
+    const out = await h.tools.search({ upgradeFor: 42 });
+    assert.equal(out.upgradeFor.trackId, 42);
+    assert.equal(out.results.length, 1, "the 192 twin is not an upgrade over a 192 copy");
+    assert.equal(out.results[0].format, "flac");
+    assert.equal(out.results[0].better, true);
+    const all = await h.tools.search({ upgradeFor: 42, showAll: true });
+    assert.equal(all.results.length, 2);
+
+    await h.tools.download({ ids: [out.results[0].id] });
+    assert.equal(calls.batches.length, 1);
+    await pollUntil(p, () => Object.values(h.store.tracked || {}).some((r) => r.resolvedPath), "the file to be located");
+    const list = await h.tools.list_downloads({});
+    const row = list.downloads.find((d) => d.phase === "succeeded");
+    assert.ok(row, JSON.stringify(list.downloads));
+    assert.equal(row.upgradeFor, 42, "stamped as track 42's upgrade");
+    assert.ok(row.uri.startsWith("slsk://"), row.uri);
+    assert.ok(!row.uri.includes(SEP), "no raw NUL in an assistant-facing uri");
+
+    const resolved = await h.resolvers["download:slskd-import"](row.uri, "original");
+    assert.ok(resolved && resolved.url.startsWith("file://"), JSON.stringify(resolved));
+    assert.equal(resolved.metadata.title, "Karma Police", "the library's own metadata rides along");
+  } finally {
+    p.deactivate();
+  }
+});
+
+test("assistant: upgrade runs the automatic flow, list_upgrades gives the ready uri, and a replace done through the host is noticed", async () => {
+  const p = loadPlugin();
+  const { h, library } = upgradeHost({ responses: FLAC_AND_TWIN });
+  await p.activate(h.api);
+  try {
+    const started = await h.tools.upgrade({ trackId: 42 });
+    assert.equal(started.started, true);
+    assert.equal(started.upgrade.state, "searching");
+    const again = await h.tools.upgrade({ trackId: 42 });
+    assert.equal(again.started, false, "one upgrade per track");
+
+    await waitFor(() => entryOf(p) && entryOf(p).state === "downloading", 8000, "the download to start");
+    await pollUntil(p, () => entryOf(p).state === "ready", "ready");
+    const listed = await h.tools.list_upgrades({});
+    const u = listed.upgrades[0];
+    assert.equal(u.state, "ready");
+    assert.ok(u.ready.quality.startsWith("FLAC"), u.ready.quality);
+    assert.ok(!u.ready.uri.includes(SEP));
+    const resolved = await h.resolvers["download:slskd-import"](u.ready.uri, "original");
+    assert.ok(resolved && resolved.url.startsWith("file://"));
+
+    // The host's replace_track_file swapped the file under the same row.
+    library.tracks[0].path = "file:///Users/me/Music/RH/06 Karma Police.flac";
+    library.tracks[0].file_size = 30e6;
+    const after = await h.tools.list_upgrades({});
+    assert.equal(after.upgrades[0].state, "replaced");
+  } finally {
+    p.deactivate();
+  }
+});
+
+test("assistant: upgrade refuses a track that isn't a local library file, and unknown actions", async () => {
+  const p = loadPlugin();
+  const { h, library } = upgradeHost({ responses: [] });
+  library.tracks.push({ id: 43, path: "subsonic://1/abc", title: "Remote", artist_name: "X" });
+  await p.activate(h.api);
+  try {
+    await assert.rejects(() => h.tools.upgrade({ trackId: 99 }), /no library track with id 99/);
+    await assert.rejects(() => h.tools.upgrade({ trackId: 43 }), /isn't a local file/);
+    await assert.rejects(() => h.tools.search({ upgradeFor: 43 }), /isn't a local file/);
+    await assert.rejects(() => h.tools.upgrade({ trackId: 42, action: "retry" }), /no upgrade for track 42/);
+    await h.tools.upgrade({ trackId: 42 });
+    await assert.rejects(() => h.tools.upgrade({ trackId: 42, action: "explode" }), /unknown action/);
+    assert.deepEqual(await h.tools.upgrade({ trackId: 42, action: "remove" }), { removed: true, trackId: 42 });
+    assert.equal(Object.keys(p._upgrades()).length, 0);
+  } finally {
+    p.deactivate();
+  }
+});

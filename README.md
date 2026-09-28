@@ -182,14 +182,22 @@ The plugin guesses from the address you enter and you can override it with
 ## Assistant tools
 
 On hosts with the assistant surface (Viboplr 1.0.60+), an AI assistant using
-Viboplr's control API or MCP server gets four tools:
+Viboplr's control API or MCP server gets six tools:
 
 | Tool | What it does |
 |---|---|
 | `status` | Connection state, Soulseek username, slskd version, whether slskd shares anything, where downloads land and whether they reach the library automatically |
-| `search` | A real network search (5–30 s, one at a time). Ranked candidates with an `id`, quality, size, duration and availability |
+| `search` | A real network search (5–30 s, one at a time). Ranked candidates with an `id`, quality, size, duration and availability. `upgradeFor: <library track id>` returns only files that beat that track's copy (`showAll` for everything, flagged `better`) |
 | `download` | Queue results by `id` — a real transfer the daemon performs, so only what the user asked for. Every file of one folder = the whole album |
-| `list_downloads` | Every transfer with phase, progress, queue position, speed, error, and the local path once finished |
+| `list_downloads` | Every transfer with phase, progress, queue position, speed, error, the library track it upgrades, and — once finished — the local path and a `uri` |
+| `upgrade` | The Upgrades tab's automatic flow for one local library track: `start` (default), `retry`, `take_alternative`, `remove` |
+| `list_upgrades` | Every automatic upgrade's state; a `ready` one carries the checked file's quality and its `uri` |
+
+A finished file's `uri` is what Viboplr's `replace_track_file` takes (Viboplr
+1.0.78+): it stages the file, shows your copy against the new one, and
+replaces only on a second, confirming call — the old file goes to the Trash.
+The uri is percent-encoded so an assistant never has to reproduce the
+separator inside a download key.
 
 `search` runs its own search and never touches what you have open in the
 sidebar; `download` goes through the same code as a clicked download, so an
