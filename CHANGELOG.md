@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.11.0
+
+- **First run finds your slskd by itself.** Before anything else, the plugin looks for a slskd
+  already running on this computer (ports 5030–5040, and HTTPS on 5031), with no Roadie involved.
+  It connects straight away when the key it has works, as after the setup guide, or when slskd
+  needs none. Otherwise it asks for one of slskd's API keys and says where to find it. The whole
+  setup works without Roadie. Roadie comes in only when no slskd is found and you choose to
+  install it automatically.
+- **Roadie 0.6: slskd's setup revision 6.** A newer slskd setup from Roadie shows on the card as
+  *Review update…* and is reviewed in Roadie's dialog. The new shared key is then picked up
+  without a "Key rejected" screen. When slskd manages its own settings, *Share…* asks you to
+  confirm the folders here, then adds them through slskd's own settings, which slskd validates.
+  A settings file the plugin won't edit is left alone, with the folders to add by hand.
+- **Another slskd already running** is named on the automatic-install page before you install,
+  with *Connect to it instead…*.
+- An offline Roadie that hasn't loaded slskd's setup yet says so, instead of "unknown tool".
+
 ## 0.10.1
 
 - **Windows: a misconfigured slskd is no longer blamed on the source.** slskd rejects every

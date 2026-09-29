@@ -111,6 +111,14 @@ Owner decisions that must hold:
   feature-detected (older hosts have no header), so it needs no `minAppVersion` bump; the manifest's
   `viewHeader.subtitle` is the fallback before the first render. Keep the header to state + where
   slskd is + *Open slskd*; a fix button belongs in `readinessBanner`, not in the header.
+- **Find slskd first; Roadie is only for installing it** (owner, 2026-09-29). The first run
+  looks for a slskd already running here (`discoverSlskd`: `GET /api/v0/session/enabled` on
+  127.0.0.1:5030–5040 and https:5031, which slskd answers without a key with `true`/`false`)
+  before any Roadie call. `refreshReadiness` doesn't reach Roadie while `discovery.state` isn't
+  `none`. Found: the plugin's own key is tried, then the user is asked for one of slskd's keys
+  (`discoveryNodes`). "Get the key from Roadie" is a second way, shown only when Roadie runs that
+  very slskd. The whole setup must work with no Roadie at all. Roadie's role is installing slskd
+  when none is found and the user chooses the automatic install.
 - **The user owns slskd; Roadie runs it for them, never Viboplr.** The host never installs,
   launches, supervises or configures a third-party daemon itself (a host-managed slskd sidecar
   was built and rejected). The two ways to get slskd are the guided setup (the GitHub Pages

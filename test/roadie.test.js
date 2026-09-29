@@ -57,11 +57,11 @@ const clickable = (nodes) => {
 
 test("first-run hub: install automatically, install manually, or connect — nothing else on screen", () => {
   const hub = plugin._setupHomeView("unconfigured", { url: "", managedBy: null }, { supported: true, installed: false });
-  assert.deepEqual(clickable(hub), ["page:install-auto", "page:install-manual", "page:connect", "setup-open-about"]);
+  assert.deepEqual(clickable(hub), ["page:install-auto", "page:install-manual", "page:connect", "discover-again", "setup-open-about"]);
   const text = JSON.stringify(hub);
   assert.ok(!text.includes("text-input"), "no address/key fields and no account form on the hub");
   const noRoadie = plugin._setupHomeView("unconfigured", { url: "", managedBy: null }, { supported: false });
-  assert.deepEqual(clickable(noRoadie), ["page:install-manual", "page:connect", "setup-open-about"], "no Roadie → no automatic option");
+  assert.deepEqual(clickable(noRoadie), ["page:install-manual", "page:connect", "discover-again", "setup-open-about"], "no Roadie → no automatic option");
 });
 
 test("hub: an slskd Roadie already has is offered first", () => {
@@ -98,6 +98,19 @@ function fakeRoadie(state) {
       return { exitCode: 0, stdout: JSON.stringify(state.tool), stderr: "" };
     }
     if (cmd[0] === "tool" && cmd[1] === "logs") return { exitCode: 0, stdout: JSON.stringify({ lines: state.logLines || [] }), stderr: "" };
+    if (cmd[0] === "tool" && cmd[1] === "options") {
+      if (!state.options) return { exitCode: 3, stdout: "", stderr: "roadie: unknown command `tool options slskd`" };
+      return { exitCode: 0, stdout: JSON.stringify(state.options), stderr: "" };
+    }
+    if (cmd[0] === "tool" && cmd[1] === "upgrade") {
+      state.upgradeAsked = (state.upgradeAsked || 0) + 1;
+      if (opts && opts.onStart) opts.onStart({ cancel() { state.cancelled = true; } });
+      opts && opts.onOutput && opts.onOutput("roadie: asking the user in a dialog…", "stderr");
+      if (state.decline) return { exitCode: 2, stdout: JSON.stringify({ status: "declined" }), stderr: "" };
+      state.tool = { ...state.tool, revision: state.tool.recipeUpdate.revision, recipeUpdate: null, configurable: false };
+      state.key = "s".repeat(48); // the new setup hands out a new (shared) key
+      return { exitCode: 0, stdout: JSON.stringify({ status: "done" }), stderr: "" };
+    }
     if (cmd[0] === "tool" && cmd[1] === "install" && state.tool && state.tool.installed) {
       state.reinstallArgs = cmd;
       if (opts && opts.onStart) opts.onStart({ cancel() { state.cancelled = true; } });
@@ -146,7 +159,7 @@ function fakeRoadie(state) {
     }
     if (cmd[0] === "tool" && cmd[1] === "connection") {
       state.connectionAsked = (state.connectionAsked || 0) + 1;
-      const conn = { url: "http://127.0.0.1:5030", apiKey: "r".repeat(48) };
+      const conn = { url: "http://127.0.0.1:5030", apiKey: state.key || "r".repeat(48) };
       if (state.webLogin) conn.webLogin = state.webLogin;
       return { exitCode: 0, stdout: JSON.stringify(conn), stderr: "" };
     }
@@ -213,9 +226,10 @@ test("setup steps: the approval step says where the dialog is; sign-in failures 
   assert.match(plugin._signinFailure("disconnected", null), /No Soulseek account/);
 });
 
-test("integration: a fresh plugin adopts an approved Roadie connection on its first readiness pass", async () => {
+test("integration: with no slskd found by itself, a fresh plugin adopts an approved Roadie connection", async () => {
   const state = { tool: installedApproved };
   await withPlugin({ store: { url: "", apiKey: "" }, dependencies: roadieHere, exec: fakeRoadie(state) }, async (host) => {
+    await until(() => host.store.managedBy === "roadie", 2000);
     assert.equal(host.store.url, "http://127.0.0.1:5030");
     assert.equal(host.store.apiKey, "r".repeat(48));
     assert.equal(host.store.managedBy, "roadie");
@@ -608,7 +622,7 @@ test("integration: Show login on a Roadie slskd asks Roadie and shows its genera
     await host.actions["slskd-show-login"]();
     await until(() => settingsView(host).includes("f".repeat(32)));
     const v = settingsView(host);
-    assert.ok(v.includes('"value":"roadie"') && v.includes("Roadie generated"), v.slice(0, 800));
+    assert.ok(v.includes('"value":"roadie"') && v.includes("Roadie set up"), v.slice(0, 800));
     assert.equal(host.store.webPassword, undefined, "never stored");
     await host.actions["slskd-hide-login"]();
     assert.ok(!settingsView(host).includes("f".repeat(32)));
@@ -1031,5 +1045,271 @@ test("integration: Share… sends Roadie the folder list, then slskd is asked to
     assert.ok(!lastView(host).includes('"action":"roadie-share-collections"'), "nothing left to share");
     assert.ok(lastView(host).includes("Shared: /Users/a/Music/Soulseek, /Users/a/Downloads"));
     assert.equal(host.calls.notifications.length, 0, "success is the row changing");
+  });
+});
+
+
+// ---- Roadie 0.6: one shared key, slskd owns its settings, another copy ----
+
+test("auto-config: a managed key slskd rejects is read again from Roadie, once per key", () => {
+  const act = plugin._roadieAutoConfigAction;
+  const managed = { url: "http://127.0.0.1:5030", apiKey: "k", managedBy: "roadie" };
+  assert.equal(act(managed, installedApproved, "unauthorized"), "rekey", "Roadie's slskd changed its key (a new setup): fetch it, no dialog");
+  assert.equal(act(managed, installedApproved, "ok"), null);
+  assert.equal(act({ ...managed, managedBy: null }, installedApproved, "unauthorized"), null, "a typed connection is never re-keyed behind the user's back");
+  assert.equal(act(managed, { ...installedApproved, approvedConsumers: [] }, "unauthorized"), null, "unapproved: fetching would open Roadie's dialog");
+});
+
+test("integration: after Roadie's new slskd setup, the old key's 401 heals itself with the shared key", async () => {
+  const state = { tool: installedApproved, key: "s".repeat(48) };
+  await withPlugin({
+    store: { url: "http://127.0.0.1:5030", apiKey: "r".repeat(48), managedBy: "roadie" },
+    dependencies: roadieHere,
+    exec: fakeRoadie(state),
+    fetch: async (url, init) => {
+      if (url.endsWith("/api/v0/application") && init.headers["X-API-Key"] !== "s".repeat(48)) return { status: 401, text: async () => "" };
+    }
+  }, async (host) => {
+    await until(() => host.store.apiKey === "s".repeat(48), 1000);
+    assert.equal(host.store.apiKey, "s".repeat(48), "the new key is in");
+    assert.ok(!lastView(host).includes("Key rejected"), "the user never saw a rejected key");
+    assert.equal(state.connectionAsked, 1, "asked Roadie once");
+  });
+});
+
+test("an offline Roadie that doesn't know slskd yet says why, not 'unknown tool'", () => {
+  const msg = plugin._roadieFailure(1, { error: "unknown tool: slskd" }, "");
+  assert.match(msg, /online catalog/);
+  assert.match(msg, /internet connection/);
+  assert.equal(plugin._roadieFailure(1, { error: "boom" }, ""), "boom");
+});
+
+test("slskd's settings file: folders are added under shares → directories and nothing else changes", () => {
+  const add = plugin._yamlWithShares;
+  const roadieYaml = 'headless: false\nshares:\n  directories:\n    - "/Users/me/Music/Soulseek"\nweb:\n  port: 5030\n';
+  assert.equal(add(roadieYaml, ["/Users/me/Music/Rock"]),
+    'headless: false\nshares:\n  directories:\n    - "/Users/me/Music/Soulseek"\n    - "/Users/me/Music/Rock"\nweb:\n  port: 5030\n');
+  assert.equal(add(roadieYaml, ["/Users/me/Music/Soulseek/"]), roadieYaml, "already shared (a trailing / is the same folder): unchanged");
+  assert.equal(add('shares:\n  directories: []\n', ["D:\\Rock"]), 'shares:\n  directories:\n    - "D:\\\\Rock"\n', "an empty list becomes a block list; Windows paths are escaped");
+  assert.equal(add('shares:\n  directories: ["/a"]\n', ["/b"]), 'shares:\n  directories:\n    - "/a"\n    - "/b"\n');
+  assert.equal(add('a: 1\r\nshares:\r\n  directories:\r\n    - /a\r\n', ["/b"]), 'a: 1\r\nshares:\r\n  directories:\r\n    - /a\r\n    - "/b"\r\n', "CRLF and unquoted items kept");
+  assert.equal(add('web:\n  port: 1\n', ["/b"]), 'web:\n  port: 1\nshares:\n  directories:\n    - "/b"\n', "no shares section: one is added");
+  assert.equal(add('shares:\n  filters:\n    - x\n', ["/b"]), 'shares:\n  directories:\n    - "/b"\n  filters:\n    - x\n');
+  assert.equal(add('shares: { directories: [] }\n', ["/b"]), null, "an inline section: left to the user");
+  assert.equal(add('shares:\n  directories:\n    - path: /a\n      alias: x\n', ["/b"]), null, "a shape we don't understand: left to the user");
+});
+
+test("slskd's own share list: what it reports, minus excluded folders", () => {
+  assert.deepEqual(plugin._sharedFromSlskd({ local: [{ localPath: "/a" }, { localPath: "/b", isExcluded: true }] }), ["/a"]);
+  assert.deepEqual(plugin._sharedFromSlskd(null), []);
+  const owned = { installed: true, configurable: false, config: { "shares.directories": [] } };
+  const cols = [{ kind: "local", path: "/a" }, { kind: "local", path: "/c" }];
+  assert.deepEqual(plugin._shareGap(cols, owned, ["/a"]), ["/c"], "measured against slskd, not Roadie's install-time record");
+  assert.deepEqual(plugin._shareGap(cols, owned, null), [], "not read yet: no gap claimed");
+});
+
+test("sharing into slskd's own settings asks here first, listing the folders", () => {
+  const owned = { installed: true, configurable: false, config: { "shares.directories": [] } };
+  const rows = JSON.stringify(plugin._sharingRows(owned, [], null, { confirm: ["/Users/me/Music/Rock"] }, []));
+  assert.ok(rows.includes("Share these folders?") && rows.includes("/Users/me/Music/Rock") && rows.includes("roadie-share-confirm") && rows.includes("roadie-share-cancel"), rows);
+  assert.ok(rows.includes("Everyone on Soulseek"), "says what sharing means");
+});
+
+test("integration: Share… on a slskd that owns its settings confirms, edits slskd's file through slskd, then rescans", async () => {
+  const tool = { ...installedApproved, configurable: false, config: { "shares.directories": [], downloadsDir: "/Users/me/Music/Soulseek", shareDownloads: true } };
+  const state = { tool, webLogin: { username: "slskd", password: "slskd" } };
+  let yaml = 'shares:\n  directories:\n    - "/Users/me/Music/Soulseek"\n';
+  const seen = [];
+  await withPlugin({
+    store: { url: "http://127.0.0.1:5030", apiKey: "r".repeat(48), managedBy: "roadie" },
+    dependencies: roadieHere,
+    exec: fakeRoadie(state),
+    collections: [{ id: 1, kind: "local", path: "/Users/me/Music/Rock" }],
+    fetch: async (url, init) => {
+      const path = url.replace(/^https?:\/\/[^/]+/, "");
+      seen.push(init.method + " " + path);
+      if (path === "/api/v0/shares" && init.method === "GET") {
+        return { status: 200, text: async () => JSON.stringify({ local: yaml.split("\n").filter((l) => l.includes("- ")).map((l) => ({ localPath: JSON.parse(l.trim().slice(2)) })) }) };
+      }
+      if (path === "/api/v0/session") return { status: 200, text: async () => JSON.stringify({ token: "jwt" }) };
+      if (path.startsWith("/api/v0/options/yaml")) assert.equal(init.headers.Authorization, "Bearer jwt", "slskd's settings API wants the admin sign-in");
+      if (path === "/api/v0/options/yaml" && init.method === "GET") return { status: 200, text: async () => JSON.stringify(yaml) };
+      if (path === "/api/v0/options/yaml/validate") return { status: 200, text: async () => "" };
+      if (path === "/api/v0/options/yaml" && init.method === "PUT") { yaml = JSON.parse(init.body); return { status: 200, text: async () => "" }; }
+      if (path === "/api/v0/shares" && init.method === "PUT") return { status: 200, text: async () => "" };
+    }
+  }, async (host) => {
+    host.actions["main-tab"]({ tabId: "settings" });
+    await until(() => settingsView(host).includes("roadie-share-collections"), 1000);
+    await host.actions["roadie-share-collections"]();
+    await until(() => settingsView(host).includes("Share these folders?"));
+    assert.ok(!seen.some((s) => s.startsWith("PUT")), "nothing changes before the user says yes");
+    await host.actions["roadie-share-confirm"]();
+    await until(() => seen.includes("PUT /api/v0/shares"), 1000);
+    assert.ok(yaml.includes('- "/Users/me/Music/Rock"') && yaml.includes('- "/Users/me/Music/Soulseek"'), yaml);
+    assert.ok(seen.indexOf("POST /api/v0/options/yaml/validate") < seen.indexOf("PUT /api/v0/options/yaml"), "slskd validates before it saves");
+    assert.ok(!state.reinstallArgs, "Roadie isn't asked to change a file slskd owns");
+  });
+});
+
+test("integration: a settings file the plugin won't edit is left alone, with the folders to add by hand", async () => {
+  const tool = { ...installedApproved, configurable: false, config: { "shares.directories": [] } };
+  const state = { tool };
+  const seen = [];
+  await withPlugin({
+    store: { url: "http://127.0.0.1:5030", apiKey: "r".repeat(48), managedBy: "roadie" },
+    dependencies: roadieHere,
+    exec: fakeRoadie(state),
+    collections: [{ id: 1, kind: "local", path: "/Users/me/Music/Rock" }],
+    fetch: async (url, init) => {
+      const path = url.replace(/^https?:\/\/[^/]+/, "");
+      seen.push(init.method + " " + path);
+      if (path === "/api/v0/shares") return { status: 200, text: async () => JSON.stringify({ local: [] }) };
+      if (path === "/api/v0/session") return { status: 200, text: async () => JSON.stringify({ token: "jwt" }) };
+      if (path === "/api/v0/options/yaml") return { status: 200, text: async () => JSON.stringify("shares: { directories: [] }\n") };
+    }
+  }, async (host) => {
+    host.actions["main-tab"]({ tabId: "settings" });
+    await until(() => settingsView(host).includes("roadie-share-collections"), 1000);
+    await host.actions["roadie-share-collections"]();
+    await until(() => settingsView(host).includes("Share these folders?"));
+    await host.actions["roadie-share-confirm"]();
+    await until(() => settingsView(host).includes("shares → directories"), 1000);
+    const v = settingsView(host);
+    assert.ok(v.includes("/Users/me/Music/Rock") && v.includes("Open slskd's settings"), v.slice(0, 1500));
+    assert.ok(!seen.some((s) => s.startsWith("PUT /api/v0/options")), "nothing written");
+  });
+});
+
+test("recipe update: offered on the card, reviewed in Roadie's dialog, then the new key is picked up", async () => {
+  const tool = { ...installedApproved, revision: 5, recipeUpdate: { revision: 6, changedKeys: ["connection", "files"] } };
+  const state = { tool };
+  await withPlugin({
+    store: { url: "http://127.0.0.1:5030", apiKey: "r".repeat(48), managedBy: "roadie" },
+    dependencies: roadieHere,
+    exec: fakeRoadie(state)
+  }, async (host) => {
+    host.actions["main-tab"]({ tabId: "settings" });
+    await until(() => settingsView(host).includes("roadie-recipe-update"), 1000);
+    assert.ok(settingsView(host).includes("setup 5 → 6") && settingsView(host).includes("nothing changes until you approve it"));
+    await host.actions["roadie-recipe-update"]();
+    await until(() => host.store.apiKey === "s".repeat(48), 1000);
+    assert.equal(state.upgradeAsked, 1);
+    assert.ok(!settingsView(host).includes("roadie-recipe-update"), "the offer is gone once applied");
+  });
+});
+
+test("recipe update: declined in Roadie's dialog, the offer stays and nothing changes", async () => {
+  const tool = { ...installedApproved, revision: 5, recipeUpdate: { revision: 6, changedKeys: [] } };
+  const state = { tool, decline: true };
+  await withPlugin({
+    store: { url: "http://127.0.0.1:5030", apiKey: "r".repeat(48), managedBy: "roadie" },
+    dependencies: roadieHere,
+    exec: fakeRoadie(state)
+  }, async (host) => {
+    host.actions["main-tab"]({ tabId: "settings" });
+    await until(() => settingsView(host).includes("roadie-recipe-update"), 1000);
+    await host.actions["roadie-recipe-update"]();
+    await until(() => state.upgradeAsked === 1);
+    await until(() => settingsView(host).includes("roadie-recipe-update"));
+    assert.equal(host.store.apiKey, "r".repeat(48), "same key");
+    assert.ok(!settingsView(host).includes("declined"), "a no is not an error");
+  });
+});
+
+test("another slskd already running: the install page says so and offers to connect to it instead", async () => {
+  const oi = { url: "http://127.0.0.1:5030", blocksStart: true, message: "Another slskd is already running on this computer (http://127.0.0.1:5030)." };
+  const nodes = JSON.stringify(plugin._otherInstanceNodes(oi));
+  assert.ok(nodes.includes("slskd is already running here") && nodes.includes("one copy per computer") && nodes.includes("roadie-use-other"), nodes);
+  assert.deepEqual(plugin._otherInstanceNodes(null), []);
+
+  const state = { tool: notInstalled, options: { tool: "slskd", options: [], otherInstance: oi } };
+  await withPlugin({ store: { url: "", apiKey: "" }, dependencies: roadieHere, exec: fakeRoadie(state) }, async (host) => {
+    await openAutoInstall(host);
+    await until(() => lastView(host).includes("slskd is already running here"), 1000);
+    assert.ok(lastView(host).includes("roadie-set-user"), "the install form stays: the user may quit the other copy first");
+    await host.actions["roadie-use-other"]();
+    await until(() => host.store.url === "http://127.0.0.1:5030", 1000);
+    assert.equal(host.store.url, "http://127.0.0.1:5030", "the connect page starts from the other copy's address");
+  });
+
+  // An older Roadie without `tool options`: no notice, the form as before.
+  const old = { tool: notInstalled };
+  await withPlugin({ store: { url: "", apiKey: "" }, dependencies: roadieHere, exec: fakeRoadie(old) }, async (host) => {
+    await openAutoInstall(host);
+    assert.ok(!lastView(host).includes("already running here"));
+  });
+});
+
+
+// ---- First run: find slskd by itself, before any Roadie ------------------
+
+// A slskd on `port` that wants `key` (or none with authEnabled false).
+const slskdAt = (port, key, authEnabled = true) => async (url, init) => {
+  const m = /^https?:\/\/127\.0\.0\.1:(\d+)(\/[^?]*)/.exec(url);
+  if (!m || Number(m[1]) !== port) return { status: 599, text: async () => "" }; // nothing listens
+  if (m[2] === "/api/v0/session/enabled") return { status: 200, text: async () => (authEnabled ? "true" : "false") };
+  if (authEnabled && init.headers["X-API-Key"] !== key) return { status: 401, text: async () => "" };
+};
+
+test("discovery: slskd's anonymous session/enabled answer tells it apart; the usual ports are tried first", () => {
+  assert.deepEqual(plugin._slskdFingerprint(200, "true"), { authEnabled: true });
+  assert.deepEqual(plugin._slskdFingerprint(200, " False\n"), { authEnabled: false });
+  assert.equal(plugin._slskdFingerprint(200, "<html>"), null, "something else on the port");
+  assert.equal(plugin._slskdFingerprint(401, "true"), null);
+  const c = plugin._discoveryCandidates().map((x) => x.url);
+  assert.deepEqual(c.slice(0, 3), ["http://127.0.0.1:5030", "http://127.0.0.1:5031", "https://127.0.0.1:5031"]);
+  assert.ok(c.includes("http://127.0.0.1:5040"));
+});
+
+test("integration: a slskd running here with the plugin's key connects on first run, no Roadie asked", async () => {
+  const key = "g".repeat(40);
+  await withPlugin({ store: { url: "", apiKey: key }, dependencies: roadieHere, exec: fakeRoadie({ tool: installedApproved }), fetch: slskdAt(5030, key) }, async (host) => {
+    await until(() => host.store.url === "http://127.0.0.1:5030", 2000);
+    assert.equal(host.store.managedBy, null, "the user's own slskd");
+    assert.equal(host.calls.exec.length, 0, "Roadie is never reached");
+  });
+});
+
+test("integration: a slskd here that wants another key asks for it, and only a key slskd accepts is kept", async () => {
+  const theirs = "t".repeat(40);
+  await withPlugin({ store: { url: "", apiKey: "" }, fetch: slskdAt(5032, theirs) }, async (host) => {
+    await until(() => lastView(host).includes("Found slskd on this computer"), 2000);
+    const v = lastView(host);
+    assert.ok(v.includes("http://127.0.0.1:5032") && v.includes("discover-set-key") && v.includes("api_keys"), v.slice(0, 1200));
+    assert.ok(!v.includes("Install automatically"), "found: no install offer in the way");
+    assert.ok(!v.includes("Get the key from Roadie"), "no Roadie here: not offered");
+    await host.actions["discover-set-key"]({ value: "wrong" });
+    await host.actions["discover-connect"]();
+    await until(() => lastView(host).includes("didn't accept that key"));
+    assert.equal(host.store.url, "", "a wrong key saves nothing");
+    await host.actions["discover-set-key"]({ value: theirs });
+    await host.actions["discover-connect"]();
+    await until(() => host.store.apiKey === theirs, 1000);
+    assert.equal(host.store.url, "http://127.0.0.1:5032");
+  });
+});
+
+test("integration: a slskd here with authentication off connects without a key", async () => {
+  await withPlugin({ store: { url: "", apiKey: "" }, fetch: slskdAt(5030, null, false) }, async (host) => {
+    await until(() => host.store.url === "http://127.0.0.1:5030", 2000);
+  });
+});
+
+test("integration: no slskd and no Roadie: the whole setup still works (guide or address)", async () => {
+  await withPlugin({ store: { url: "", apiKey: "" }, fetch: async () => ({ status: 599, text: async () => "" }) }, async (host) => {
+    await until(() => lastView(host).includes("No slskd is running on this computer"), 2000);
+    const v = lastView(host);
+    assert.ok(v.includes("install-manual") && v.includes('"page":"connect"') && v.includes("discover-again"), v.slice(0, 1200));
+    assert.equal(host.calls.exec.length, 0);
+  });
+});
+
+test("integration: a Roadie-run slskd found here offers Roadie's key as a second way, never instead of typing one", async () => {
+  const state = { tool: { ...installedApproved, approvedConsumers: [] } };
+  await withPlugin({ store: { url: "", apiKey: "" }, dependencies: roadieHere, exec: fakeRoadie(state), fetch: slskdAt(5030, "r".repeat(48)) }, async (host) => {
+    await until(() => lastView(host).includes("Get the key from Roadie"), 2000);
+    assert.ok(lastView(host).includes("discover-set-key"), "the key box is still there");
+    assert.ok(!state.connectionAsked, "Roadie's dialog isn't opened unasked");
   });
 });
