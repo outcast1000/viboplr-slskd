@@ -1405,11 +1405,14 @@ function badgeFor(state) {
 // ready, or null. One line saying what's wrong, the one click that fixes it
 // when there is one, and "Fix…" to the Settings tab, where the full
 // explanation sits above the Connection card. A slskd Roadie installed and
-// still has is only stopped, so the notice starts it.
-function readinessBanner(st, cfg, r) {
+// still has is only stopped, so the notice starts it. `why` is the sign-in
+// reason read from slskd's log; `onSettings` drops "Fix…" on the Settings
+// tab, where the explanation is already right below — there the button
+// had nowhere to go and looked dead.
+function readinessBanner(st, cfg, r, why, onSettings) {
   var tool = r && r.installed ? r.tool : null;
   var busy = !!(r && r.job);
-  var fix = actionButton("Fix…", "slskd-show-fix");
+  var fix = onSettings ? [] : [actionButton("Fix…", "slskd-show-fix")];
   var text, variant, buttons;
   if (st === "unreachable" && cfg.managedBy === "roadie" && tool && tool.installed) {
     text = "slskd isn't running. Search, downloads and the playback fallback need it.";
@@ -1418,17 +1421,21 @@ function readinessBanner(st, cfg, r) {
   } else if (st === "unreachable") {
     text = "Can't reach slskd at " + (cfg.url || "the saved address") + ". It may be stopped.";
     variant = "error";
-    buttons = [actionButton("Try again", "test-connection"), fix];
+    buttons = [checkButton("Try again")].concat(fix);
   } else if (st === "unauthorized") {
     text = "slskd rejected the API key.";
     variant = "error";
-    buttons = [fix];
+    buttons = fix;
+  } else if (st === "disconnected" && why && why.kind === "blocked") {
+    text = "This network blocks Soulseek, so slskd can't sign in.";
+    variant = "warning";
+    buttons = [checkButton("Check again")].concat(fix);
   } else if (st === "disconnected") {
     text = "slskd is running but isn't signed in to Soulseek.";
     variant = "warning";
-    buttons = roadieOwnsAddress(cfg.url, tool)
-      ? [actionButton("Restart slskd", "roadie-restart", "accent", { disabled: busy }), fix]
-      : [fix];
+    buttons = roadieOwnsAddress(cfg.url, tool) && !signinNeedsNetwork(why)
+      ? [actionButton("Restart slskd", "roadie-restart", "accent", { disabled: busy })].concat(fix)
+      : [checkButton("Check again")].concat(fix);
   } else if (st === "connecting") {
     text = "slskd is connecting to Soulseek…";
     variant = "warning";
@@ -3142,7 +3149,15 @@ function signinReasonFromLog(lines, username) {
     if (/INVALIDPASS|rejected (the )?login|invalid (user(name)?|password)/i.test(l)) {
       return { kind: "rejected", message: "The Soulseek server refused to sign in" + (username ? " as " + username : "") + ": the password is wrong, or someone else already uses that username." };
     }
-    if (/(Disconnected from|Failed to connect to|Failed to log in to) the Soulseek server/i.test(l) || /Soulseek server.*(timed out|refused|unreachable)/i.test(l)) {
+    // Connected, then closed before any login answer: something between slskd
+    // and the server took the connection and dropped it. A work web filter
+    // does exactly this (Zscaler answers Soulseek's login with an HTTP 403).
+    // A wrong password gets an answer, not a hang-up, so this isn't one.
+    if (/Disconnected from the Soulseek server:\s*"?Remote connection closed/i.test(l) &&
+        i > 0 && /Connected to the Soulseek server/i.test(String(list[i - 1] || ""))) {
+      return { kind: "blocked", message: "The network cuts slskd off from the Soulseek server: the connection opens, then closes before Soulseek answers. A work network or web filter (Zscaler, for example), a VPN, or a firewall is blocking Soulseek. Restarting slskd won't help. Try another network, or ask whoever runs this one. slskd keeps retrying, and signs in by itself once it gets through." };
+    }
+    if (/(Disconnected from|Failed to connect to|Failed to log in to) the Soulseek server/i.test(l) ||/Soulseek server.*(timed out|refused|unreachable)/i.test(l)) {
       var why = /timed out/i.test(l) ? "the connection timed out"
         : (/refused/i.test(l) ? "the connection was refused"
           : (/unreachable|no route/i.test(l) ? "the network can't reach it" : "the connection failed"));
@@ -3844,12 +3859,38 @@ function roadieCanHandOver(tool) {
 var signinWhy = null;
 
 async function refreshSigninWhy() {
-  if (readiness.state !== "disconnected" || !roadie.installed || !roadieOwnsAddress(settings.url, roadie.tool)) {
+  if (readiness.state !== "disconnected") {
     signinWhy = null;
     return;
   }
-  var user = roadie.tool.config && roadie.tool.config.soulseekUsername;
-  signinWhy = signinReasonFromLog(await slskdLogLines(), user ? String(user) : null);
+  // slskd's own log endpoint answers with the key we already hold, so the
+  // reason is there for any slskd, not only one Roadie runs. Roadie's copy
+  // of the log is the fallback (an older slskd, or a key without access).
+  var ours = roadie.installed && roadieOwnsAddress(settings.url, roadie.tool);
+  var user = ours && roadie.tool.config && roadie.tool.config.soulseekUsername;
+  var lines = await slskdApiLogLines();
+  if (!lines.length && ours) lines = await slskdLogLines();
+  signinWhy = signinReasonFromLog(lines, user ? String(user) : null);
+}
+
+// Pure: slskd's GET /api/v0/logs entries as plain message lines, oldest first.
+function apiLogMessages(json) {
+  if (!Array.isArray(json)) return [];
+  var out = [];
+  for (var i = 0; i < json.length; i++) {
+    if (json[i] && typeof json[i].message === "string") out.push(json[i].message);
+  }
+  return out;
+}
+
+async function slskdApiLogLines() {
+  try {
+    var res = await slskd("GET", "/api/v0/logs");
+    return res.status >= 200 && res.status < 300 ? apiLogMessages(res.json) : [];
+  } catch (e) {
+    console.error("slskd: couldn't read slskd's log:", e);
+    return [];
+  }
 }
 
 // A kicked slskd stays signed out until it restarts. Quiet on success: the
@@ -4294,7 +4335,7 @@ function setupHomeView(st, cfg, r, detail, d) {
     var httpDetail = /^HTTP \d+/.test(detail || "") ? " (" + detail + ")" : "";
     children.push(mutedText("Nothing answered at " + (cfg.url || "the saved address") + ". slskd may be stopped, or no longer installed." + httpDetail));
     children.push(buttonRow([
-      actionButton("Try again", "test-connection", "accent"),
+      checkButton("Try again", "accent"),
       pageButton("Connection settings…", "connect")
     ]));
     var startRows = [optionRow("Start slskd",
@@ -4425,19 +4466,69 @@ function unauthorizedNodes(cfg, r) {
 function disconnectedNodes(cfg, r, why) {
   var tool = r && r.installed ? r.tool : null;
   var nodes = [headingText("slskd isn't signed in to Soulseek")];
-  if (roadieOwnsAddress(cfg.url, tool)) {
+  var busy = !!(r && r.job);
+  var ours = roadieOwnsAddress(cfg.url, tool);
+  // The network is in the way: a restart changes nothing, checking again
+  // is the honest button.
+  if (why && signinNeedsNetwork(why)) {
+    nodes.push({ type: "text", content: why.message });
+    nodes.push(buttonRow([checkButton("Check again", "accent"), actionButton("Open slskd", "open-slskd")]));
+    return nodes;
+  }
+  if (ours) {
     nodes.push({ type: "text", content: why ? why.message
       : "slskd is running and the key works, but it isn't signed in to the Soulseek network, and its log doesn't say why. Restarting slskd makes it sign in again." });
-    nodes.push(buttonRow([actionButton("Restart slskd", "roadie-restart", "accent", { disabled: !!(r && r.job) }),
+    nodes.push(buttonRow([actionButton("Restart slskd", "roadie-restart", "accent", { disabled: busy }),
       actionButton("Open slskd", "open-slskd")]));
     return nodes;
   }
-  nodes.push({ type: "text", content: "slskd is running and the key works, but it isn't connected to the Soulseek network. Check the Soulseek username and password under soulseek: in slskd.yml (the guide's Configure step) and restart slskd, or sign in from slskd's own page." });
-  nodes.push({ type: "toolbar", buttons: [
-    { label: "Open setup guide", action: "setup-open-guide", variant: "accent" },
-    { label: "Open slskd", action: "open-slskd", variant: "secondary" }
-  ] });
+  nodes.push({ type: "text", content: why ? why.message
+    : "slskd is running and the key works, but it isn't connected to the Soulseek network. Check the Soulseek username and password under soulseek: in slskd.yml (the guide's Configure step) and restart slskd, or sign in from slskd's own page." });
+  nodes.push(buttonRow([actionButton("Open setup guide", "setup-open-guide", "accent"),
+    actionButton("Open slskd", "open-slskd"), checkButton("Check again")]));
   return nodes;
+}
+
+// Pure: a sign-in reason only a different network fixes.
+function signinNeedsNetwork(why) {
+  return !!why && (why.kind === "blocked" || why.kind === "network");
+}
+
+// "Test" / "Try again" / "Check again": all the same probe. While it runs the
+// button says so and can't be pressed twice; the status line then says when
+// it last ran, so a check that found nothing new still visibly happened.
+var connCheck = { running: false, at: 0 };
+
+async function checkConnection() {
+  if (connCheck.running) return;
+  connCheck.running = true;
+  render();
+  try {
+    await refreshReadiness();
+  } catch (e) {
+    console.error("slskd probe failed:", e);
+  } finally {
+    connCheck.running = false;
+    connCheck.at = Date.now();
+    render();
+  }
+}
+
+// The Settings tab's scroll key after "Fix…", until the tab changes.
+var fixScrollKey = null;
+var fixSeq = 0;
+
+function checkButton(label, variant) {
+  return actionButton(connCheck.running ? "Checking…" : label, "test-connection", variant, { disabled: connCheck.running });
+}
+
+// Pure: "checked just now" / "checked 3 min ago" / "" for never.
+function checkedAgo(at, now) {
+  if (!at) return "";
+  var s = Math.max(0, Math.round((now - at) / 1000));
+  if (s < 60) return "checked just now";
+  var m = Math.round(s / 60);
+  return m < 60 ? "checked " + m + " min ago" : "checked over an hour ago";
 }
 
 // The guide shows a key and the yml carries it, so a key must exist before the
@@ -4459,7 +4550,7 @@ function connectionFormRows() {
       { type: "settings-row", label: "Allow self-signed certificate", description: "Needed if slskd serves HTTPS with its default certificate",
         control: { type: "toggle", label: "", action: "set-insecure", checked: !!settings.insecure } },
       { type: "toolbar", buttons: [
-          { label: "Test connection", action: "test-connection", variant: "accent" },
+          checkButton("Test connection", "accent"),
           { label: "Open setup guide", action: "setup-open-guide", variant: "secondary" }
         ],
         status: statusLine(), statusVariant: statusVariant() }
@@ -4481,7 +4572,7 @@ function connectionSection() {
 // the card is what Roadie can do: test, start at login, files, remove.
 function roadieConnectionSection() {
   // Remove goes last: the one destructive row sits below everything else.
-  var rows = [optionRow("Address", settings.url + " · " + statusLine(), actionButton("Test", "test-connection"))]
+  var rows = [optionRow("Address", settings.url + " · " + statusLine(), checkButton("Test"))]
     .concat(recipeUpdateRows(roadie.tool, roadie.job))
     .concat([autostartRow("roadie-autostart", roadie.tool.autostart)])
     .concat(sharingRows(roadie.tool, localCollections, roadie.job, roadieShare, slskdShared))
@@ -4578,6 +4669,12 @@ function webPageSection() {
 }
 
 function statusLine() {
+  if (connCheck.running) return "Checking…";
+  var ago = checkedAgo(connCheck.at, Date.now());
+  return readinessLine() + (ago ? " · " + ago : "");
+}
+
+function readinessLine() {
   var st = readiness.state;
   if (st === "ready") {
     return "Connected as " + (readiness.username || "?") + (readiness.version ? " · slskd " + readiness.version : "") +
@@ -5221,7 +5318,7 @@ function render() {
   var body = [];
   // Not ready, like yt-dlp without its binary: the view stays, the problem
   // is one line on top with the click that fixes it.
-  var banner = readinessBanner(st, settings, roadie);
+  var banner = readinessBanner(st, settings, roadie, signinWhy, mainTab === "settings");
   if (banner) {
     body.push(banner);
     body = body.concat(roadieJobNodes());
@@ -5244,7 +5341,8 @@ function render() {
     : mainTab === "settings" ? settingsTab()
     : searchTab());
   api.ui.setViewData(VIEW_ID, { type: "layout", direction: "vertical", children: body },
-    { scrollKey: mainTab === "search" ? "search:" + search.query : mainTab });
+    { scrollKey: mainTab === "search" ? "search:" + search.query
+      : (mainTab === "settings" && fixScrollKey) || mainTab });
 }
 
 // Pure: which top-level tab `activeTab` belongs to. "folders" is the Search
@@ -5420,6 +5518,7 @@ function registerActions() {
   api.ui.onAction("main-tab", function (data) {
     var id = data && data.tabId;
     activeTab = mainTabFor(id);
+    fixScrollKey = null;
     render();
     schedulePoll(activeTab === "transfers");
   });
@@ -5747,6 +5846,9 @@ function registerActions() {
   // The not-ready banner's "Fix…": the explanation is on top of Settings.
   api.ui.onAction("slskd-show-fix", function () {
     activeTab = "settings";
+    // A fresh scroll key opens Settings at the top, where the explanation
+    // is; the plain "settings" key would restore wherever it was left.
+    fixScrollKey = "settings:fix:" + (++fixSeq);
     render();
     schedulePoll(false);
   });
@@ -5862,7 +5964,7 @@ function registerActions() {
   });
 
   api.ui.onAction("test-connection", function () {
-    refreshReadiness().catch(function (e) { console.error("slskd probe failed:", e); });
+    return checkConnection();
   });
 
   // A typed address or key is the user's own: it ends Roadie's management of
@@ -7149,6 +7251,8 @@ return {
   _roadieOwnsAddress: roadieOwnsAddress,
   _unauthorizedNodes: unauthorizedNodes,
   _disconnectedNodes: disconnectedNodes,
+  _apiLogMessages: apiLogMessages,
+  _checkedAgo: checkedAgo,
   _roadieFailure: roadieFailure,
   _roadieHasUnusedSlskd: roadieHasUnusedSlskd,
   _newSetup: newSetup,

@@ -728,7 +728,9 @@ test("the banner: Start for a stopped Roadie slskd, Try again + Fix for everythi
   assert.deepEqual(clickable(banner("unreachable", roadieCfg, { ...r, tool: notInstalled })), ["test-connection", "slskd-show-fix"], "Roadie says it's gone: nothing to start");
   assert.deepEqual(clickable(banner("unauthorized", roadieCfg, r)), ["slskd-show-fix"]);
   assert.deepEqual(clickable(banner("disconnected", roadieCfg, r)), ["roadie-restart", "slskd-show-fix"], "Roadie's slskd restarts to sign in again");
-  assert.deepEqual(clickable(banner("disconnected", { url: "http://nas:5030" }, r)), ["slskd-show-fix"]);
+  assert.deepEqual(clickable(banner("disconnected", { url: "http://nas:5030" }, r)), ["test-connection", "slskd-show-fix"], "nothing to restart: check again");
+  assert.deepEqual(clickable(banner("unauthorized", roadieCfg, r, null, true)), [], "on Settings, Fix… has nowhere to go");
+  assert.deepEqual(clickable(banner("unreachable", { url: "http://nas:5030" }, r, null, true)), ["test-connection"]);
   assert.deepEqual(clickable(banner("connecting", roadieCfg, r)), []);
   assert.equal(banner("ready", roadieCfg, r), null);
   assert.equal(banner("unconfigured", roadieCfg, r), null, "the first run is the setup hub, not a banner");
@@ -788,6 +790,39 @@ test("integration: the header follows readiness and is sent only when it changes
     await host.actions["test-connection"]();
     await until(() => host.calls.headers.at(-1).header.status.label === "Unreachable");
     assert.ok(bannerOf(host), "the problem and its fix are still the banner");
+  });
+});
+
+test("integration: Test says Checking… while it runs and when it last ran; Fix… opens Settings at the top", async () => {
+  let release = null;
+  await withPlugin({
+    store: { url: "http://localhost:5030", apiKey: "k".repeat(40) },
+    dependencies: {}, exec: async () => { throw new Error("no exec"); },
+    fetch: async (url) => {
+      if (url.includes("/api/v0/logs")) return { status: 200, text: async () => JSON.stringify(API_LOG_BLOCKED) };
+      if (!url.includes("/api/v0/application")) return undefined;
+      if (release) await new Promise((res) => { const r = release; release = null; r.wait = res; });
+      return { status: 200, text: async () => JSON.stringify({ server: { state: "Disconnected", isLoggedIn: false, isTransitioning: false }, version: { current: "0.26.0" } }) };
+    }
+  }, async (host) => {
+    await until(() => /This network blocks Soulseek/.test(JSON.stringify(bannerOf(host) || {})));
+    const lastView = () => host.calls.views.filter((v) => v.viewId === "slskd-browse").at(-1);
+
+    host.actions["slskd-show-fix"]();
+    const fixed = lastView();
+    assert.match(fixed.opts.scrollKey, /^settings:fix:/, "a fresh key → the explanation at the top");
+    assert.match(JSON.stringify(fixed.data), /web filter/, "the reason is on Settings");
+    assert.ok(!clickable(bannerOf(host)).includes("slskd-show-fix"), "no dead Fix… on Settings itself");
+
+    release = {};
+    const gate = release;
+    const done = host.actions["test-connection"]();
+    await until(() => JSON.stringify(lastView().data).includes("Checking…"));
+    assert.equal(findNodes(lastView().data, (n) => n.action === "test-connection").every((b) => b.disabled), true, "no double check");
+    await until(() => gate.wait);
+    gate.wait();
+    await done;
+    assert.match(JSON.stringify(lastView().data), /checked just now/);
   });
 });
 
@@ -919,7 +954,42 @@ test("signed out, Roadie's slskd → the log's reason and Restart slskd", () => 
   assert.deepEqual(clickable(nodes), ["roadie-restart", "open-slskd"]);
   assert.ok(JSON.stringify(nodes).includes("another app signed in as outcast1000"));
   const own = plugin._disconnectedNodes({ url: "http://nas.local:5030" }, r, why);
-  assert.deepEqual(clickable(own), ["setup-open-guide", "open-slskd"], "a slskd the user runs keeps the yml advice");
+  assert.deepEqual(clickable(own), ["setup-open-guide", "open-slskd", "test-connection"], "a slskd the user runs keeps the yml advice");
+  assert.ok(JSON.stringify(own).includes("another app signed in as outcast1000"), "its log's reason too");
+});
+
+// The owner's work Mac: Zscaler takes the TCP connection to the Soulseek
+// server and answers the login with an HTTP 403, so slskd logs connect-then-
+// closed forever. As slskd's GET /api/v0/logs returns it (note the stray quote).
+const API_LOG_BLOCKED = [
+  { level: "Information", message: "Attempting to connect to the Soulseek server (#8)..." },
+  { level: "Information", message: "Connected to the Soulseek server" },
+  { level: "Error", message: "Disconnected from the Soulseek server: \"Remote connection closed" },
+  { level: "Error", message: "Failed to reconnect: \"The wait timed out after 5000 milliseconds" },
+  { level: "Information", message: "Waiting about 256 seconds before attempting to reconnect" }
+];
+
+test("sign-in reason: connect-then-closed is a blocking network, and a restart isn't offered for it", () => {
+  const lines = plugin._apiLogMessages(API_LOG_BLOCKED);
+  assert.equal(lines.length, 5);
+  assert.deepEqual(plugin._apiLogMessages({ nope: 1 }), []);
+  const why = plugin._signinReasonFromLog(lines, null);
+  assert.equal(why.kind, "blocked");
+  assert.match(why.message, /web filter/);
+  const r = { installed: true, tool: { ...installedApproved } };
+  const nodes = plugin._disconnectedNodes({ url: "http://127.0.0.1:5030" }, r, why);
+  assert.deepEqual(clickable(nodes), ["test-connection", "open-slskd"], "Roadie's slskd too: restarting won't get past the network");
+  const banner = plugin._readinessBanner("disconnected", { url: "http://127.0.0.1:5030" }, r, why);
+  assert.deepEqual(clickable(banner), ["test-connection", "slskd-show-fix"]);
+  assert.match(JSON.stringify(banner), /This network blocks Soulseek/);
+  // A plain drop with no connect right before it stays the generic network case.
+  assert.equal(plugin._signinReasonFromLog(lines.slice(2), null).kind, "network");
+});
+
+test("checked-ago text", () => {
+  assert.equal(plugin._checkedAgo(0, 1000), "");
+  assert.equal(plugin._checkedAgo(1000, 30000), "checked just now");
+  assert.equal(plugin._checkedAgo(0 + 1, 3 * 60000), "checked 3 min ago");
 });
 
 test("integration: the owner's case — a guide key on Roadie's slskd, then a kick, fixed from the screen", async () => {

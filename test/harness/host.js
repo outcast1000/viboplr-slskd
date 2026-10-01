@@ -48,7 +48,7 @@ function fakeHost(opts) {
       openUrl: async () => {}
     },
     ui: {
-      setViewData: (viewId, data) => calls.views.push({ viewId, data }),
+      setViewData: (viewId, data, opts) => calls.views.push({ viewId, data, opts: opts || {} }),
       // `notifications` keeps the text (what most tests read); `notices` keeps
       // the options too, for the warning's one-click action.
       showNotification: (m, options) => {

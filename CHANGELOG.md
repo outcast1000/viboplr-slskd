@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.11.1
+
+- **Test and Fix… respond.** Test / Try again / Check again show *Checking…* (and can't be
+  pressed twice), then the status line says when the last check ran. Before, a check that found
+  the same state redrew the same screen and looked like nothing happened. *Fix…* opens Settings
+  scrolled to the top, where the explanation is, and the banner leaves it out on Settings itself,
+  where it had nowhere to go.
+- **A network that blocks Soulseek is named.** slskd connects and gets cut off before Soulseek
+  answers. A work web filter like Zscaler does this, answering the login with an HTTP 403. The
+  plugin now says the network is blocking Soulseek and offers *Check again* instead of a restart
+  that can't help.
+- **The sign-in reason works for any slskd.** It comes from slskd's own log API, so a slskd you
+  run yourself also gets the reason, not just one Roadie runs.
+
 ## 0.11.0
 
 - **First run finds your slskd by itself.** Before anything else, the plugin looks for a slskd
