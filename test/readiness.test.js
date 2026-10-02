@@ -121,3 +121,26 @@ test("nextReadiness reads a real signed-out slskd payload as disconnected", () =
   assert.equal(r.state, "disconnected");
   assert.equal(r.shareCount, 0, "a zero share count must survive as 0, not become null");
 });
+
+test("parseApplication reads the username from `user`, not `server`", () => {
+  // Trimmed from GET /api/v0/application on slskd 0.26.0, logged in.
+  const r = plugin._parseApplication({
+    server: {
+      address: "vps.slsknet.org", state: "Connected, LoggedIn",
+      isConnected: true, isConnecting: false, isLoggedIn: true,
+      isLoggingIn: false, isTransitioning: false
+    },
+    user: { username: "someone", privileges: { isPrivileged: false } },
+    version: { full: "0.26.0.0 (0.26.0.0+e42a525d)", current: "0.26.0.0" },
+    shares: { ready: true, directories: 1563, files: 13317 }
+  });
+  assert.equal(r.kind, "ok");
+  assert.equal(r.username, "someone");
+  assert.equal(r.version, "0.26.0.0");
+  assert.equal(r.shareCount, 1563);
+  assert.equal(r.isLoggedIn, true);
+});
+
+test("parseApplication leaves username null when slskd reports none", () => {
+  assert.equal(plugin._parseApplication({ server: { state: "None" } }).username, null);
+});

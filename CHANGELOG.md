@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.11.2
+
+- **The status line shows your Soulseek username again.** It read "Connected
+  as ?" because the name was looked up under slskd's `server` block, which only
+  describes the connection; slskd reports the account under `user`.
+
 ## 0.11.1
 
 - **Test and Fix… respond.** Test / Try again / Check again show *Checking…* (and can't be

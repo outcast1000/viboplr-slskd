@@ -1337,15 +1337,25 @@ async function probe() {
   if (res.status < 200 || res.status >= 300 || !res.json) {
     return { kind: "unreachable", detail: "HTTP " + res.status };
   }
-  var st = res.json || {};
+  return parseApplication(res.json);
+}
+
+// GET /api/v0/application → the probe's "ok" shape. Pure so it can be pinned
+// against a recorded payload.
+function parseApplication(st) {
+  st = st || {};
   var server = st.server || {};
   var shares = st.shares || {};
+  // The logged-in name lives under `user`, not `server` (slskd 0.26:
+  // `server` carries only connection state). `server.username` is kept as a
+  // fallback in case an older daemon reported it there.
+  var user = st.user || {};
   return {
     kind: "ok",
     serverState: server.state || "",
     isLoggedIn: server.isLoggedIn != null ? server.isLoggedIn : null,
     isTransitioning: server.isTransitioning != null ? server.isTransitioning : null,
-    username: server.username || null,
+    username: user.username || server.username || null,
     version: (st.version && st.version.current) || null,
     shareCount: shares.directories != null ? shares.directories
       : (shares.files != null ? shares.files : null)
@@ -7268,6 +7278,7 @@ return {
   _hostOf: hostOf,
   _searchQueryForTarget: searchQueryForTarget,
   _nextReadiness: nextReadiness,
+  _parseApplication: parseApplication,
   _matchFile: matchFile,
   _absolutePath: absolutePath,
   _rebaseListing: rebaseListing,
