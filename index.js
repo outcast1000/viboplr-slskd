@@ -2331,6 +2331,39 @@ function fallbackAnswer(path) {
   return { url: fileUrlForPlayback(path), label: FALLBACK_LABEL };
 }
 
+// What the download modal gets for a finished file: an instant local copy.
+function downloadAnswer(path, meta) {
+  meta = meta || {};
+  var ext = extOf(path);
+  var out = {
+    url: fileUrlForDownload(path),
+    metadata: {
+      title: meta.title || null,
+      artist: meta.artist || null,
+      album: meta.album || null,
+      trackNumber: meta.trackNumber || null,
+      year: meta.year || null,
+      genre: meta.genre || null
+    }
+  };
+  // The provider names the file: a concrete extension whenever it is known,
+  // never "auto" (the host no longer sniffs bytes).
+  if (ext) out.ext = ext;
+  return out;
+}
+
+// The download modal's by-metadata resolve: the copy the fallback kept for this
+// song, wherever it is now, or null. Same key the fallback stored it under.
+async function resolveKeptDownload(title, artistName) {
+  if (!title) return null;
+  var entry = fallback[fallbackKey(title, artistName)];
+  if (!entry) return null;
+  var path = await relocateKept(entry);
+  if (!path) return null;
+  var rec = tracked[entry.ref];
+  return downloadAnswer(path, rec && rec.meta);
+}
+
 // While a fallback transfer runs, the tab shows the same line the Downloads
 // tab would — "Waiting in peer's queue · position 3", "Downloading 40% · 3.6 MB
 // of 9 MB · ↓ 1.2 MB/s" — so a long wait has a stated reason. `eta` is our
@@ -7141,31 +7174,23 @@ async function activate(hostApi) {
   // The download modal's provider for slsk:// — "Download…" on any of our rows
   // and the Add to library button both land here. The transfer already
   // finished, so this resolve is an instant local copy, well inside any budget.
-  // There is still no metadata-based DOWNLOAD provider: a download the user
-  // asked for by hand deserves a picked file, not the fallback's best guess.
   api.downloads.onResolveByUri(PROVIDER_ID, async function (uri) {
     var ref = decodeRef(String(uri || "").replace(/^slsk:\/\//, ""));
     var rec = findTrackedByRef(ref);
     var path = await currentPath(ref, rec);
     if (!path) return null;
-    var meta = rec.meta || {};
-    var ext = extOf(path);
-    var out = {
-      url: fileUrlForDownload(path),
-      metadata: {
-        title: meta.title || null,
-        artist: meta.artist || null,
-        album: meta.album || null,
-        trackNumber: meta.trackNumber || null,
-        year: meta.year || null,
-        genre: meta.genre || null
-      }
-    };
-    // The provider names the file: a concrete extension whenever it is known,
-    // never "auto" (the host no longer sniffs bytes).
-    if (ext) out.ext = ext;
-    return out;
+    return downloadAnswer(path, rec.meta);
   });
+
+  // A track the playback fallback played has no slsk:// URI, so the host's
+  // download modal asks by metadata. That answers ONLY from the fallback's kept
+  // copy — the file that is already playing. It never searches: a download the
+  // user asked for by hand deserves a picked file, not the fallback's best guess.
+  if (typeof api.downloads.onResolveByMetadata === "function") {
+    api.downloads.onResolveByMetadata(PROVIDER_ID, function (title, artistName) {
+      return resolveKeptDownload(title, artistName);
+    });
+  }
 
   api.downloads.onGetQualities(PROVIDER_ID, function () {
     return [{ value: "original", label: "Original file", description: "Copies the file Soulseek delivered, untouched." }];
@@ -7303,6 +7328,7 @@ return {
   _formatDurationSecs: formatDurationSecs,
   _flattenListing: flattenListing,
   _FALLBACK_ID: FALLBACK_ID,
+  _PROVIDER_ID: PROVIDER_ID,
   _normalizeText: normalizeText,
   _fallbackKey: fallbackKey,
   _fallbackQuery: fallbackQuery,

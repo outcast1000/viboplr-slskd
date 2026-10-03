@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.12.1
+
+- **Download works on a track the Playback fallback played.** It failed with
+  "Provider could not resolve this track for download": such a track has no
+  `slsk://` URI, so Viboplr's download modal asks by title and artist, and the
+  plugin had no answer for that. It now copies the file the fallback already
+  fetched — the one that played — and never starts a new search for it.
+
 ## 0.12.0
 - **Runs in the plugin worker runtime.** It now gets only what it asks for
   — `network:*`, `exec:roadie`, `files:read`, `system:open`, `library:read`, `library:write`, `playback:control` — and can't reach anything else in the app. Viboplr asks

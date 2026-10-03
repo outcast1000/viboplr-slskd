@@ -212,6 +212,31 @@ test("a track with no source is searched, fetched into the fallback folder, loca
   }
 });
 
+test("Download on a track the fallback played resolves by metadata to the kept copy — never a new search", async () => {
+  const plugin = loadPlugin();
+  const { h, calls } = fallbackHost();
+  await plugin.activate(h.api);
+  try {
+    const download = h.resolvers["download-meta:" + plugin._PROVIDER_ID];
+    assert.equal(typeof download, "function", "registered on the download provider");
+    const manifest = JSON.parse(require("node:fs").readFileSync(require("node:path").join(__dirname, "..", "manifest.json"), "utf8"));
+    assert.ok(manifest.apiUsage.some((u) => u.api === "downloads.onResolveByMetadata"), "declared in apiUsage");
+
+    // Nothing kept yet: null, and no search on the user's behalf.
+    assert.equal(await download("Karma Police", "Radiohead", null, null, "original"), null);
+    assert.equal(calls.searches, 0);
+
+    const played = await h.resolvers["meta:" + plugin._FALLBACK_ID]("Karma Police (Remastered 2009)", "Radiohead", "OK Computer", 264, {});
+    const out = await download("Karma Police (Remastered 2009)", "Radiohead", "OK Computer", 264, "original");
+    assert.ok(out, "resolved");
+    assert.equal(out.url, played.url, "the very file that played");
+    assert.equal(out.ext, "mp3");
+    assert.equal(calls.searches, 1, "only the fallback's own search");
+  } finally {
+    plugin.deactivate();
+  }
+});
+
 test("a search slskd is still running at the fallback's deadline is stopped and its responses used, not discarded", async () => {
   const plugin = loadPlugin();
   plugin._setFallbackSearchMs(1500);

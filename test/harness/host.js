@@ -70,6 +70,7 @@ function fakeHost(opts) {
     },
     downloads: {
       onResolveByUri: (id, fn) => { resolvers["download:" + id] = fn; },
+      onResolveByMetadata: (id, fn) => { resolvers["download-meta:" + id] = fn; },
       onGetQualities: (id, fn) => { resolvers["qualities:" + id] = fn; }
     },
     contextMenu: { onAction: (id, fn) => { actions["ctx:" + id] = fn; } },

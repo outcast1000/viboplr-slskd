@@ -1,7 +1,7 @@
 {
   "id": "slskd",
   "name": "Soulseek",
-  "version": "0.12.0",
+  "version": "0.12.1",
   "author": "Viboplr",
   "description": "Search and download from the Soulseek network via a slskd daemon: ranked results, whole-album grabs, live transfer progress, finished files that play and reach your library, and a playback fallback that fetches a missing track from Soulseek.",
   "minAppVersion": "1.0.85",
@@ -26,6 +26,7 @@
     { "api": "playback.onResolveStreamByUri", "reason": "Play finished Soulseek downloads straight from slskd's downloads folder" },
     { "api": "playback.onStreamResolve", "reason": "Fetch a track from Soulseek when it has no playable source of its own (the Playback fallback in Settings → Providers)" },
     { "api": "downloads.onResolveByUri", "reason": "Add a finished download to a collection through Viboplr's own download modal (tags and cover art written)" },
+    { "api": "downloads.onResolveByMetadata", "reason": "Download a track the Playback fallback played — copies the file it already fetched, never searches again" },
     { "api": "system.readAudioTags", "reason": "Read title, artist and album out of a finished file instead of guessing from its name" },
     { "api": "collections.resync", "reason": "Rescan your library when a download finishes inside one of your collections" },
     { "api": "library.getTracks", "reason": "Read your copy's quality before offering an upgrade, and an album's tracks to tell which ones you're missing" }
