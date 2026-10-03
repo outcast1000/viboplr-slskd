@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.12.0
+- **Runs in the plugin worker runtime.** It now gets only what it asks for
+  — `network:*`, `exec:roadie`, `files:read`, `system:open`, `library:read`, `library:write`, `playback:control` — and can't reach anything else in the app. Viboplr asks
+  you to allow these once when you update. Requires Viboplr 1.0.85.
+- `network:*` because slskd can run on another machine (a remote daemon is
+  supported), not only on this one.
+
 ## 0.11.2
 
 - **The status line shows your Soulseek username again.** It read "Connected
