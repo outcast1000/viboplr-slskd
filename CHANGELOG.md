@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.13.1
+
+- **An upgrade for a track that left the library says so.** If the library
+  track behind an upgrade is gone (deleted, or given a new id by an older
+  Viboplr's replace), the upgrade now shows "No longer in your library", with
+  where the downloaded copy is, instead of sitting at Ready with a Replace
+  that can't work. `list_upgrades` reports it as `gone` with no replace uri,
+  so an assistant no longer stages against a track id that doesn't exist.
+  Only Remove is offered, and it no longer counts in the Upgrades tab badge.
+- **A path rewrite is not a replace.** Viboplr's Windows path repair can
+  change a stored `/` to `\` without touching the file; that no longer marks
+  a ready upgrade as replaced.
+
 ## 0.13.0
 
 - **Upgrade opens the Upgrades tab.** Choosing Upgrade on a track now takes

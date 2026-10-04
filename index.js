@@ -5417,7 +5417,7 @@ function render() {
     tabs: [
       { id: "search", label: "Search" },
       { id: "transfers", label: "Downloads", count: transfers.length || undefined },
-      { id: "upgrades", label: "Upgrades", count: Object.keys(upgrades).filter(function (k) { return upgrades[k].state !== "replaced"; }).length || undefined },
+      { id: "upgrades", label: "Upgrades", count: Object.keys(upgrades).filter(function (k) { return upgrades[k].state !== "replaced" && upgrades[k].state !== "gone"; }).length || undefined },
       { id: "fallback", label: "Fallback" },
       { id: "settings", label: "Settings" }
     ],
@@ -6147,7 +6147,8 @@ function registerActions() {
 //   current,        libraryQuality(row) — the copy in hand
 //   target,         a UPGRADE_TARGETS key — the setting when it started
 //   state,          "searching" | "downloading" | "checking" | "ready" |
-//                   "alternative" | "none" | "failed" | "replaced"
+//                   "alternative" | "none" | "failed" | "replaced" |
+//                   "gone" (the library row no longer exists)
 //   message,        the one line the row shows for a resting state
 //   candidates,     lean copies of the ranked picks, best first
 //   alternative,    the best better copy that misses the target (state "alternative")
@@ -6364,6 +6365,7 @@ function upgradeLine(e, t) {
   if (e.state === "ready" && e.file && replaceOffers[upgradeKey(e.trackId)]) return "Ready: " + qualityLabel(e.file.quality) + " · waiting for your answer in the Replace dialog";
   if (e.state === "ready" && e.file) return "Ready: " + qualityLabel(e.file.quality) + " (" + have + ")" + (e.message ? " · " + e.message : "");
   if (e.state === "replaced") return "Replaced in your library";
+  if (e.state === "gone") return e.message || "No longer in your library";
   return (e.message || e.state) + " · " + have;
 }
 
@@ -6372,7 +6374,7 @@ function upgradeRowActions(e) {
   var ids = [];
   if (e.state === "ready") ids.push("upgrade-replace");
   if (e.state === "alternative") ids.push("upgrade-take-alternative");
-  if (e.state !== "replaced") ids.push("upgrade-choose");
+  if (e.state !== "replaced" && e.state !== "gone") ids.push("upgrade-choose");
   if (e.state === "none" || e.state === "failed" || e.state === "alternative") ids.push("upgrade-retry");
   ids.push("upgrade-remove");
   return ids;
@@ -6700,16 +6702,32 @@ async function offerReplace(e) {
 
 // After Compare & replace, the library row changes under us once the user
 // confirmed. A different size or path is the sign; nothing else is needed.
+// A row that is gone (deleted, or lost to an older host's replace that gave
+// the file a new id) ends the upgrade as "gone" — left "ready", it would keep
+// advertising a trackId no replace can use. A failed READ is not a missing
+// row: that stays as it is and is asked again next time. Busy states are not
+// checked here — their own flow ends them.
 async function detectReplaced(e) {
   if (!api.library || typeof api.library.getTrackById !== "function") return false;
   var row = null;
   try { row = await api.library.getTrackById(e.trackId); } catch (err) { console.error("slskd: re-reading library track failed:", err); return false; }
-  if (!row) return false;
-  if (row.path !== e.path || (row.file_size || null) !== (e.current.size || null)) {
+  if (!row) {
+    setUpgradeState(e, "gone", "No longer in your library" + (e.file && e.file.path ? " — the downloaded copy is at " + displayPath(e.file.path) : ""));
+    return true;
+  }
+  if (e.state !== "ready") return false;   // only a ready file can have been swapped in
+  if (!sameLibraryPath(row.path, e.path) || (row.file_size || null) !== (e.current.size || null)) {
     setUpgradeState(e, "replaced");
     return true;
   }
   return false;
+}
+
+// Pure: two library paths name the same file. The host may rewrite a stored
+// `/` path to the platform's `\` (its Windows separator repair) without the
+// file changing, which must not read as a replace.
+function sameLibraryPath(a, b) {
+  return String(a || "").replace(/\\/g, "/") === String(b || "").replace(/\\/g, "/");
 }
 
 function openUpgradeReplace(key) {
@@ -6742,7 +6760,7 @@ async function removeUpgrade(key) {
 
 async function retryUpgrade(key) {
   var e = upgrades[key];
-  if (!e || upgradeIsBusy(e)) return;
+  if (!e || upgradeIsBusy(e) || e.state === "gone") return;
   e.target = upgradeTargetOf(settings.upgradeTarget);
   e.candidates = [];
   e.alternative = null;
@@ -7314,16 +7332,18 @@ function registerAssistantTools() {
     var changed = false;
     for (var i = 0; i < keys.length; i++) {
       var e = upgrades[keys[i]];
-      if (!e || e.state !== "ready") continue;
+      // Resting entries are re-read so none lists a trackId the library no
+      // longer has; busy ones are left to the flow that is running them.
+      if (!e || upgradeIsBusy(e) || e.state === "replaced" || e.state === "gone") continue;
       // A replace done through the host's API (not this view's dialog) is
       // noticed here and, via replaceRequested, by the poll from now on.
       if (await detectReplaced(e)) { changed = true; continue; }
-      if (!e.replaceRequested) { e.replaceRequested = true; changed = true; }
+      if (e.state === "ready" && !e.replaceRequested) { e.replaceRequested = true; changed = true; }
     }
     if (changed) await saveUpgrades();
     return {
       upgrades: keys.map(function (k) { return upgrades[k]; }).filter(Boolean).map(toolUpgrade),
-      note: "When state is ready, show the user current vs ready.quality and pass ready.uri to Viboplr's replace_track_file (it stages, compares, and replaces only on confirm)."
+      note: "When state is ready, show the user current vs ready.quality and pass ready.uri to Viboplr's replace_track_file (it stages, compares, and replaces only on confirm). State gone means the trackId no longer exists in the library — remove the entry (upgrade action=remove), don't stage against it."
     };
   });
 }
@@ -7620,6 +7640,7 @@ return {
   _panelUpgrade: panelUpgrade,
   _displayPath: displayPath,
   _upgradeRowActions: upgradeRowActions,
+  _sameLibraryPath: sameLibraryPath,
   _setUpgradeTimings: function (searchMs, stallMs) { UPGRADE_SEARCH_MS = searchMs; if (stallMs != null) UPGRADE_STALL_MS = stallMs; },
   _startFill: startFill,
   _setFallbackSearchMs: function (ms) { FALLBACK_SEARCH_MS = ms; }

@@ -182,6 +182,7 @@ test("upgradeRowActions: only what does something to that upgrade", () => {
   assert.deepEqual(a({ state: "downloading" }), ["upgrade-choose", "upgrade-remove"]);
   assert.deepEqual(a({ state: "none" }), ["upgrade-choose", "upgrade-retry", "upgrade-remove"]);
   assert.deepEqual(a({ state: "replaced" }), ["upgrade-remove"]);
+  assert.deepEqual(a({ state: "gone" }), ["upgrade-remove"], "nothing left to upgrade or retry");
 });
 
 // --- the flow ------------------------------------------------------------------
@@ -656,6 +657,55 @@ test("assistant: upgrade runs the automatic flow, list_upgrades gives the ready 
     library.tracks[0].file_size = 30e6;
     const after = await h.tools.list_upgrades({});
     assert.equal(after.upgrades[0].state, "replaced");
+  } finally {
+    p.deactivate();
+  }
+});
+
+test("sameLibraryPath: a separator-only rewrite is the same file", () => {
+  const same = plugin._sameLibraryPath;
+  assert.equal(same("file://C:/Music/RH/06.mp3", "file://C:\\Music\\RH\\06.mp3"), true);
+  assert.equal(same("file://C:/Music/RH/06.mp3", "file://C:/Music/RH/06.flac"), false);
+});
+
+test("assistant: a ready upgrade whose library row vanished is listed as gone, not ready", async () => {
+  const p = loadPlugin();
+  const { h, library } = upgradeHost({ responses: FLAC_AND_TWIN });
+  await p.activate(h.api);
+  try {
+    await h.tools.upgrade({ trackId: 42 });
+    await waitFor(() => entryOf(p) && entryOf(p).state === "downloading", 8000, "the download to start");
+    await pollUntil(p, () => entryOf(p).state === "ready", "ready");
+
+    // The host rewrote the stored path's separators only: still the same file.
+    library.tracks[0].path = library.tracks[0].path.replace(/\//g, "\\");
+    assert.equal((await h.tools.list_upgrades({})).upgrades[0].state, "ready");
+
+    // The row is gone (deleted, or re-keyed by an older host's replace).
+    library.tracks.length = 0;
+    const u = (await h.tools.list_upgrades({})).upgrades[0];
+    assert.equal(u.state, "gone");
+    assert.equal(u.ready, null, "no uri offered for a trackId nothing can replace");
+    assert.match(u.message, /No longer in your library/);
+    assert.equal(h.store.upgrades.t42.state, "gone", "persisted");
+
+    await h.tools.upgrade({ trackId: 42, action: "retry" });
+    assert.equal(entryOf(p).state, "gone", "retry does not search for a track that isn't there");
+  } finally {
+    p.deactivate();
+  }
+});
+
+test("assistant: a resting upgrade (nothing found) whose library row vanished is listed as gone", async () => {
+  const p = loadPlugin();
+  const { h, library } = upgradeHost({ responses: [] });
+  await p.activate(h.api);
+  try {
+    await h.tools.upgrade({ trackId: 42 });
+    await waitFor(() => entryOf(p) && entryOf(p).state === "none", 8000, "the search to come up empty");
+    assert.equal((await h.tools.list_upgrades({})).upgrades[0].state, "none", "row still there");
+    library.tracks.length = 0;
+    assert.equal((await h.tools.list_upgrades({})).upgrades[0].state, "gone");
   } finally {
     p.deactivate();
   }
