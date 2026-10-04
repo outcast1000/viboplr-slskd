@@ -3392,7 +3392,53 @@ async function startSlskdWithRoadie() {
   }
   roadie.tool = r.json;
   roadie.checkedAt = Date.now();
-  await refreshReadiness();
+  await awaitSlskdUp("start");
+}
+
+// How long slskd may say "Disconnected" after it first answers before the
+// wait takes that as the answer: right after a start it can report it for a
+// moment before it begins to connect.
+var START_SETTLE_MS = 10000;
+
+// `roadie tool start` / `restart` exits as soon as slskd's process is up, but
+// slskd opens its web port a few seconds later and signs in to Soulseek after
+// that. A single readiness pass right after the exit found nothing, so the
+// view said "not running" until the next minute's poll — and a second Start
+// (a no-op on a running slskd) then looked like the fix. Keep the job showing
+// and look again every couple of seconds until slskd answers and settles, or
+// the wait runs out (the minute's poll carries on from there).
+// The wait in progress; deactivate() drops it so the loop ends.
+var startWait = null;
+
+async function awaitSlskdUp(kind) {
+  var job = { kind: kind, line: "Waiting for slskd to answer…", percent: null, cancel: null };
+  var token = {};
+  startWait = token;
+  roadie.job = job;
+  render();
+  try {
+    var until = Date.now() + SIGNIN_WAIT_MS;
+    var answeredAt = 0;
+    for (;;) {
+      await refreshReadiness();
+      if (startWait !== token) return;
+      var st = readiness.state;
+      if (st !== "unreachable" && !answeredAt) answeredAt = Date.now();
+      var settled = st === "ready" || st === "unauthorized" || st === "unconfigured" ||
+        (st === "disconnected" && Date.now() - answeredAt >= START_SETTLE_MS);
+      if (settled || Date.now() >= until) return;
+      job.line = st === "unreachable" ? "Waiting for slskd to answer…" : "Waiting for slskd to sign in to Soulseek…";
+      render();
+      await sleep(SIGNIN_POLL_MS);
+      if (startWait !== token) return;
+    }
+  } finally {
+    if (startWait === token) startWait = null;
+    if (roadie.job === job) {
+      roadie.job = null;
+      render();
+    }
+  }
 }
 
 // Pure: what the "Install automatically" page can offer, given what we know
@@ -3957,7 +4003,7 @@ async function restartSlskdWithRoadie() {
   if (r.json && r.json.installed != null) { roadie.tool = r.json; roadie.checkedAt = Date.now(); }
   api.log("info", "slskd restarted through Roadie", "slskd");
   signinWhy = null;
-  await refreshReadiness();
+  await awaitSlskdUp("restart");
 }
 
 // ---- Where Roadie keeps slskd --------------------------------------------
@@ -7271,6 +7317,7 @@ async function activate(hostApi) {
 }
 
 function deactivate() {
+  startWait = null;
   if (readinessTimer) clearInterval(readinessTimer);
   if (transferTimer) clearTimeout(transferTimer);
   if (saveTimer) clearTimeout(saveTimer);
@@ -7360,7 +7407,7 @@ return {
   _signinProgress: signinProgress,
   _signinReasonFromLog: signinReasonFromLog,
   _roadieCredsComplete: roadieCredsComplete,
-  _setSigninTiming: function (waitMs, pollMs) { SIGNIN_WAIT_MS = waitMs; SIGNIN_POLL_MS = pollMs; },
+  _setSigninTiming: function (waitMs, pollMs, settleMs) { SIGNIN_WAIT_MS = waitMs; SIGNIN_POLL_MS = pollMs; if (settleMs != null) START_SETTLE_MS = settleMs; },
   _hostOf: hostOf,
   _searchQueryForTarget: searchQueryForTarget,
   _nextReadiness: nextReadiness,

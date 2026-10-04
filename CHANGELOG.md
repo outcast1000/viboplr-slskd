@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.12.3
+
+- **One click on Start slskd is enough.** Roadie returns as soon as slskd's
+  process is up, but slskd opens its web port a few seconds later. The plugin
+  looked once, right away, and showed "not running" until the next minute's
+  check, so a second Start seemed to be what fixed it. Start and Restart now
+  keep looking every couple of seconds ("Waiting for slskd to answer…", then
+  "…to sign in to Soulseek…") until slskd is ready, with the button disabled
+  meanwhile.
+
 ## 0.12.2
 
 - **Upgrade works on the song that's playing.** From the queue or Now Playing a

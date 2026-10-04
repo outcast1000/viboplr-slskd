@@ -855,6 +855,32 @@ test("integration: at launch a stopped Roadie slskd shows the banner, no toast, 
   });
 });
 
+test("integration: Start waits for a slskd that answers a few seconds after Roadie returns", async () => {
+  // Roadie's start exits once the process is up; slskd's web port opens later.
+  // One look right after the exit used to leave "not running" on screen until
+  // the next minute's poll, so a second Start seemed to be what fixed it.
+  const state = { tool: stopped };
+  let probesAfterStart = 0;
+  await withPlugin({
+    store: managedStore, dependencies: roadieHere, exec: fakeRoadie(state),
+    fetch: async (url) => {
+      if (!url.includes("/api/v0/application")) return undefined;
+      if (!state.startCalls || ++probesAfterStart < 3) throw new Error("connection refused");
+      return { status: 200, text: async () => JSON.stringify({ server: { state: "Connected, LoggedIn", isLoggedIn: true, isTransitioning: false, username: "bj" }, version: { current: "0.26.0" }, shares: { directories: 1 } }) };
+    }
+  }, async (host, p) => {
+    p._setSigninTiming(2000, 5, 50);
+    await until(() => bannerOf(host));
+    host.actions["roadie-start"]();
+    await until(() => lastView(host).includes("Waiting for slskd"));
+    assert.equal(bannerOf(host).children[1].children[0].disabled, true, "no second start while it comes up");
+    await until(() => !bannerOf(host), 1000);
+    assert.equal(bannerOf(host), null, "ready without a second click");
+    assert.equal(state.startCalls, 1);
+    assert.ok(probesAfterStart >= 3, "it looked again until slskd answered");
+  });
+});
+
 test("integration: a start Roadie refuses says why, under the banner", async () => {
   const state = { tool: stopped, startCmdFails: "Another copy of slskd is running on this computer." };
   await withPlugin({ store: managedStore, fetch: nothingAnswers, dependencies: roadieHere, exec: fakeRoadie(state) }, async (host) => {
