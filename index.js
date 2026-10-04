@@ -6160,6 +6160,7 @@ var upgrades = {};
 var upgradeSearchRunning = false;
 var upgradeAdvancing = false;  // the poll and a click can both advance; one at a time
 var lastReadyUpgrade = null;   // which entry the "ready" toast's button opens
+var focusedUpgrade = null;     // the entry the Upgrades tab's panel describes (last one started here)
 
 // In the Settings select's order, best-sounding first. Every target except
 // "best" is a FILTER (see `meetsQualityTarget`): it waits for the right file
@@ -6346,7 +6347,7 @@ function upgradeLine(e, t) {
   if (e.state === "searching") return "Searching Soulseek for " + target + " · " + have;
   if (e.state === "downloading" && e.active) {
     var pick = e.active;
-    var bits = [qualityLabel(pick) + " from " + pick.username];
+    var bits = ["“" + basenameRemote(pick.filename) + "”", qualityLabel(pick) + " from " + pick.username];
     var phase = t ? transferPhase(t.state) : null;
     if (phase === "downloading" || phase === "starting") {
       var pct = transferProgress(t);
@@ -6360,6 +6361,7 @@ function upgradeLine(e, t) {
     return bits.join("  ·  ");
   }
   if (e.state === "checking") return "Checking the file…";
+  if (e.state === "ready" && e.file && replaceOffers[upgradeKey(e.trackId)]) return "Ready: " + qualityLabel(e.file.quality) + " · waiting for your answer in the Replace dialog";
   if (e.state === "ready" && e.file) return "Ready: " + qualityLabel(e.file.quality) + " (" + have + ")" + (e.message ? " · " + e.message : "");
   if (e.state === "replaced") return "Replaced in your library";
   return (e.message || e.state) + " · " + have;
@@ -6385,28 +6387,36 @@ function currentLabelFor(q) {
 // The context-menu entry point. Checks what can be upgraded exactly as the
 // interactive mode does — a local library file, or nothing to replace — and
 // falls back to the same plain search when it can't.
+// The click lands on the Upgrades tab at once, with this track's panel on top:
+// what you have, what it's looking for, and then the file it is fetching.
 async function queueUpgrade(target) {
   var t = target || {};
+  activeTab = "upgrades";
+  api.ui.navigateToView(VIEW_ID);
   var row = await libraryRowForTarget(t);
   if (!row) {
-    api.ui.navigateToView(VIEW_ID);
     return plainSearch(t, "Upgrade works on tracks in your library — searching Soulseek for this one instead.");
   }
   if (!row.path || String(row.path).indexOf("file://") !== 0) {
-    api.ui.navigateToView(VIEW_ID);
     return plainSearch({ kind: "track", title: row.title, artistName: row.artist_name },
       "Upgrade replaces a local file, and “" + row.title + "” isn't one — searching Soulseek for it instead.");
   }
-  await beginUpgrade(row);
+  focusedUpgrade = upgradeKey(row.id);
+  await beginUpgrade(row, { origin: "user" });
+  render();
 }
 
 // Start (or restart) the automatic upgrade of one local library row. Returns
-// the entry, or null when one is already running for it.
-async function beginUpgrade(row) {
+// the entry, or null when one is already running for it. `origin` "user" is a
+// click in Viboplr: the view is already showing it, so no toast, and the
+// finished file is offered for replacing straight away. Anything else (the
+// assistant tool) announces itself and leaves the replace to its caller.
+async function beginUpgrade(row, opts) {
   var key = upgradeKey(row.id);
+  var byUser = !!(opts && opts.origin === "user");
   var open = { label: "Show", id: "open-upgrades" };
   if (upgradeIsBusy(upgrades[key])) {
-    api.ui.showNotification("“" + row.title + "” is already being upgraded.", { action: open });
+    if (!byUser) api.ui.showNotification("“" + row.title + "” is already being upgraded.", { action: open });
     return null;
   }
   var current = libraryQuality(row);
@@ -6429,13 +6439,16 @@ async function beginUpgrade(row) {
     active: null,
     file: null,
     replaceRequested: false,
+    origin: byUser ? "user" : "assistant",
     createdAt: nowMs(),
     updatedAt: nowMs()
   };
   await saveUpgrades();
-  api.ui.showNotification(readiness.state === "ready"
-    ? "Looking for a better copy of “" + row.title + "”."
-    : "“" + row.title + "” will be upgraded once slskd is ready.", { action: open });
+  if (!byUser) {
+    api.ui.showNotification(readiness.state === "ready"
+      ? "Looking for a better copy of “" + row.title + "”."
+      : "“" + row.title + "” will be upgraded once slskd is ready.", { action: open });
+  }
   render();
   if (readiness.state === "ready") advanceUpgrades().catch(function (e) { console.error("slskd: advancing upgrades failed:", e); });
   schedulePoll(true);
@@ -6629,9 +6642,60 @@ async function advanceUpgradeCheck(e) {
   e.file.quality = measured || pick;
   setUpgradeState(e, "ready", verdict.note);
   await saveUpgrades();
+  // One more question, and only one: the host's Replace dialog, straight away
+  // for an upgrade the user started here. An assistant's upgrade is replaced
+  // by the assistant; an older host gets the toast into its download modal.
+  if (e.origin !== "assistant" && canReplaceInPlace()) {
+    offerReplace(e).catch(function (err) { console.error("slskd: offering the replace failed:", err); });
+    return;
+  }
   lastReadyUpgrade = upgradeKey(e.trackId);
   api.ui.showNotification("A better copy of “" + e.title + "” is ready: " + qualityLabel(e.file.quality) + ".",
     { action: { label: "Compare & replace", id: "upgrade-replace-notice" } });
+}
+
+// Pure: this host swaps a library file itself, behind its own dialog.
+function canReplaceInPlace() {
+  return !!(api && api.library && typeof api.library.replaceTrackFile === "function");
+}
+
+// Upgrades whose Replace dialog is open right now. Memory only: a dialog
+// doesn't survive a restart, so neither may the flag.
+var replaceOffers = {};
+
+// Hand the checked file to the host: its dialog shows your copy against the
+// new one, and on a yes it swaps the file under the same library row (pausing
+// and resuming the track if it is the one playing). "Keep current" leaves the
+// upgrade ready, with Replace… on its row.
+async function offerReplace(e) {
+  var key = upgradeKey(e.trackId);
+  if (!e || e.state !== "ready" || !e.file || replaceOffers[key]) return;
+  replaceOffers[key] = true;
+  render();
+  var res = null;
+  var failure = null;
+  try {
+    res = await api.library.replaceTrackFile({
+      trackId: e.trackId,
+      path: e.file.path,
+      source: e.active && e.active.username ? e.active.username + " on Soulseek" : "Soulseek",
+      note: e.message || null
+    });
+  } catch (err) {
+    console.error("slskd: replacing the library file failed:", err);
+    failure = (err && err.message) || String(err);
+  } finally {
+    delete replaceOffers[key];
+  }
+  if (upgrades[key] !== e) { render(); return; }   // removed while the dialog was up
+  if (res && res.status === "replaced") {
+    setUpgradeState(e, "replaced");
+    api.log("info", "upgrade: “" + e.title + "” replaced in the library with " + qualityLabel(e.file.quality), "slskd");
+  } else if (failure) {
+    setUpgradeState(e, "ready", "Replace failed: " + failure);
+  }
+  await saveUpgrades();
+  render();
 }
 
 // After Compare & replace, the library row changes under us once the user
@@ -6651,6 +6715,10 @@ async function detectReplaced(e) {
 function openUpgradeReplace(key) {
   var e = upgrades[key];
   if (!e || e.state !== "ready" || !e.file) return;
+  if (canReplaceInPlace()) {
+    offerReplace(e).catch(function (err) { console.error("slskd: offering the replace failed:", err); });
+    return;
+  }
   e.replaceRequested = true;
   saveUpgrades().catch(function (err) { console.error("slskd: couldn't save upgrades:", err); });
   openReplace(e.file.key);
@@ -6723,21 +6791,96 @@ function upgradeRows() {
     });
 }
 
+// Pure: a local path for reading — no scheme, the platform's own separators.
+function displayPath(p) {
+  var s = String(p || "").replace(/^file:\/\//, "");
+  return /^[A-Za-z]:[\\/]/.test(s) ? s.replace(/\//g, "\\") : s;
+}
+
+// Pure: which entry the panel describes — the one last started here while it
+// still exists, else the newest one still in progress or waiting on you.
+function panelUpgrade(all, focused) {
+  if (focused && all[focused]) return all[focused];
+  var best = null;
+  for (var k in all) {
+    var e = all[k];
+    if (!e || !(upgradeIsBusy(e) || e.state === "ready")) continue;
+    if (!best || (e.createdAt || 0) > (best.createdAt || 0)) best = e;
+  }
+  return best;
+}
+
+// Pure: the panel on top of the Upgrades tab — the whole process for one
+// track in plain lines: the file you have, what it's after, the file it is
+// fetching and from whom, and the file that will replace yours.
+// `t` is the active transfer, `ready` whether slskd is up, `asking` whether
+// the host's Replace dialog is open for it, `inPlace` whether this host
+// replaces behind its own dialog.
+function upgradePanel(e, t, ready, asking, inPlace) {
+  var key = upgradeKey(e.trackId);
+  var lines = [
+    { type: "text", content: "“" + e.title + "”" + (e.artist ? " · " + e.artist : ""), className: "plugin-heading" },
+    mutedText("Your copy: " + (e.currentLabel || "?")),
+    mutedText(displayPath(e.path)),
+    mutedText("Looking for: " + UPGRADE_TARGETS[upgradeTargetOf(e.target)])
+  ];
+  var buttons = [];
+  if (e.state === "searching") {
+    lines.push({ type: "text", content: ready ? "Searching Soulseek…" : "Waiting for slskd to be ready…" });
+  } else if (e.state === "downloading" && e.active) {
+    var a = e.active;
+    lines.push({ type: "text", content: "Downloading “" + basenameRemote(a.filename) + "” — " + qualityLabel(a) + (a.size ? " · " + formatBytes(a.size) : "") + " from " + a.username });
+    var phase = t ? transferPhase(t.state) : null;
+    var pct = t ? transferProgress(t) : null;
+    if ((phase === "downloading" || phase === "starting") && pct != null) {
+      lines.push({ type: "progress-bar", value: Math.round(pct * 100), max: 100,
+        label: Math.round(pct * 100) + "%" + (t.averageSpeed ? " · ↓ " + formatSpeed(t.averageSpeed) : "") });
+    } else if (t && t.placeInQueue != null) {
+      lines.push(mutedText("Waiting in " + a.username + "'s queue · position " + t.placeInQueue));
+    } else {
+      lines.push(mutedText("Queued with " + a.username));
+    }
+    if (e.triedUsers && e.triedUsers.length > 1) lines.push(mutedText("Sharer " + e.triedUsers.length + " of up to " + UPGRADE_MAX_TRIES + " — the earlier ones didn't deliver."));
+  } else if (e.state === "checking") {
+    lines.push({ type: "text", content: "Checking the downloaded file…" });
+  } else if (e.state === "ready" && e.file) {
+    lines.push({ type: "text", content: "Ready: " + qualityLabel(e.file.quality) + (e.file.size ? " · " + formatBytes(e.file.size) : "") });
+    lines.push(mutedText(displayPath(e.file.path)));
+    if (e.message) lines.push(mutedText(e.message));
+    if (asking) lines.push({ type: "text", content: "Waiting for your answer in the Replace dialog…" });
+    else buttons.push(actionButton(inPlace ? "Replace…" : "Compare & replace…", "upgrade-replace", "accent", { data: { itemId: key } }));
+  } else if (e.state === "replaced") {
+    lines.push({ type: "text", content: "Replaced in your library." });
+  } else {
+    lines.push({ type: "text", content: e.message || e.state });
+    if (e.state === "alternative") buttons.push(actionButton("Take the best found", "upgrade-take-alternative", "accent", { data: { itemId: key } }));
+    if (e.state === "none" || e.state === "failed" || e.state === "alternative") buttons.push(actionButton("Search again", "upgrade-retry", "secondary", { data: { itemId: key } }));
+  }
+  if (buttons.length) lines.push(buttonRow(buttons));
+  return { type: "section", title: "Upgrading", children: lines };
+}
+
 function upgradesTab() {
   var children = [];
   var target = UPGRADE_TARGETS[upgradeTargetOf(settings.upgradeTarget)];
+  var inPlace = canReplaceInPlace();
   if (!Object.keys(upgrades).length) {
     children.push({ type: "text", className: "plugin-muted",
       content: "Nothing being upgraded. Choose Upgrade on a track in your library and a better copy is found, downloaded and checked here; you replace it after comparing the two." });
   } else {
+    var shown = panelUpgrade(upgrades, focusedUpgrade);
+    if (shown) {
+      children.push(upgradePanel(shown, shown.active ? transferByKey(shown.active.key) : null,
+        readiness.state === "ready", !!replaceOffers[upgradeKey(shown.trackId)], inPlace));
+    }
     children.push({ type: "text", className: "plugin-muted",
-      content: "Upgrading to: " + target + " (change it in Settings). Each track gets the best matching file from a sharer likely to deliver; nothing in your library changes until you compare and replace." });
+      content: "Upgrading to: " + target + " (change it in Settings). Each track gets the best matching file from a sharer likely to deliver; nothing in your library changes until you say Replace." });
     children.push({
       type: "track-row-list",
       items: upgradeRows(),
       showHeader: false,
       actions: [
-        { id: "upgrade-replace", label: "Compare & replace…", icon: "⇪" },
+        { id: "upgrade-replace", label: inPlace ? "Replace…" : "Compare & replace…", icon: "⇪" },
         { id: "upgrade-take-alternative", label: "Take the best found", icon: "⬇" },
         { id: "upgrade-choose", label: "Choose myself…", icon: "⌕" },
         { id: "upgrade-retry", label: "Search again", icon: "↻" },
@@ -7473,6 +7616,9 @@ return {
   _measuredQuality: measuredQuality,
   _checkUpgrade: checkUpgrade,
   _upgradeLine: upgradeLine,
+  _upgradePanel: upgradePanel,
+  _panelUpgrade: panelUpgrade,
+  _displayPath: displayPath,
   _upgradeRowActions: upgradeRowActions,
   _setUpgradeTimings: function (searchMs, stallMs) { UPGRADE_SEARCH_MS = searchMs; if (stallMs != null) UPGRADE_STALL_MS = stallMs; },
   _startFill: startFill,

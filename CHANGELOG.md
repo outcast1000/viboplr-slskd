@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.13.0
+
+- **Upgrade opens the Upgrades tab.** Choosing Upgrade on a track now takes
+  you to the Upgrades tab instead of a toast, with a panel for that track:
+  your copy and where it lives, the quality it's after, then the file it is
+  downloading, from whom, and how far along, and finally the file that will
+  replace yours.
+- **One question, then it's done.** On a Viboplr that can replace library
+  files itself, the finished, checked file opens Viboplr's Replace dialog
+  straight away. Replace swaps the file under the same library track (likes,
+  playlists and history stay), even while it's playing: playback carries on
+  from the same spot. Keep current leaves it ready, with Replace… on the row.
+  Older Viboplr versions keep the previous Compare & replace route.
+- Upgrades an AI assistant starts don't raise the dialog; the assistant
+  replaces them itself.
+
 ## 0.12.3
 
 - **One click on Start slskd is enough.** Roadie returns as soon as slskd's

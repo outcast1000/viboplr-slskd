@@ -278,7 +278,7 @@ async function pollUntil(p, pred, what) {
 
 const entryOf = (p) => p._upgrades()["t42"];
 
-test("integration: Upgrade finds, downloads and checks a better copy, then hands the compare dialog the row to replace", async () => {
+test("integration (older host): Upgrade opens the Upgrades tab, finds, downloads and checks a better copy, then hands the compare dialog the row to replace", async () => {
   const p = loadPlugin();
   const { h, calls, library } = upgradeHost({
     responses: [
@@ -290,10 +290,11 @@ test("integration: Upgrade finds, downloads and checks a better copy, then hands
   await p.activate(h.api);
   try {
     await h.actions["ctx:slskd-upgrade"]({ kind: "track", trackId: 42, title: "Karma Police", artistName: "Radiohead" });
-    assert.equal(h.calls.navigated.length, 0, "runs in the background — the view isn't pulled open");
-    const started = h.calls.notices.find((n) => /Looking for a better copy/.test(n.message));
-    assert.ok(started, h.calls.notifications.join(" | "));
-    assert.equal(started.options.action.id, "open-upgrades");
+    assert.deepEqual(h.calls.navigated, ["slskd-browse"], "the click lands on the plugin's view");
+    const tabs = findNodes(lastView(h), (n) => n.type === "tabs")[0];
+    assert.equal(tabs.activeTab, "upgrades", "…on the Upgrades tab");
+    assert.ok(findNodes(lastView(h), (n) => n.type === "section" && n.title === "Upgrading").length, "with this track's panel on top");
+    assert.ok(!h.calls.notices.some((n) => /Looking for a better copy/.test(n.message)), "no toast — the view already says it");
 
     await waitFor(() => entryOf(p) && entryOf(p).state === "downloading", 8000, "the download to start");
     assert.equal(calls.batches.length, 1);
@@ -331,6 +332,139 @@ test("integration: Upgrade finds, downloads and checks a better copy, then hands
   } finally {
     p.deactivate();
   }
+});
+
+const KARMA_FLAC = [
+  { username: "peer", hasFreeUploadSlot: true, queueLength: 0, uploadSpeed: 1000, files: [
+    { filename: "m\\Radiohead\\06 - Karma Police.flac", size: 30e6, length: 264, bitDepth: 16, sampleRate: 44100 }] }
+];
+
+// A host with api.library.replaceTrackFile: its Replace dialog answers `answers`
+// in turn ("replaced" / "declined" / an Error to throw).
+function replacingHost(answers) {
+  const made = upgradeHost({ responses: KARMA_FLAC });
+  const asked = [];
+  made.h.api.library.replaceTrackFile = async (req) => {
+    asked.push(req);
+    const a = answers.shift();
+    if (a instanceof Error) throw a;
+    return a === "replaced"
+      ? { status: "replaced", trackId: req.trackId, path: "/Users/me/Music/RH/06 Karma Police.flac", previousPath: "/Users/me/Music/RH/06 Karma Police.mp3" }
+      : { status: "declined" };
+  };
+  return Object.assign(made, { asked });
+}
+
+test("integration: once the file checks out, the host's Replace dialog is asked straight away — one question, then replaced", async () => {
+  const p = loadPlugin();
+  const { h, asked } = replacingHost(["replaced"]);
+  await p.activate(h.api);
+  try {
+    await h.actions["ctx:slskd-upgrade"]({ kind: "track", trackId: 42, title: "Karma Police", artistName: "Radiohead" });
+    await waitFor(() => entryOf(p) && entryOf(p).state === "downloading", 8000, "the download to start");
+    await pollUntil(p, () => asked.length === 1, "the Replace dialog");
+    assert.equal(asked[0].trackId, 42);
+    assert.ok(/06 - Karma Police\.flac$/.test(asked[0].path) || /Karma Police\.flac$/.test(asked[0].path), asked[0].path);
+    assert.equal(asked[0].source, "peer on Soulseek");
+    await waitFor(() => entryOf(p).state === "replaced", 2000, "replaced");
+    assert.ok(!h.calls.notices.some((n) => /is ready/.test(n.message)), "no ready toast — the dialog is the question");
+    assert.equal(h.calls.requestAction.length, 0, "no download modal on the way");
+    assert.equal(h.store.upgrades.t42.state, "replaced", "persisted");
+  } finally {
+    p.deactivate();
+  }
+});
+
+test("integration: Keep current leaves the upgrade ready with Replace…, which asks again", async () => {
+  const p = loadPlugin();
+  const { h, asked } = replacingHost(["declined", "replaced"]);
+  await p.activate(h.api);
+  try {
+    await h.actions["ctx:slskd-upgrade"]({ kind: "track", trackId: 42 });
+    await waitFor(() => entryOf(p) && entryOf(p).state === "downloading", 8000, "the download to start");
+    await pollUntil(p, () => asked.length === 1, "the first dialog");
+    await waitFor(() => entryOf(p).state === "ready" && !findNodes(lastView(h), (n) => n.type === "text" && /waiting for your answer/i.test(n.content || "")).length, 2000, "the dialog to close");
+    const replace = findNodes(lastView(h), (n) => n.type === "button" && n.action === "upgrade-replace")[0];
+    assert.ok(replace, "the panel offers Replace…");
+    assert.equal(replace.label, "Replace…");
+    h.actions["upgrade-replace"](replace.data);
+    await waitFor(() => entryOf(p).state === "replaced", 2000, "replaced on the second ask");
+    assert.equal(asked.length, 2);
+  } finally {
+    p.deactivate();
+  }
+});
+
+test("integration: a swap that fails says so on the upgrade and keeps it ready", async () => {
+  const p = loadPlugin();
+  const { h, asked } = replacingHost([new Error("the file is open in another program")]);
+  await p.activate(h.api);
+  try {
+    await h.actions["ctx:slskd-upgrade"]({ kind: "track", trackId: 42 });
+    await waitFor(() => entryOf(p) && entryOf(p).state === "downloading", 8000, "the download to start");
+    await pollUntil(p, () => asked.length === 1, "the dialog");
+    await waitFor(() => /Replace failed: the file is open/.test(entryOf(p).message || ""), 2000, "the failure");
+    assert.equal(entryOf(p).state, "ready");
+  } finally {
+    p.deactivate();
+  }
+});
+
+test("integration: an assistant's upgrade never raises the dialog — its caller replaces", async () => {
+  const p = loadPlugin();
+  const { h, asked } = replacingHost(["replaced"]);
+  await p.activate(h.api);
+  try {
+    await h.tools.upgrade({ trackId: 42 });
+    await waitFor(() => entryOf(p) && entryOf(p).state === "downloading", 8000, "the download to start");
+    assert.equal(h.calls.navigated.length, 0, "the view isn't pulled open for an assistant");
+    await pollUntil(p, () => entryOf(p).state === "ready", "ready");
+    assert.equal(asked.length, 0);
+  } finally {
+    p.deactivate();
+  }
+});
+
+test("the Upgrades panel shows the file you have, the file it is fetching and the file that replaces yours", () => {
+  const key = (s) => "x" + s;
+  const base = { trackId: 42, title: "Sultans of Swing", artist: "Dire Straits", target: "flac16",
+    path: "file://C:/Music/DS/Sultans of Swing.mp3", currentLabel: "MP3 ≈192kbps · 7.9 MB", triedUsers: ["peer"] };
+  const text = (n) => JSON.stringify(n);
+
+  const downloading = plugin._upgradePanel(Object.assign({}, base, { state: "downloading",
+    active: { username: "peer", filename: "m\\DS\\03 - Sultans of Swing.flac", size: 38e6, extension: "flac", qualityTier: 0, bitDepth: 16, sampleRate: 44100 } }),
+    { state: "InProgress", size: 38e6, bytesTransferred: 19e6, averageSpeed: 500000 }, true, false, true);
+  assert.match(text(downloading), /Your copy: MP3/);
+  assert.match(text(downloading), /C:\\\\Music\\\\DS\\\\Sultans of Swing\.mp3/, "the library file, as a Windows path");
+  assert.match(text(downloading), /Downloading “03 - Sultans of Swing\.flac”/);
+  assert.match(text(downloading), /from peer/);
+  assert.equal(findNodes(downloading, (n) => n.type === "progress-bar")[0].value, 50);
+
+  const ready = plugin._upgradePanel(Object.assign({}, base, { state: "ready",
+    file: { path: "/slskd/downloads/viboplr/upgrades/1/03 - Sultans of Swing.flac", size: 38e6, quality: { extension: "flac", qualityTier: 0, bitDepth: 16, sampleRate: 44100 } } }),
+    null, true, false, true);
+  assert.match(text(ready), /Ready: FLAC/);
+  assert.match(text(ready), /upgrades\/1\/03 - Sultans of Swing\.flac/, "the file that will replace yours");
+  assert.equal(findNodes(ready, (n) => n.type === "button")[0].label, "Replace…");
+
+  const asking = plugin._upgradePanel(Object.assign({}, base, { state: "ready", file: { path: "/x.flac", quality: { extension: "flac", qualityTier: 0 } } }), null, true, true, true);
+  assert.match(text(asking), /Waiting for your answer/);
+  assert.equal(findNodes(asking, (n) => n.type === "button").length, 0, "no second Replace while the dialog is up");
+
+  const waiting = plugin._upgradePanel(Object.assign({}, base, { state: "searching" }), null, false, false, true);
+  assert.match(text(waiting), /Waiting for slskd/);
+  void key;
+});
+
+test("the panel follows the upgrade started here, else the newest one still going", () => {
+  const all = {
+    t1: { trackId: 1, state: "replaced", createdAt: 30 },
+    t2: { trackId: 2, state: "downloading", createdAt: 10 },
+    t3: { trackId: 3, state: "ready", createdAt: 20 }
+  };
+  assert.equal(plugin._panelUpgrade(all, "t1").trackId, 1, "the one started here, even once done");
+  assert.equal(plugin._panelUpgrade(all, null).trackId, 3, "else the newest in progress or waiting on you");
+  assert.equal(plugin._panelUpgrade({ t1: all.t1 }, "gone"), null, "nothing in flight → no panel");
 });
 
 test("integration: a file that isn't what it claimed is rejected after download and the next sharer is asked", async () => {
