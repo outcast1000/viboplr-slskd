@@ -222,8 +222,80 @@ test("Upgrade: says when nothing better exists, and falls back to a plain search
     view = lastView(h);
     assert.equal(findNodes(view, (n) => n.type === "text" && /Upgrading/.test(n.content || "")).length, 0, "a plain search, no mode");
 
-    await p._startUpgrade({ kind: "track", title: "Karma Police", artistName: "Radiohead" });
+    await p._startUpgrade({ kind: "track", title: "No Surprises", artistName: "Radiohead" });
     assert.ok(h.calls.notifications.some((m) => /Upgrade works on tracks in your library/.test(m)));
+  } finally {
+    p.deactivate();
+  }
+});
+
+// The queue and Now Playing only know a library id when the entry cached one,
+// so Upgrade on the playing song arrives with names alone. It must still find
+// the library row — before, it became a plain search whose download could
+// never be replaced into the library ("That file isn't a finished upgrade").
+test("Upgrade: a target with no library id finds the row by title and artist", async () => {
+  const p = loadPlugin();
+  const LIVE = Object.assign({}, LIBRARY_MP3, { id: 50, path: "file:///Users/me/Music/RH/Karma Police (live).mp3", duration_secs: 290 });
+  const REMOTE = Object.assign({}, LIBRARY_MP3, { id: 51, path: "subsonic://x/9" });
+  const { h } = modeHost({
+    library: { tracks: [REMOTE, LIVE, LIBRARY_MP3] },
+    bodies: [{ username: "peer", hasFreeUploadSlot: true, queueLength: 0, uploadSpeed: 1000, files: KARMA_FILES }]
+  });
+  await p.activate(h.api);
+  try {
+    await p._startUpgrade({ kind: "track", title: "karma police", artistName: "RADIOHEAD", durationSecs: 263 });
+    const header = findNodes(lastView(h), (n) => n.type === "text" && /Upgrading/.test(n.content || ""));
+    assert.equal(header.length, 1, "upgrade mode, not a plain search");
+    assert.ok(!h.calls.notifications.some((m) => /Upgrade works on tracks in your library/.test(m)));
+
+    const key = "peer" + SEP + KARMA_FILES[0].filename;
+    h.actions["download-file"]({ itemId: "f:" + key });
+    await waitFor(() => h.store.tracked && h.store.tracked[key]);
+    assert.equal(h.store.tracked[key].upgrade.trackId, 42, "the local copy nearest in length, not the remote or the live one");
+  } finally {
+    p.deactivate();
+  }
+});
+
+test("Retry keeps what the download was for: the upgrade stamp and the library's names", async () => {
+  const p = loadPlugin();
+  const key = "peer" + SEP + KARMA_FILES[0].filename;
+  const { h, posts } = modeHost({ library: { tracks: [LIBRARY_MP3] }, bodies: [] });
+  h.store.tracked = {
+    [key]: { size: 30e6, upgrade: { trackId: 42, title: "Karma Police", artist: "Radiohead" },
+      meta: { title: "Karma Police", artist: "Radiohead", album: "OK Computer", trackNumber: 6 } }
+  };
+  await p.activate(h.api);
+  try {
+    h.actions["retry-transfer"]({ itemId: key });
+    await waitFor(() => posts.length === 1);
+    const rec = h.store.tracked[key];
+    assert.equal(rec.upgrade.trackId, 42);
+    assert.equal(rec.meta.album, "OK Computer");
+    assert.equal(rec.meta.trackNumber, 6);
+  } finally {
+    p.deactivate();
+  }
+});
+
+test("Replace in library: a file with no upgrade stamp is matched to the library copy by its own names", async () => {
+  const p = loadPlugin();
+  const key = "peer" + SEP + KARMA_FILES[0].filename;
+  const other = "peer" + SEP + "m\\RH\\Lucky.flac";
+  const { h } = modeHost({ library: { tracks: [LIBRARY_MP3] }, bodies: [] });
+  h.store.tracked = {
+    [key]: { resolvedPath: "/Users/me/Music/slskd/viboplr/1-RH/06 - Karma Police.flac", meta: { title: "Karma Police", artist: "Radiohead", durationSecs: 264 } },
+    [other]: { resolvedPath: "/Users/me/Music/slskd/viboplr/1-RH/Lucky.flac", meta: { title: "Lucky", artist: "Radiohead" } }
+  };
+  await p.activate(h.api);
+  try {
+    h.actions["replace-transfer"]({ selectedIds: [key] });
+    await waitFor(() => h.calls.requestAction.length === 1);
+    assert.equal(h.calls.requestAction[0].payload.tracks[0].libraryTrackId, 42);
+
+    h.actions["replace-transfer"]({ selectedIds: [other] });
+    await waitFor(() => h.calls.notifications.some((m) => /No local copy of “Lucky”/.test(m)));
+    assert.equal(h.calls.requestAction.length, 1, "nothing to replace, so no modal");
   } finally {
     p.deactivate();
   }

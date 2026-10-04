@@ -5723,7 +5723,9 @@ function registerActions() {
 
   api.ui.onAction("replace-transfer", function (data) {
     var keys = rowIds(data);
-    for (var i = 0; i < keys.length; i++) openReplace(keys[i]);
+    for (var i = 0; i < keys.length; i++) {
+      openReplace(keys[i]).catch(function (e) { console.error("slskd: replace in library failed:", e); });
+    }
   });
 
   // A selection plays as ONE queue, in list order; a single row just plays.
@@ -5764,8 +5766,17 @@ function registerActions() {
       var t = transferByKey(key);
       var rec = tracked[key];
       var size = (t && t.size) || (rec && rec.size) || 0;
+      // The re-queue writes a fresh record; carry over what the first one was
+      // for, or a retried upgrade can no longer be replaced into the library.
+      // `meta` goes back through mergeMeta, which reads tag-shaped keys.
+      var m = rec && rec.meta;
+      var extra = rec && (rec.upgrade || m) ? {
+        upgrade: rec.upgrade || null,
+        meta: m ? { title: m.title, artist: m.artist, album: m.album, album_artist: m.albumArtist, track_number: m.trackNumber,
+          year: m.year, genre: m.genre, duration_secs: m.durationSecs } : null
+      } : null;
       chain = chain.then(function () {
-        return enqueueFiles(parts.username, [{ filename: parts.filename, size: size }], basenameRemote(dirnameRemote(parts.filename)));
+        return enqueueFiles(parts.username, [{ filename: parts.filename, size: size }], basenameRemote(dirnameRemote(parts.filename)), extra);
       });
     });
     chain.catch(function (e) { console.error("slskd retry failed:", e); });
@@ -6330,10 +6341,7 @@ function currentLabelFor(q) {
 // falls back to the same plain search when it can't.
 async function queueUpgrade(target) {
   var t = target || {};
-  var row = null;
-  if (t.trackId != null && api.library && typeof api.library.getTrackById === "function") {
-    try { row = await api.library.getTrackById(t.trackId); } catch (e) { console.error("slskd: could not read library track " + t.trackId + ":", e); }
-  }
+  var row = await libraryRowForTarget(t);
   if (!row) {
     api.ui.navigateToView(VIEW_ID);
     return plainSearch(t, "Upgrade works on tracks in your library — searching Soulseek for this one instead.");
@@ -6716,6 +6724,47 @@ function upgradeSettingsSection() {
 // can't answer — a track that isn't a local library row has nothing to replace,
 // an album with no rows here has nothing to compare against — and say so, so
 // the user isn't left wondering why the filter never appeared.
+// The library row a track target names. A target from the queue or Now Playing
+// often carries no library id — the host only has one when the queue entry
+// cached it — so the row is then found by name: same title and artist after
+// normalizing, a local file over a remote one, and the nearest duration when
+// several remain. Without this, Upgrade on the playing song quietly became a
+// plain search, and its download could never be replaced into the library.
+async function libraryRowForTarget(t) {
+  var row = null;
+  if (t.trackId != null && api.library && typeof api.library.getTrackById === "function") {
+    try { row = await api.library.getTrackById(t.trackId); } catch (e) { console.error("slskd: could not read library track " + t.trackId + ":", e); }
+  }
+  if (row) return row;
+  return libraryRowByName(t.title, t.artistName, t.durationSecs);
+}
+
+async function libraryRowByName(title, artist, durationSecs) {
+  if (!title || !api.library || typeof api.library.ftsTracks !== "function") return null;
+  var wantTitle = normalizeText(title);
+  var wantArtist = artist ? normalizeText(artist) : null;
+  if (!wantTitle) return null;
+  var hits;
+  try {
+    hits = await api.library.ftsTracks(wantTitle + (wantArtist ? " " + wantArtist : ""), { limit: 50 }) || [];
+  } catch (e) {
+    console.error("slskd: library lookup for “" + title + "” failed:", e);
+    return null;
+  }
+  var best = null;
+  var bestScore = Infinity;
+  for (var i = 0; i < hits.length; i++) {
+    var r = hits[i];
+    if (normalizeText(r.title) !== wantTitle) continue;
+    if (wantArtist && normalizeText(r.artist_name || "") !== wantArtist) continue;
+    var local = r.path && String(r.path).indexOf("file://") === 0;
+    var drift = durationSecs && r.duration_secs ? Math.abs(r.duration_secs - durationSecs) : 0;
+    var score = (local ? 0 : 1e6) + drift;
+    if (score < bestScore) { best = r; bestScore = score; }
+  }
+  return best;
+}
+
 function plainSearch(target, note) {
   if (note) api.ui.showNotification(note);
   var q = searchQueryForTarget(target);
@@ -6726,10 +6775,7 @@ function plainSearch(target, note) {
 async function startUpgrade(target) {
   var t = target || {};
   api.ui.navigateToView(VIEW_ID);
-  var row = null;
-  if (t.trackId != null && api.library && typeof api.library.getTrackById === "function") {
-    try { row = await api.library.getTrackById(t.trackId); } catch (e) { console.error("slskd: could not read library track " + t.trackId + ":", e); }
-  }
+  var row = await libraryRowForTarget(t);
   if (!row) return plainSearch(t, "Upgrade works on tracks in your library — searching Soulseek for this one instead.");
   if (!row.path || String(row.path).indexOf("file://") !== 0) {
     return plainSearch({ kind: "track", title: row.title, artistName: row.artist_name },
@@ -6809,14 +6855,29 @@ async function startFill(target) {
 // is meant to replace. A host that knows `libraryTrackId` opens its compare →
 // Replace / Save as copy flow; an older one runs the ordinary Add to library
 // copy, which is the same modal minus the replace step.
-function openReplace(key) {
+//
+// A file fetched from a plain search has no upgrade stamp, but the user asking
+// to replace with it is intent enough: the library copy is found by the file's
+// own title / artist / duration. The host's compare step still stands between
+// that guess and the library file.
+async function openReplace(key) {
   var rec = tracked[key];
   var tr = importTrackFor(key);
-  if (!rec || !rec.upgrade || !tr) {
-    api.ui.showNotification("That file isn't a finished upgrade.");
+  if (!rec || !tr) {
+    api.ui.showNotification("That file hasn't finished downloading yet.");
     return;
   }
-  tr.libraryTrackId = rec.upgrade.trackId;
+  var trackId = rec.upgrade ? rec.upgrade.trackId : null;
+  if (trackId == null) {
+    var meta = rec.meta || {};
+    var row = await libraryRowByName(meta.title, meta.artist, tr.durationSecs);
+    if (!row || !row.path || String(row.path).indexOf("file://") !== 0) {
+      api.ui.showNotification("No local copy of “" + tr.title + "” in your library to replace — Add to library copies it in instead.");
+      return;
+    }
+    trackId = row.id;
+  }
+  tr.libraryTrackId = trackId;
   api.ui.requestAction("download-tracks", { providerId: PROVIDER_KEY, providerName: PROVIDER_NAME, tracks: [tr] });
 }
 

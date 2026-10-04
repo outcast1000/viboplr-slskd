@@ -83,7 +83,10 @@ function fakeHost(opts) {
     library: {
       getTrackById: async (id) => ((o.library && o.library.tracks) || []).find((t) => t.id === id) || null,
       getTracks: async (q) => ((o.library && o.library.tracks) || []).filter((t) => q && q.albumId != null ? t.album_id === q.albumId : true),
-      ftsAlbums: async () => (o.library && o.library.albums) || []
+      ftsAlbums: async () => (o.library && o.library.albums) || [],
+      // Every track: the plugin does its own exact title/artist match on top,
+      // which is the part worth testing.
+      ftsTracks: async () => (o.library && o.library.tracks) || []
     },
     // `o.dependencies` = { name: getDependency answer } (absent → null, i.e. a
     // host that doesn't know the binary); `o.exec(program, args, opts)` answers

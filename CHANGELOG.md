@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.12.2
+
+- **Upgrade works on the song that's playing.** From the queue or Now Playing a
+  track often carries no library id, so Upgrade fell back to a plain Soulseek
+  search: nothing appeared on the Upgrades tab, and the file you then picked
+  could not be replaced into the library. The library copy is now found by
+  title and artist (a local file first, the closest length when there are
+  several).
+- **Replace in library works on any finished download.** It said "That file
+  isn't a finished upgrade" for a file fetched from a plain search. It now
+  matches the file to your library copy by its own title, artist and length,
+  and still goes through Viboplr's compare step before anything is replaced.
+  With no local copy it says so and points to Add to library.
+- **Retry keeps what a download was for.** Retrying rebuilt the download
+  without its upgrade stamp or library names, so a retried upgrade could no
+  longer be replaced.
+
 ## 0.12.1
 
 - **Download works on a track the Playback fallback played.** It failed with
