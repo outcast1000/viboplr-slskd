@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.16.0
+
+- **Upgrade many tracks at once.** Select several tracks and choose
+  Soulseek: Upgrade — each local track gets its own entry on the Upgrades
+  tab (up to 100 at a time), searched one after another. Tracks that can't
+  be upgraded are skipped and named in one notice. Finished files wait at
+  Ready instead of each opening the Replace dialog; **Replace all ready…**
+  shows Viboplr's compare dialog for each in turn. The Upgrades list now
+  takes a selection too, for Cancel, Search again or Remove on many rows.
+- **Each tab has one job.**
+  - **Search:** your recent searches sit under the box. Files / Folders
+    is a switch on the results bar, with the counts and "Best match" to
+    undo a column sort. Folder cards say who shares it, how many tracks,
+    the size, and whether there's a free slot or a queue.
+  - **Downloads** is grouped: Needs attention (with Retry all) first, then
+    Downloading, Waiting (and for how long), Finished (with Clear) and
+    Cancelled. Failures are in plain words. A file stuck in someone's queue
+    can move to Another source. "Remove" is now **Clear from list** — the
+    file stays; only Delete file deletes.
+  - **Upgrades:** the Upgrade to setting moved here. An upgrade shows its
+    four steps and your copy next to the one on its way; Sources found has
+    columns.
+  - **Fallback** holds the whole feature: how often it played and how fast,
+    the last resolve (step-by-step trace on request), recent resolves —
+    kept across restarts — the files it kept (moved from Downloads; Delete
+    all now asks first) and its settings.
+  - **Settings** opens with a status checklist — connected, sharing,
+    downloads reaching your library — with the fix on the row that needs it.
+
 ## 0.15.0
 
 - **Thumbnails show the format.** Search results, folder cards, an
