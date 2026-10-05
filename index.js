@@ -942,6 +942,114 @@ function qualityLabel(c) {
   return ext || "unknown";
 }
 
+// ---------------------------------------------------------------------------
+// Format tiles — pure
+// ---------------------------------------------------------------------------
+// The thumbnail on a row whose cover would only be a guess (search results,
+// upgrade sources, a download still in flight): the container in big letters,
+// the number that decides quality under it, tinted by tier. The format is what
+// the user chooses by there, and the name-based cover lookup is held to
+// `artwork: "cached"` on purpose, so most of those rows were blank squares.
+//
+// A data: URI, which the host renders as-is in rows and cards. An SVG inside
+// an <img> can't read the skin's variables, so the fill is translucent over
+// whatever is behind it and the colour is only a hint — the text carries the
+// meaning. Percent-encoded rather than base64 (cheaper than the hand-rolled
+// b64encode, and shorter) and cached per (label, detail, tier): Search
+// re-renders on every poll tick with up to MAX_RESULT_FILES rows.
+var TILE_COLORS = {
+  hires: "#b98cff",     // reported 24-bit, or above 48 kHz
+  lossless: "#53a8ff",
+  high: "#3fbfa6",      // T_HIGH: 256+ kbps, or VBR from 192
+  low: "#e0a040",       // T_MEDIUM / T_LOW
+  unknown: "#9a9cb0"    // nothing reported, or a folder of mixed tiers
+};
+var tileCache = {};
+
+function tileTier(c) {
+  if (!c) return "unknown";
+  var t = c.qualityTier != null ? c.qualityTier : qualityTier(c);
+  if (t === T_LOSSLESS) return (c.bitDepth || 0) > 16 || (c.sampleRate || 0) > 48000 ? "hires" : "lossless";
+  if (t === T_HIGH) return "high";
+  if (t === T_MEDIUM || t === T_LOW) return "low";
+  return "unknown";
+}
+
+// "24/96", "16/44" for lossless; "320", or "~245" for VBR; "" when unreported.
+function tileDetail(c) {
+  if (!c) return "";
+  var tier = tileTier(c);
+  if (tier === "lossless" || tier === "hires") {
+    if (c.bitDepth && c.sampleRate) return c.bitDepth + "/" + Math.floor(c.sampleRate / 1000);
+    if (c.sampleRate) return Math.floor(c.sampleRate / 1000) + "k";
+    return c.bitDepth ? c.bitDepth + "-bit" : "";
+  }
+  return c.bitRate ? (c.isVariableBitRate ? "~" : "") + c.bitRate : "";
+}
+
+function formatTile(label, detail, tier) {
+  var key = label + "|" + detail + "|" + tier;
+  if (tileCache[key]) return tileCache[key];
+  var color = TILE_COLORS[tier] || TILE_COLORS.unknown;
+  var font = "font-family='-apple-system,Segoe UI,sans-serif'";
+  var svg = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'>" +
+    "<rect width='40' height='40' rx='6' fill='" + color + "' fill-opacity='.18'/>" +
+    "<text x='20' y='" + (detail ? "19.5" : "24") + "' text-anchor='middle' " + font +
+    " font-size='" + (label.length > 4 ? "8.5" : "10.5") + "' font-weight='700' fill='" + color + "'>" + label + "</text>" +
+    (detail ? "<text x='20' y='31' text-anchor='middle' " + font + " font-size='7.5' fill='" + color + "' fill-opacity='.85'>" + detail + "</text>" : "") +
+    "</svg>";
+  return (tileCache[key] = "data:image/svg+xml;utf8," + encodeURIComponent(svg));
+}
+
+// Labels are an extension, so only [A-Z0-9]; anything else would be markup.
+function tileLabel(c) {
+  var ext = String(fileExtension(c) || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 5);
+  return ext || "?";
+}
+
+function fileTile(c) {
+  return formatTile(tileLabel(c), tileDetail(c), tileTier(c));
+}
+
+// A folder's tile: its main container by bytes, described by that
+// container's best-ranked file (`files` arrive ranked). A folder that is a
+// real mix — lossless and lossy each a fifth or more of it — says MIX, since
+// one format on the card would misdescribe what "download folder" fetches.
+function folderTile(files) {
+  var list = files || [];
+  if (!list.length) return formatTile("?", "", "unknown");
+  var bytes = {}, order = [], lossless = 0, lossy = 0, total = 0;
+  for (var i = 0; i < list.length; i++) {
+    var f = list[i], label = tileLabel(f), size = f.size || 0;
+    if (bytes[label] == null) { bytes[label] = 0; order.push(label); }
+    bytes[label] += size;
+    total += size;
+    if ((f.qualityTier != null ? f.qualityTier : qualityTier(f)) === T_LOSSLESS) lossless += size;
+    else lossy += size;
+  }
+  if (total && lossless / total >= 0.2 && lossy / total >= 0.2) return formatTile("MIX", "", "unknown");
+  var main = order[0];
+  for (var j = 1; j < order.length; j++) if (bytes[order[j]] > bytes[main]) main = order[j];
+  for (var k = 0; k < list.length; k++) if (tileLabel(list[k]) === main) return fileTile(list[k]);
+  return formatTile(main, "", "unknown");
+}
+
+// Pure: the advertised quality fields a tile needs, or null when the file
+// came without them (a retry rebuilt from slskd's transfer record).
+function qualitySnapshot(f) {
+  if (!f || (f.bitRate == null && f.bitDepth == null && f.sampleRate == null)) return null;
+  return { bitRate: f.bitRate != null ? f.bitRate : null, bitDepth: f.bitDepth != null ? f.bitDepth : null,
+    sampleRate: f.sampleRate != null ? f.sampleRate : null, isVariableBitRate: !!f.isVariableBitRate };
+}
+
+// Pure: a transfer row's tile — the remote file's container plus what the
+// sharer advertised for it when we queued it.
+function transferTile(t, rec) {
+  var q = (rec && rec.quality) || {};
+  return fileTile({ filename: t && t.filename, bitRate: q.bitRate, bitDepth: q.bitDepth,
+    sampleRate: q.sampleRate, isVariableBitRate: q.isVariableBitRate });
+}
+
 function availabilityLabel(c) {
   if (c.hasFreeUploadSlot) return "free slot";
   if (!c.queueLength) return "queued";
@@ -1819,7 +1927,10 @@ async function enqueueBatch(username, files, label, subdir, recExtra) {
       resolvedPath: null,
       meta: extra.meta ? mergeMeta(parsed, extra.meta) : parsed,
       size: files[i].size || null,
-      length: files[i].length != null ? files[i].length : null
+      length: files[i].length != null ? files[i].length : null,
+      // What the sharer advertised, for the row's format tile while the
+      // transfer is in flight (slskd's transfer record carries none of it).
+      quality: qualitySnapshot(files[i])
     };
     if (extra.upgrade) rec.upgrade = extra.upgrade;
     tracked[username + KEY_SEP + files[i].filename] = rec;
@@ -4991,6 +5102,8 @@ function resultRows() {
       // the host renders that as an em dash, which reads as "unknown" rather
       // than as zero.
       cells: resultCells(c),
+      // The format, not a guessed cover: see formatTile.
+      imageUrl: fileTile(c),
       durationSecs: c.length != null ? c.length : null,
       action: "download-file",
       artistName: meta.artist,
@@ -5020,6 +5133,9 @@ function transferRows() {
       artistName: meta.artist || null,
       albumTitle: meta.album || null,
       path: playable ? SCHEME + "://" + key : null,
+      // A file still on its way (or one that never arrived) shows its format;
+      // once it is here and tagged, its real cover takes over by name.
+      imageUrl: playable ? undefined : transferTile(t, rec),
       kind: "audio",
       actions: transferRowActions(t, rec, tier),
       action: playable ? "play-transfer" : undefined
@@ -5043,6 +5159,7 @@ function folderCards() {
         subtitle: g.username + " · " + g.files.length + " files · " + (missing.length
           ? missing.length + " you don't have · " + formatBytes(bytes)
           : "you have all of these"),
+        imageUrl: folderTile(g.files),
         action: "fill-folder"
       };
     }
@@ -5050,6 +5167,7 @@ function folderCards() {
       id: "d:" + g.key,
       title: g.name,
       subtitle: g.username + " · " + g.files.length + " files · " + formatBytes(g.totalSize),
+      imageUrl: folderTile(g.files),
       action: "download-folder"
     };
   });
@@ -7093,6 +7211,7 @@ function upgradeSourceRows(e) {
       id: key + "#" + i,
       title: basenameRemote(c.filename),
       subtitle: bits.join("  ·  "),
+      imageUrl: fileTile(c),
       kind: "audio",
       actions: active ? [] : ["upgrade-use-source"]
     };
@@ -7888,6 +8007,12 @@ return {
   _b64encode: b64encode,
   _hasFlag: hasFlag,
   _qualityTier: qualityTier,
+  _formatTile: formatTile,
+  _fileTile: fileTile,
+  _folderTile: folderTile,
+  _tileTier: tileTier,
+  _tileDetail: tileDetail,
+  _transferTile: transferTile,
   _availabilityTier: availabilityTier,
   _rankResults: rankResults,
   _groupByFolder: groupByFolder,
