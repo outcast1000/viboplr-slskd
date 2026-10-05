@@ -177,10 +177,16 @@ test("checkUpgrade: the finished file must be what it claimed, better than the c
 
 test("upgradeRowActions: only what does something to that upgrade", () => {
   const a = plugin._upgradeRowActions;
-  assert.deepEqual(a({ state: "ready" }), ["upgrade-replace", "upgrade-choose", "upgrade-remove"]);
-  assert.deepEqual(a({ state: "alternative" }), ["upgrade-take-alternative", "upgrade-choose", "upgrade-retry", "upgrade-remove"]);
-  assert.deepEqual(a({ state: "downloading" }), ["upgrade-choose", "upgrade-remove"]);
-  assert.deepEqual(a({ state: "none" }), ["upgrade-choose", "upgrade-retry", "upgrade-remove"]);
+  const cands = [{ username: "a", filename: "x" }, { username: "b", filename: "y" }];
+  assert.deepEqual(a({ state: "ready" }), ["upgrade-show", "upgrade-replace", "upgrade-choose", "upgrade-remove"]);
+  assert.deepEqual(a({ state: "alternative" }), ["upgrade-show", "upgrade-take-alternative", "upgrade-choose", "upgrade-retry", "upgrade-remove"]);
+  assert.deepEqual(a({ state: "searching" }), ["upgrade-show", "upgrade-cancel", "upgrade-choose", "upgrade-remove"]);
+  assert.deepEqual(a({ state: "downloading", candidates: cands, triedUsers: ["a"] }),
+    ["upgrade-show", "upgrade-skip", "upgrade-cancel", "upgrade-choose", "upgrade-remove"]);
+  assert.deepEqual(a({ state: "downloading", candidates: cands, triedUsers: ["a", "b"] }),
+    ["upgrade-show", "upgrade-cancel", "upgrade-choose", "upgrade-remove"], "no other sharer left to try");
+  assert.deepEqual(a({ state: "none" }), ["upgrade-show", "upgrade-choose", "upgrade-retry", "upgrade-remove"]);
+  assert.deepEqual(a({ state: "cancelled" }), ["upgrade-show", "upgrade-choose", "upgrade-retry", "upgrade-remove"]);
   assert.deepEqual(a({ state: "replaced" }), ["upgrade-remove"]);
   assert.deepEqual(a({ state: "gone" }), ["upgrade-remove"], "nothing left to upgrade or retry");
 });
@@ -317,7 +323,7 @@ test("integration (older host): Upgrade opens the Upgrades tab, finds, downloads
     const list = findNodes(lastView(h), (n) => n.type === "track-row-list")[0];
     assert.equal(list.items.length, 1);
     assert.ok(list.items[0].subtitle.startsWith("Ready: FLAC"), list.items[0].subtitle);
-    assert.deepEqual(list.items[0].actions, ["upgrade-replace", "upgrade-choose", "upgrade-remove"]);
+    assert.deepEqual(list.items[0].actions, ["upgrade-show", "upgrade-replace", "upgrade-choose", "upgrade-remove"]);
 
     h.actions["upgrade-replace-notice"]();
     assert.equal(h.calls.requestAction.length, 1);
@@ -567,6 +573,114 @@ test("integration: cancelling the download in Downloads stops the upgrade rather
   } finally {
     p.deactivate();
   }
+});
+
+const TWO_SHARERS = [
+  { username: "a", hasFreeUploadSlot: true, queueLength: 0, uploadSpeed: 100, files: [{ filename: "m\\Radiohead\\06 - Karma Police.flac", size: 30e6, length: 264, bitDepth: 16 }] },
+  { username: "b", hasFreeUploadSlot: true, queueLength: 0, uploadSpeed: 10, files: [{ filename: "n\\Radiohead\\06 - Karma Police.flac", size: 29e6, length: 264, bitDepth: 16 }] }
+];
+
+test("integration: Cancel on a queued upgrade stops it in slskd and rests it, ready for Search again", async () => {
+  const p = loadPlugin();
+  const { h, calls } = upgradeHost({ responses: TWO_SHARERS, states: { a: ["Queued, Remotely"] } });
+  await p.activate(h.api);
+  try {
+    await h.actions["ctx:slskd-upgrade"]({ kind: "track", trackId: 42 });
+    await waitFor(() => entryOf(p) && entryOf(p).state === "downloading", 8000, "the download to start");
+    await p._refreshTransfers();
+    const cancel = findNodes(lastView(h), (n) => n.type === "button" && n.action === "upgrade-cancel")[0];
+    assert.ok(cancel, "the panel offers Cancel while it is queued");
+    h.actions["upgrade-cancel"](cancel.data);
+    await waitFor(() => entryOf(p).state === "cancelled", 2000, "cancelled");
+    assert.deepEqual(calls.cancels, ["a"], "the transfer is cancelled in slskd");
+    assert.equal(calls.batches.length, 1, "no next sharer is asked");
+    assert.equal(h.store.tracked["a" + SEP + "m\\Radiohead\\06 - Karma Police.flac"], undefined, "its record is forgotten");
+    assert.equal(h.store.sharers && h.store.sharers.a && h.store.sharers.a.stalled, undefined, "the sharer isn't blamed for the user's cancel");
+    const list = findNodes(lastView(h), (n) => n.type === "track-row-list" && n.items.some((i) => i.id === "t42"))[0];
+    assert.ok(list.items[0].actions.includes("upgrade-retry"));
+    const sources = findNodes(lastView(h), (n) => n.type === "track-row-list" && n.items.some((i) => i.id === "t42#1"))[0];
+    assert.ok(sources, "a cancelled upgrade still offers the sources it found");
+  } finally {
+    p.deactivate();
+  }
+});
+
+test("integration: the panel lists the sources found; Use this switches to another sharer at once", async () => {
+  const p = loadPlugin();
+  const { h, calls } = upgradeHost({ responses: TWO_SHARERS, states: { a: ["Queued, Remotely"] } });
+  await p.activate(h.api);
+  try {
+    await h.actions["ctx:slskd-upgrade"]({ kind: "track", trackId: 42 });
+    await waitFor(() => entryOf(p) && entryOf(p).state === "downloading", 8000, "the download to start");
+    await p._refreshTransfers();
+    const panel = findNodes(lastView(h), (n) => n.type === "section" && n.title === "Upgrading")[0];
+    const sources = findNodes(panel, (n) => n.type === "track-row-list")[0];
+    assert.ok(sources, "the sources list");
+    assert.equal(sources.items.length, 2);
+    assert.match(sources.items[0].subtitle, /from a.*downloading now/);
+    assert.deepEqual(sources.items[0].actions, [], "the one downloading can't be picked again");
+    assert.deepEqual(sources.items[1].actions, ["upgrade-use-source"]);
+
+    await h.actions["upgrade-use-source"]({ itemId: sources.items[1].id });
+    await waitFor(() => calls.batches.length === 2, 2000, "the switch");
+    assert.deepEqual(calls.cancels, ["a"], "the first one is cancelled");
+    assert.equal(calls.batches[1].username, "b");
+    assert.equal(entryOf(p).active.username, "b");
+    await pollUntil(p, () => entryOf(p).state === "ready", "ready");
+    assert.equal(entryOf(p).file.key, "b" + SEP + "n\\Radiohead\\06 - Karma Police.flac");
+  } finally {
+    p.deactivate();
+  }
+});
+
+test("integration: Try another sharer moves on without waiting out the stall timer", async () => {
+  const p = loadPlugin();
+  const { h, calls } = upgradeHost({ responses: TWO_SHARERS, states: { a: ["Queued, Remotely"] } });
+  await p.activate(h.api);
+  try {
+    await h.actions["ctx:slskd-upgrade"]({ kind: "track", trackId: 42 });
+    await waitFor(() => entryOf(p) && entryOf(p).state === "downloading", 8000, "the download to start");
+    h.actions["upgrade-skip"]({ itemId: "t42" });
+    await waitFor(() => calls.batches.length === 2, 2000, "the next sharer");
+    assert.equal(calls.batches[1].username, "b");
+    assert.deepEqual(calls.cancels, ["a"]);
+    assert.ok(!p._upgradeRowActions(entryOf(p)).includes("upgrade-skip"), "nobody left to try");
+  } finally {
+    p.deactivate();
+  }
+});
+
+test("the Upgrades tab lists what is pending; finished upgrades are folded into History", async () => {
+  const p = loadPlugin();
+  const done = (id, state) => ({ trackId: id, title: "Song " + id, state, target: "flac16", createdAt: id, currentLabel: "MP3" });
+  const { h } = upgradeHost({ responses: [], store: { upgrades: {
+    t1: done(1, "replaced"), t2: done(2, "gone"),
+    t3: Object.assign(done(3, "none"), { message: "Nothing better" })
+  } } });
+  await p.activate(h.api);
+  try {
+    h.actions["main-tab"]({ tabId: "upgrades" });
+    let lists = findNodes(lastView(h), (n) => n.type === "track-row-list");
+    assert.equal(lists.length, 1, "only the pending list; history folded");
+    assert.deepEqual(lists[0].items.map((i) => i.id), ["t3"]);
+    assert.ok(findNodes(lastView(h), (n) => n.type === "text" && /History: 2 finished/.test(n.content || "")).length);
+
+    h.actions["upgrade-history-toggle"]();
+    lists = findNodes(lastView(h), (n) => n.type === "track-row-list");
+    assert.equal(lists.length, 2);
+    assert.deepEqual(lists[1].items.map((i) => i.id).sort(), ["t1", "t2"]);
+
+    h.actions["upgrade-history-clear"]();
+    await waitFor(() => !h.store.upgrades.t1 && !h.store.upgrades.t2, 2000, "history cleared");
+    assert.ok(h.store.upgrades.t3, "the pending one stays");
+  } finally {
+    p.deactivate();
+  }
+});
+
+test("parseSourceId splits a sources-list row id", () => {
+  assert.deepEqual(plugin._parseSourceId("t42#3"), { key: "t42", index: 3 });
+  assert.equal(plugin._parseSourceId("t42"), null);
 });
 
 test("integration: the Upgrade target is a setting, and Upgrade on a non-library track still falls back to a plain search", async () => {

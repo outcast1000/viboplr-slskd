@@ -5750,6 +5750,42 @@ function registerActions() {
     }
   });
 
+  api.ui.onAction("upgrade-show", function (data) {
+    var id = rowIds(data)[0];
+    if (!upgrades[id]) return;
+    focusedUpgrade = id;
+    render();
+  });
+
+  api.ui.onAction("upgrade-cancel", function (data) {
+    var ids = rowIds(data);
+    for (var i = 0; i < ids.length; i++) {
+      cancelUpgrade(ids[i]).catch(function (e) { console.error("slskd: cancelling the upgrade failed:", e); });
+    }
+  });
+
+  api.ui.onAction("upgrade-skip", function (data) {
+    var id = rowIds(data)[0];
+    if (!id) return;
+    focusedUpgrade = id;
+    skipUpgradeSource(id).catch(function (e) { console.error("slskd: trying another sharer failed:", e); });
+  });
+
+  api.ui.onAction("upgrade-use-source", function (data) {
+    var ref = parseSourceId(rowIds(data)[0]);
+    if (!ref) return;
+    useUpgradeSource(ref.key, ref.index).catch(function (e) { console.error("slskd: switching the upgrade's source failed:", e); });
+  });
+
+  api.ui.onAction("upgrade-history-toggle", function () {
+    showUpgradeHistory = !showUpgradeHistory;
+    render();
+  });
+
+  api.ui.onAction("upgrade-history-clear", function () {
+    clearUpgradeHistory().catch(function (e) { console.error("slskd: clearing the upgrade history failed:", e); });
+  });
+
   api.ui.onAction("upgrade-remove", function (data) {
     var ids = rowIds(data);
     for (var i = 0; i < ids.length; i++) {
@@ -6372,10 +6408,13 @@ function upgradeLine(e, t) {
 // Pure: which row actions an Upgrades row shows.
 function upgradeRowActions(e) {
   var ids = [];
+  if (!upgradeIsHistory(e)) ids.push("upgrade-show");
   if (e.state === "ready") ids.push("upgrade-replace");
   if (e.state === "alternative") ids.push("upgrade-take-alternative");
-  if (e.state !== "replaced" && e.state !== "gone") ids.push("upgrade-choose");
-  if (e.state === "none" || e.state === "failed" || e.state === "alternative") ids.push("upgrade-retry");
+  if (e.state === "downloading" && nextUntriedSource(e)) ids.push("upgrade-skip");
+  if (upgradeIsBusy(e)) ids.push("upgrade-cancel");
+  if (!upgradeIsHistory(e)) ids.push("upgrade-choose");
+  if (e.state === "none" || e.state === "failed" || e.state === "alternative" || e.state === "cancelled") ids.push("upgrade-retry");
   ids.push("upgrade-remove");
   return ids;
 }
@@ -6495,39 +6534,50 @@ async function runUpgradeSearch(e) {
 // "failed" when there is none, or the per-upgrade cap is reached.
 async function startNextUpgradeCandidate(e) {
   while (e.triedUsers.length < UPGRADE_MAX_TRIES) {
-    var c = null;
-    for (var i = 0; i < e.candidates.length; i++) {
-      if (e.triedUsers.indexOf(e.candidates[i].username) < 0) { c = e.candidates[i]; break; }
-    }
+    var c = nextUntriedSource(e);
     if (!c) break;
-    e.triedUsers.push(c.username);
-    var key = c.username + KEY_SEP + c.filename;
-    try {
-      var out = await enqueueBatch(c.username, [c], (e.artist ? e.artist + " - " : "") + e.title, UPGRADE_SUBDIR, {
-        upgrade: { trackId: e.trackId, title: e.title, artist: e.artist, auto: true },
-        meta: { title: e.title, artist: e.artist, album: e.album, track_number: e.trackNumber }
-      });
-      if (!out.queued.length) {
-        ledgerCount(key, c.username, "failed", 0, false);
-        await dropIfListed(key);
-        continue;
-      }
-    } catch (err) {
-      console.error("slskd: upgrade enqueue failed:", err);
-      ledgerCount(key, c.username, "failed", 0, false);
-      await dropIfListed(key);
-      continue;
-    }
-    var now = nowMs();
-    e.active = Object.assign(leanCandidate(c), { key: key, startedAt: now, movedAt: now, lastBytes: 0, unseen: 0 });
-    setUpgradeState(e, "downloading");
-    await saveUpgrades();
-    return true;
+    if (await enqueueUpgradeCandidate(e, c)) return true;
   }
   e.active = null;
   setUpgradeState(e, "failed", "No sharer delivered (" + e.triedUsers.length + " tried)");
   await saveUpgrades();
   return false;
+}
+
+// Pure: the best candidate from a sharer not yet asked, or null.
+function nextUntriedSource(e) {
+  for (var i = 0; i < (e.candidates || []).length; i++) {
+    if ((e.triedUsers || []).indexOf(e.candidates[i].username) < 0) return e.candidates[i];
+  }
+  return null;
+}
+
+// Queue one candidate as this upgrade's active attempt. False when slskd
+// refused it (the sharer is marked tried either way).
+async function enqueueUpgradeCandidate(e, c) {
+  if (e.triedUsers.indexOf(c.username) < 0) e.triedUsers.push(c.username);
+  var key = c.username + KEY_SEP + c.filename;
+  try {
+    var out = await enqueueBatch(c.username, [c], (e.artist ? e.artist + " - " : "") + e.title, UPGRADE_SUBDIR, {
+      upgrade: { trackId: e.trackId, title: e.title, artist: e.artist, auto: true },
+      meta: { title: e.title, artist: e.artist, album: e.album, track_number: e.trackNumber }
+    });
+    if (!out.queued.length) {
+      ledgerCount(key, c.username, "failed", 0, false);
+      await dropIfListed(key);
+      return false;
+    }
+  } catch (err) {
+    console.error("slskd: upgrade enqueue failed:", err);
+    ledgerCount(key, c.username, "failed", 0, false);
+    await dropIfListed(key);
+    return false;
+  }
+  var now = nowMs();
+  e.active = Object.assign(leanCandidate(c), { key: key, startedAt: now, movedAt: now, lastBytes: 0, unseen: 0 });
+  setUpgradeState(e, "downloading");
+  await saveUpgrades();
+  return true;
 }
 
 // Give up on the active attempt and move on. `drop` = cancel it in slskd and
@@ -6788,9 +6838,144 @@ async function takeUpgradeAlternative(key) {
   schedulePoll(true);
 }
 
-function upgradeRows() {
+// Stop the active attempt in slskd and forget its record — the user's call,
+// so no sharer is marked down in the ledger for it. A finished file is left
+// alone: it is already on disk, and the Downloads tab still lists it.
+async function dropActiveUpgradeTransfer(e) {
+  var a = e.active;
+  e.active = null;
+  if (!a) return;
+  var t = transferByKey(a.key);
+  if (!t) {
+    // Queued since the last poll: re-read, or it would keep waiting in slskd.
+    try {
+      transfers = (await fetchTransfers()) || transfers;
+    } catch (err) {
+      console.error("slskd: couldn't re-read transfers before cancelling an upgrade:", err);
+    }
+    t = transferByKey(a.key);
+  }
+  if (t && transferPhase(t.state) === "succeeded") return;
+  if (t) await dropStalled(t);
+  delete tracked[a.key];
+  await api.storage.set("tracked", tracked);
+}
+
+// "Cancel" on a pending upgrade: stop the search or the download and rest the
+// entry, so Search again / another source can pick it up later. A search in
+// flight can't be stopped mid-way, but its answer is dropped
+// (`runUpgradeSearch` checks the state when it lands).
+async function cancelUpgrade(key) {
+  var e = upgrades[key];
+  if (!e || !upgradeIsBusy(e)) return;
+  await dropActiveUpgradeTransfer(e);
+  e.file = null;
+  setUpgradeState(e, "cancelled", "Cancelled");
+  api.log("info", "upgrade: “" + e.title + "” — cancelled by the user", "slskd");
+  await saveUpgrades();
+  render();
+}
+
+// Pure: the files the last search turned up for this upgrade — the picks at
+// the target, best first, then the best better copy that misses it.
+function upgradeSources(e) {
+  var out = (e.candidates || []).slice();
+  var alt = e.alternative;
+  if (alt && !out.some(function (c) { return c.username === alt.username && c.filename === alt.filename; })) out.push(alt);
+  return out;
+}
+
+// Pure: the user may pick a source while one is downloading, or once the
+// upgrade has come to rest without a file.
+function canPickUpgradeSource(e) {
+  return !!e && (e.state === "downloading" || e.state === "alternative" || e.state === "failed" ||
+    e.state === "cancelled" || e.state === "none") && upgradeSources(e).length > 0;
+}
+
+// "Use this": download exactly this file instead, whatever is running now.
+// The user's pick isn't held to the per-upgrade sharer cap, and one below the
+// target lowers the bar for this upgrade, as "Take the best found" does — the
+// post-download check still makes sure it's better than your copy.
+async function useUpgradeSource(key, index) {
+  var e = upgrades[key];
+  if (!canPickUpgradeSource(e)) return;
+  var c = upgradeSources(e)[index];
+  if (!c) return;
+  if (e.active && e.active.username === c.username && e.active.filename === c.filename) return;
+  await dropActiveUpgradeTransfer(e);
+  e.file = null;
+  if (!meetsQualityTarget(c, e.target)) e.target = "best";
+  if (!(await enqueueUpgradeCandidate(e, c))) {
+    setUpgradeState(e, "failed", c.username + " refused the download — pick another source");
+    await saveUpgrades();
+  }
+  render();
+  schedulePoll(true);
+}
+
+// "Try another sharer": the next untried source, without waiting out the stall
+// timer. When every one has been asked, the upgrade rests for the user.
+async function skipUpgradeSource(key) {
+  var e = upgrades[key];
+  if (!e || e.state !== "downloading") return;
+  var next = nextUntriedSource(e);
+  if (!next) return;
+  await useUpgradeSource(key, upgradeSources(e).indexOf(next));
+}
+
+// Pure: one row of the "Other sources" list.
+function upgradeSourceRows(e) {
+  var key = upgradeKey(e.trackId);
+  return upgradeSources(e).map(function (c, i) {
+    var active = !!(e.active && e.state === "downloading" && e.active.username === c.username && e.active.filename === c.filename);
+    var tried = !active && (e.triedUsers || []).indexOf(c.username) >= 0;
+    var bits = [qualityLabel(c)];
+    if (c.size) bits.push(formatBytes(c.size));
+    bits.push("from " + c.username);
+    bits.push(availabilityLabel(c));
+    if (!meetsQualityTarget(c, e.target)) bits.push("below your target");
+    if (active) bits.push("downloading now");
+    else if (tried) bits.push("tried");
+    return {
+      id: key + "#" + i,
+      title: basenameRemote(c.filename),
+      subtitle: bits.join("  ·  "),
+      kind: "audio",
+      actions: active ? [] : ["upgrade-use-source"]
+    };
+  });
+}
+
+// Pure: "t42#3" → { key: "t42", index: 3 }.
+function parseSourceId(id) {
+  var s = String(id || "");
+  var at = s.lastIndexOf("#");
+  if (at < 0) return null;
+  var index = Number(s.slice(at + 1));
+  return isFinite(index) ? { key: s.slice(0, at), index: index } : null;
+}
+
+// Pure: an upgrade that is over — kept only as history.
+function upgradeIsHistory(e) {
+  return !!e && (e.state === "replaced" || e.state === "gone");
+}
+
+var showUpgradeHistory = false;   // the History list on the Upgrades tab, folded by default
+
+async function clearUpgradeHistory() {
+  var keys = Object.keys(upgrades);
+  for (var i = 0; i < keys.length; i++) {
+    if (upgradeIsHistory(upgrades[keys[i]])) delete upgrades[keys[i]];
+  }
+  if (focusedUpgrade && !upgrades[focusedUpgrade]) focusedUpgrade = null;
+  await saveUpgrades();
+  render();
+}
+
+function upgradeRows(history) {
   return Object.keys(upgrades)
     .map(function (k) { return upgrades[k]; })
+    .filter(function (e) { return upgradeIsHistory(e) === !!history; })
     .sort(function (a, b) { return (b.createdAt || 0) - (a.createdAt || 0); })
     .map(function (e) {
       var t = e.active ? transferByKey(e.active.key) : null;
@@ -6845,6 +7030,7 @@ function upgradePanel(e, t, ready, asking, inPlace) {
   var buttons = [];
   if (e.state === "searching") {
     lines.push({ type: "text", content: ready ? "Searching Soulseek…" : "Waiting for slskd to be ready…" });
+    buttons.push(actionButton("Cancel", "upgrade-cancel", "secondary", { data: { itemId: key } }));
   } else if (e.state === "downloading" && e.active) {
     var a = e.active;
     lines.push({ type: "text", content: "Downloading “" + basenameRemote(a.filename) + "” — " + qualityLabel(a) + (a.size ? " · " + formatBytes(a.size) : "") + " from " + a.username });
@@ -6858,9 +7044,12 @@ function upgradePanel(e, t, ready, asking, inPlace) {
     } else {
       lines.push(mutedText("Queued with " + a.username));
     }
-    if (e.triedUsers && e.triedUsers.length > 1) lines.push(mutedText("Sharer " + e.triedUsers.length + " of up to " + UPGRADE_MAX_TRIES + " — the earlier ones didn't deliver."));
+    if (e.triedUsers && e.triedUsers.length > 1) lines.push(mutedText("Sharer " + e.triedUsers.length + " — the earlier ones didn't deliver, or you moved on."));
+    if (nextUntriedSource(e)) buttons.push(actionButton("Try another sharer", "upgrade-skip", "secondary", { data: { itemId: key } }));
+    buttons.push(actionButton("Cancel", "upgrade-cancel", "secondary", { data: { itemId: key } }));
   } else if (e.state === "checking") {
     lines.push({ type: "text", content: "Checking the downloaded file…" });
+    buttons.push(actionButton("Cancel", "upgrade-cancel", "secondary", { data: { itemId: key } }));
   } else if (e.state === "ready" && e.file) {
     lines.push({ type: "text", content: "Ready: " + qualityLabel(e.file.quality) + (e.file.size ? " · " + formatBytes(e.file.size) : "") });
     lines.push(mutedText(displayPath(e.file.path)));
@@ -6872,9 +7061,22 @@ function upgradePanel(e, t, ready, asking, inPlace) {
   } else {
     lines.push({ type: "text", content: e.message || e.state });
     if (e.state === "alternative") buttons.push(actionButton("Take the best found", "upgrade-take-alternative", "accent", { data: { itemId: key } }));
-    if (e.state === "none" || e.state === "failed" || e.state === "alternative") buttons.push(actionButton("Search again", "upgrade-retry", "secondary", { data: { itemId: key } }));
+    if (e.state === "none" || e.state === "failed" || e.state === "alternative" || e.state === "cancelled") buttons.push(actionButton("Search again", "upgrade-retry", "secondary", { data: { itemId: key } }));
   }
+  if (!upgradeIsHistory(e) && e.state !== "ready") buttons.push(actionButton("Choose myself…", "upgrade-choose", "secondary", { data: { itemId: key } }));
   if (buttons.length) lines.push(buttonRow(buttons));
+  // Every file the search found for it, so the user can take a different
+  // source than the automatic pick — a sharer with a shorter queue, a smaller
+  // file, the one below the target.
+  if (canPickUpgradeSource(e)) {
+    lines.push(mutedText("Sources found (" + upgradeSources(e).length + ") — choose Use this to download a different one instead:"));
+    lines.push({
+      type: "track-row-list",
+      items: upgradeSourceRows(e),
+      showHeader: false,
+      actions: [{ id: "upgrade-use-source", label: "Use this", icon: "⬇" }]
+    });
+  }
   return { type: "section", title: "Upgrading", children: lines };
 }
 
@@ -6893,18 +7095,44 @@ function upgradesTab() {
     }
     children.push({ type: "text", className: "plugin-muted",
       content: "Upgrading to: " + target + " (change it in Settings). Each track gets the best matching file from a sharer likely to deliver; nothing in your library changes until you say Replace." });
-    children.push({
-      type: "track-row-list",
-      items: upgradeRows(),
-      showHeader: false,
-      actions: [
-        { id: "upgrade-replace", label: inPlace ? "Replace…" : "Compare & replace…", icon: "⇪" },
-        { id: "upgrade-take-alternative", label: "Take the best found", icon: "⬇" },
-        { id: "upgrade-choose", label: "Choose myself…", icon: "⌕" },
-        { id: "upgrade-retry", label: "Search again", icon: "↻" },
-        { id: "upgrade-remove", label: "Remove", icon: "🗑" }
-      ]
-    });
+    var pending = upgradeRows(false);
+    if (pending.length) {
+      children.push({
+        type: "track-row-list",
+        items: pending,
+        showHeader: false,
+        actions: [
+          { id: "upgrade-show", label: "Details", icon: "☰" },
+          { id: "upgrade-replace", label: inPlace ? "Replace…" : "Compare & replace…", icon: "⇪" },
+          { id: "upgrade-take-alternative", label: "Take the best found", icon: "⬇" },
+          { id: "upgrade-skip", label: "Try another sharer", icon: "⇄" },
+          { id: "upgrade-cancel", label: "Cancel", icon: "■" },
+          { id: "upgrade-choose", label: "Choose myself…", icon: "⌕" },
+          { id: "upgrade-retry", label: "Search again", icon: "↻" },
+          { id: "upgrade-remove", label: "Remove", icon: "🗑" }
+        ]
+      });
+    } else {
+      children.push(mutedText("Nothing pending."));
+    }
+    // Finished upgrades are of little use once done: one folded line, and the
+    // list only on request.
+    var history = upgradeRows(true);
+    if (history.length) {
+      children.push(buttonRow([
+        mutedText("History: " + history.length + " finished"),
+        actionButton(showUpgradeHistory ? "Hide" : "Show", "upgrade-history-toggle"),
+        actionButton("Clear", "upgrade-history-clear")
+      ]));
+      if (showUpgradeHistory) {
+        children.push({
+          type: "track-row-list",
+          items: history,
+          showHeader: false,
+          actions: [{ id: "upgrade-remove", label: "Remove", icon: "🗑" }]
+        });
+      }
+    }
   }
   return { type: "layout", direction: "vertical", children: children };
 }
@@ -7322,8 +7550,9 @@ function registerAssistantTools() {
     if (!existing) throw new Error("no upgrade for track " + args.trackId + " — start one with action=start");
     if (action === "retry") await retryUpgrade(key);
     else if (action === "take_alternative") await takeUpgradeAlternative(key);
+    else if (action === "cancel") await cancelUpgrade(key);
     else if (action === "remove") { await removeUpgrade(key); return { removed: true, trackId: existing.trackId }; }
-    else throw new Error('unknown action "' + action + '" — start, retry, take_alternative or remove');
+    else throw new Error('unknown action "' + action + '" — start, retry, take_alternative, cancel or remove');
     return { upgrade: toolUpgrade(upgrades[key]) };
   });
 
@@ -7640,6 +7869,10 @@ return {
   _panelUpgrade: panelUpgrade,
   _displayPath: displayPath,
   _upgradeRowActions: upgradeRowActions,
+  _upgradeSources: upgradeSources,
+  _upgradeSourceRows: upgradeSourceRows,
+  _parseSourceId: parseSourceId,
+  _upgradesTab: upgradesTab,
   _sameLibraryPath: sameLibraryPath,
   _setUpgradeTimings: function (searchMs, stallMs) { UPGRADE_SEARCH_MS = searchMs; if (stallMs != null) UPGRADE_STALL_MS = stallMs; },
   _startFill: startFill,

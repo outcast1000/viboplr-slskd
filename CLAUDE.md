@@ -187,6 +187,17 @@ than by a long-running promise, because a stranger's queue can outlast a restart
   → `openReplace`. **replaced** is detected when the library row's path or size changes.
 - The completion toast in `handleCompletions` stays quiet for `upgrade.auto` records; the
   engine announces after the check.
+- **The user steers a pending upgrade** (owner, 2026-10-05: "it is queued and I can do
+  nothing"). The panel offers *Cancel* while searching / downloading / checking
+  (`cancelUpgrade` → state **cancelled**, transfer dropped in slskd, no ledger strike — it's
+  the user's call, not the sharer's failure), *Try another sharer* (`skipUpgradeSource`, the next
+  untried candidate without waiting out the stall timer) and a **Sources found** list
+  (`upgradeSources` = the picks plus the alternative; row ids `t<id>#<index>`) where *Use this*
+  (`useUpgradeSource`) downloads exactly that file — past the 4-sharer cap, and a pick below the
+  target lowers it to `best` for this upgrade, as *Take the best found* does. The rows carry the
+  same actions plus *Details*, which points the panel at that upgrade.
+- **History is folded.** The tab lists only pending upgrades; **replaced** / **gone** collapse
+  into one "History: N finished" line with *Show* / *Clear* (`showUpgradeHistory`, memory only).
 
 ## slskd facts that bit
 

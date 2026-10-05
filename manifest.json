@@ -70,19 +70,19 @@
         },
         {
           "name": "upgrade",
-          "description": "The automatic Upgrade (the Upgrades tab): action=start looks for a better copy of a LOCAL library track in the background — search, pick, download from a sharer, then check the real bitrate — at the user's Upgrade target setting. Also retry, take_alternative (accept the best better copy that missed the target) and remove. Never replaces anything itself",
+          "description": "The automatic Upgrade (the Upgrades tab): action=start looks for a better copy of a LOCAL library track in the background — search, pick, download from a sharer, then check the real bitrate — at the user's Upgrade target setting. Also retry, take_alternative (accept the best better copy that missed the target), cancel (stop a search or download in progress) and remove. Never replaces anything itself",
           "inputSchema": {
             "type": "object",
             "properties": {
               "trackId": { "type": "number", "description": "Library track id" },
-              "action": { "type": "string", "enum": ["start", "retry", "take_alternative", "remove"], "description": "Default start" }
+              "action": { "type": "string", "enum": ["start", "retry", "take_alternative", "cancel", "remove"], "description": "Default start" }
             },
             "required": ["trackId"]
           }
         },
         {
           "name": "list_upgrades",
-          "description": "Every automatic upgrade: state (searching / downloading / checking / ready / alternative / none / failed / replaced), message, the library copy's quality, live download progress, and — when ready — the checked file's quality and the uri for Viboplr's replace_track_file"
+          "description": "Every automatic upgrade: state (searching / downloading / checking / ready / alternative / none / failed / cancelled / replaced / gone), message, the library copy's quality, live download progress, and — when ready — the checked file's quality and the uri for Viboplr's replace_track_file"
         }
       ]
     },

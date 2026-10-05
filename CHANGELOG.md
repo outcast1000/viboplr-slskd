@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- **A pending upgrade is yours to steer.** While an upgrade is searching,
+  queued or downloading, its panel now has **Cancel** (stops it in slskd;
+  Search again picks it up later), **Try another sharer** (moves on at once
+  instead of waiting out the 10-minute stall) and **Choose myself…**. Below
+  them, **Sources found** lists every file the search turned up — quality,
+  size, sharer, free slot or queue — and **Use this** downloads that one
+  instead. The same actions are on the rows, with **Details** to show any
+  upgrade in the panel. `upgrade` (assistant tool) takes `action=cancel`.
+- **Finished upgrades step aside.** The Upgrades tab lists what is still
+  pending; replaced ones fold into a single History line with Show and Clear.
+
 ## 0.13.1
 
 - **An upgrade for a track that left the library says so.** If the library
