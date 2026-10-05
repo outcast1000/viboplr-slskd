@@ -95,6 +95,11 @@ var FALLBACK_BUDGET_MS = 55000;              // answer (or give up) before the h
 var FALLBACK_SEARCH_MS = 20000;              // the search's share of the budget
 var FALLBACK_START_MS = 12000;               // no bytes for this long = the slot wasn't free; next sharer
 var FALLBACK_RECONCILE_AGE_MS = 60000;       // a pending entry younger than this still belongs to its resolve
+var FALLBACK_CLEANUP_EVERY_MS = 10 * 60 * 1000;  // automatic cleanup runs at most this often from the poll
+var FALLBACK_CLEANUP_RECENT_MS = 15 * 60 * 1000; // a file played this recently is never cleaned up (it may be playing)
+var GB = 1024 * 1024 * 1024;
+var FALLBACK_MAX_GB_OPTIONS = [0, 1, 2, 5, 10, 20];       // 0 = no size limit
+var FALLBACK_MAX_AGE_DAY_OPTIONS = [0, 7, 30, 90, 180];   // 0 = no age limit
 var FALLBACK_MIN_REMAINING_MS = 10000;       // don't start a sharer with less than this left
 var FALLBACK_POLL_MS = 1000;
 var FALLBACK_MAX_TRIES = 4;                  // sharers tried per resolve, hedged or not
@@ -127,6 +132,8 @@ var settings = {
   insecure: false,        // accept slskd's self-signed cert
   preferredFormats: "",   // comma-separated, "" = no preference
   fallbackQuality: "fast", // "fast" | "best" | "lossless" | "high" — see FALLBACK_MODES; preferredFormats orders within it
+  fallbackMaxGb: 0,         // automatic cleanup: keep at most this many GB of fallback files (0 = off)
+  fallbackMaxAgeDays: 0,    // automatic cleanup: delete fallback files not played for this many days (0 = off)
   upgradeTarget: "flac16", // a UPGRADE_TARGETS key — what an automatic upgrade looks for
   batchSeq: 0,
   managedBy: null         // null | "roadie" — the address/key came from Roadie and follow it
@@ -1917,6 +1924,7 @@ async function refreshTransfers() {
 
   await readTagsForResolved();
   await reconcilePendingFallbacks();
+  await enforceFallbackLimits(false);
   await advanceUpgrades();
   render();
   if (justFinished.length) await handleCompletions(justFinished);
@@ -2708,17 +2716,35 @@ async function resolveFallback(title, artistName, albumName, durationSecs, opts)
 var REMOTE_FILE_MANAGEMENT_HINT = "slskd refused to delete the file. Deleting through its API needs " +
   "a top-level `remote_file_management: true` line in slskd.yml (or SLSKD_REMOTE_FILE_MANAGEMENT=true) — slskd picks the change up without a restart.";
 
+// Pure: the slskd folder a kept file sits in, base64'd for the Files API, read
+// off its path — for an entry whose transfer record is gone. Every fallback
+// fetch gets its own `DEST_ROOT/FALLBACK_SUBDIR/<seq>-<label>` folder, so that
+// folder is exactly the file's. Null when the path doesn't show one, or its
+// base64 can't be a route segment.
+function fallbackDirB64(path) {
+  var p = String(path || "").replace(/\\/g, "/");
+  var marker = "/" + DEST_ROOT + "/" + FALLBACK_SUBDIR + "/";
+  var at = p.lastIndexOf(marker);
+  if (at < 0) return null;
+  var dir = p.slice(at + marker.length).split("/")[0];
+  if (!dir) return null;
+  var b64 = b64encode(DEST_ROOT + "/" + FALLBACK_SUBDIR + "/" + dir);
+  return b64.indexOf("/") < 0 ? b64 : null;
+}
+
 async function deleteFallbackFile(fkey) {
   var entry = fallback[fkey];
   if (!entry) return;
   var rec = tracked[entry.ref];
-  if (rec && rec.b64) {
-    var res = await slskd("DELETE", "/api/v0/files/downloads/directories/" + rec.b64);
+  var b64 = (rec && rec.b64) || fallbackDirB64(entry.path);
+  if (b64) {
+    var res = await slskd("DELETE", "/api/v0/files/downloads/directories/" + b64);
     if (res.status === 403) throw new Error(REMOTE_FILE_MANAGEMENT_HINT);
     if (!((res.status >= 200 && res.status < 300) || res.status === 404)) {
       throw new Error(errorText(res, "slskd couldn't delete that file (HTTP " + res.status + ")."));
     }
-  } else if (rec) {
+  } else if (rec || entry.path) {
+    // Forgetting it here would leave the file on disk and count it as gone.
     throw new Error("That file's folder can't be addressed through slskd's API; delete it from slskd's downloads folder by hand.");
   }
   var t = transferByKey(entry.ref);
@@ -2753,6 +2779,102 @@ async function deleteFallbackFiles(keys) {
   } else if (keys.length) {
     api.ui.showNotification(keys.length === 1 ? "Deleted 1 fallback file." : "Deleted " + keys.length + " fallback files.");
   }
+}
+
+// ---------------------------------------------------------------------------
+// Playback fallback — automatic cleanup
+// ---------------------------------------------------------------------------
+// Kept files are a cache, and a cache with no bound fills the disk. Two
+// optional limits (Settings → Playback fallback), both off by default so an
+// update never deletes anything the user didn't ask to have deleted:
+// `fallbackMaxAgeDays` drops files not played for that long, `fallbackMaxGb`
+// then drops the least recently played until the total fits.
+//
+// Never touched: a file inside one of the user's collections (it is a library
+// track too — deleting it would leave a row with no file), one played in the
+// last `FALLBACK_CLEANUP_RECENT_MS` (it may be the one playing), and a pending
+// download (it isn't a file yet).
+
+function fallbackUsedAt(e) {
+  return e.lastUsedAt || e.at || 0;
+}
+
+// Pure: which kept files the limits remove, least recently played first.
+// `opts`: { maxBytes, maxAgeMs (0 = off), now, protect(entry) → bool }.
+function fallbackEvictions(index, opts) {
+  var keys = Object.keys(index || {});
+  var kept = [];
+  var total = 0;
+  for (var i = 0; i < keys.length; i++) {
+    var e = index[keys[i]];
+    if (!e || e.state !== "kept") continue;
+    total += e.size || 0;
+    var protectedEntry = (opts.now - fallbackUsedAt(e) < FALLBACK_CLEANUP_RECENT_MS) || (opts.protect && opts.protect(e));
+    if (!protectedEntry) kept.push({ key: keys[i], e: e });
+  }
+  kept.sort(function (a, b) { return fallbackUsedAt(a.e) - fallbackUsedAt(b.e) || (a.key < b.key ? -1 : 1); });
+  var out = [];
+  for (var j = 0; j < kept.length; j++) {
+    var c = kept[j];
+    var stale = opts.maxAgeMs > 0 && opts.now - fallbackUsedAt(c.e) > opts.maxAgeMs;
+    var over = opts.maxBytes > 0 && total > opts.maxBytes;
+    if (!stale && !over) continue;
+    out.push(c.key);
+    total -= c.e.size || 0;
+  }
+  return out;
+}
+
+function fallbackLimitsOn() {
+  return (Number(settings.fallbackMaxGb) || 0) > 0 || (Number(settings.fallbackMaxAgeDays) || 0) > 0;
+}
+
+var fallbackCleanupAt = 0;
+var fallbackCleanupRunning = false;
+// The last automatic cleanup's outcome, shown under the settings — never a
+// toast, since this runs unattended every few minutes. { at, deleted, bytes, error }.
+var fallbackCleanup = null;
+
+// Apply the limits. `force` skips the throttle (a setting just changed).
+async function enforceFallbackLimits(force) {
+  if (!fallbackLimitsOn() || fallbackBusy || fallbackCleanupRunning || readiness.state !== "ready") return;
+  if (!force && nowMs() - fallbackCleanupAt < FALLBACK_CLEANUP_EVERY_MS) return;
+  fallbackCleanupAt = nowMs();
+  var victims = fallbackEvictions(fallback, {
+    maxBytes: (Number(settings.fallbackMaxGb) || 0) * GB,
+    maxAgeMs: (Number(settings.fallbackMaxAgeDays) || 0) * 24 * 60 * 60 * 1000,
+    now: nowMs(),
+    protect: function (e) { return !!(e.path && collectionForPath(e.path, localCollections)); }
+  });
+  if (!victims.length) {
+    if (fallbackCleanup && fallbackCleanup.error) { fallbackCleanup = null; renderSettings(); }
+    return;
+  }
+  fallbackCleanupRunning = true;
+  var deleted = 0, bytes = 0, error = null;
+  try {
+    for (var i = 0; i < victims.length; i++) {
+      var e = fallback[victims[i]];
+      if (!e) continue;
+      try {
+        await deleteFallbackFile(victims[i]);
+        deleted++;
+        bytes += e.size || 0;
+      } catch (err) {
+        // A refusal (no remote_file_management) refuses every file the same
+        // way: stop rather than hammer slskd with the rest.
+        error = (err && err.message) || String(err);
+        console.error("slskd: automatic fallback cleanup failed:", err);
+        break;
+      }
+    }
+  } finally {
+    fallbackCleanupRunning = false;
+  }
+  fallbackCleanup = { at: nowMs(), deleted: deleted, bytes: bytes, error: error };
+  if (deleted) api.log("info", "fallback cleanup: deleted " + deleted + " file(s), " + formatBytes(bytes), "slskd");
+  render();
+  renderSettings();
 }
 
 
@@ -5353,6 +5475,17 @@ function fallbackQualityDescription(mode, preferredFormats) {
   return text;
 }
 
+// Pure-ish: the line under "Keep at most" — what cleanup does, what it skips,
+// and how the last run went (a refusal stays here until it clears).
+function fallbackCleanupDescription() {
+  var text = "When the kept files outgrow this, the least recently played are deleted through slskd. " +
+    "Files inside one of your collections (they are library tracks too) and anything played in the last 15 minutes are never deleted automatically.";
+  var c = fallbackCleanup;
+  if (c && c.error) text += " Last cleanup stopped: " + c.error;
+  else if (c && c.deleted) text += " Last cleanup deleted " + c.deleted + (c.deleted === 1 ? " file" : " files") + " (" + formatBytes(c.bytes) + ").";
+  return text;
+}
+
 function fallbackSettingsSection() {
   var totals = fallbackTotals(fallback);
   var children = [
@@ -5378,6 +5511,14 @@ function fallbackSettingsSection() {
       description: totals.count
         ? totals.count + (totals.count === 1 ? " file" : " files") + " · " + formatBytes(totals.bytes) + ", in slskd's downloads folder under “" + DEST_ROOT + "/" + FALLBACK_SUBDIR + "”. The Downloads tab lists each one."
         : "None yet. Fetched files stay in slskd's downloads folder, under “" + DEST_ROOT + "/" + FALLBACK_SUBDIR + "”, so a song plays instantly the next time." },
+    { type: "settings-row", label: "Keep at most",
+      description: fallbackCleanupDescription(),
+      control: { type: "select", action: "set-fallback-max-gb", value: String(Number(settings.fallbackMaxGb) || 0),
+        options: FALLBACK_MAX_GB_OPTIONS.map(function (g) { return { value: String(g), label: g ? g + " GB" : "No limit" }; }) } },
+    { type: "settings-row", label: "Delete if not played for",
+      description: "Files nobody has played for this long are deleted. A song deleted here is simply fetched again the next time it's needed.",
+      control: { type: "select", action: "set-fallback-max-age", value: String(Number(settings.fallbackMaxAgeDays) || 0),
+        options: FALLBACK_MAX_AGE_DAY_OPTIONS.map(function (d) { return { value: String(d), label: d ? d + " days" : "Never" }; }) } },
     { type: "toolbar", buttons: [
       { label: "Show in Soulseek", action: "open-fallback", variant: "secondary" }
     ].concat(totals.count ? [{ label: "Delete all kept files", action: "delete-all-kept", variant: "secondary", icon: "🗑" }] : [])
@@ -6118,6 +6259,18 @@ function registerActions() {
   api.ui.onAction("set-key", function (data) { userSetsConnection("apiKey", (data && data.value) || ""); });
   api.ui.onAction("set-key:submit", function (data) { userSetsConnection("apiKey", (data && data.value) || ""); });
   api.ui.onAction("set-formats", function (data) { saveSetting("preferredFormats", (data && data.value) || ""); });
+  api.ui.onAction("set-fallback-max-gb", function (data) {
+    var v = Number(data && data.value);
+    saveSetting("fallbackMaxGb", FALLBACK_MAX_GB_OPTIONS.indexOf(v) >= 0 ? v : 0);
+    enforceFallbackLimits(true).catch(function (e) { console.error("slskd: fallback cleanup failed:", e); });
+  });
+
+  api.ui.onAction("set-fallback-max-age", function (data) {
+    var v = Number(data && data.value);
+    saveSetting("fallbackMaxAgeDays", FALLBACK_MAX_AGE_DAY_OPTIONS.indexOf(v) >= 0 ? v : 0);
+    enforceFallbackLimits(true).catch(function (e) { console.error("slskd: fallback cleanup failed:", e); });
+  });
+
   api.ui.onAction("set-fallback-quality", function (data) {
     var v = data && data.value;
     if (!FALLBACK_MODES[v]) return;
@@ -7618,7 +7771,7 @@ function schedulePoll(fast) {
 // Lifecycle
 // ---------------------------------------------------------------------------
 async function loadSettings() {
-  var keys = ["url", "apiKey", "tierOverride", "insecure", "preferredFormats", "fallbackQuality", "upgradeTarget", "batchSeq", "managedBy"];
+  var keys = ["url", "apiKey", "tierOverride", "insecure", "preferredFormats", "fallbackQuality", "fallbackMaxGb", "fallbackMaxAgeDays", "upgradeTarget", "batchSeq", "managedBy"];
   for (var i = 0; i < keys.length; i++) {
     try {
       var v = await api.storage.get(keys[i]);
@@ -7870,6 +8023,10 @@ return {
   _displayPath: displayPath,
   _upgradeRowActions: upgradeRowActions,
   _upgradeSources: upgradeSources,
+  _fallbackEvictions: fallbackEvictions,
+  _fallbackDirB64: fallbackDirB64,
+  _enforceFallbackLimits: enforceFallbackLimits,
+  _fallbackIndex: function () { return fallback; },
   _upgradeSourceRows: upgradeSourceRows,
   _parseSourceId: parseSourceId,
   _upgradesTab: upgradesTab,

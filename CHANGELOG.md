@@ -10,6 +10,16 @@
   size, sharer, free slot or queue — and **Use this** downloads that one
   instead. The same actions are on the rows, with **Details** to show any
   upgrade in the panel. `upgrade` (assistant tool) takes `action=cancel`.
+- **Fallback files can clean up after themselves.** Settings → Playback
+  fallback has two new limits, both off until you set them: **Keep at most**
+  (1–20 GB) and **Delete if not played for** (7–180 days). Past either, the
+  least recently played files are deleted through slskd. Files inside one of
+  your collections (they're library tracks too) and anything played in the
+  last 15 minutes are never deleted automatically. The last run's result, or
+  why slskd refused, shows under the setting instead of a toast.
+- **Deleting a kept file whose download record is gone works.** It used to
+  forget the file and leave it on disk; the folder is now worked out from the
+  file's path, and when it can't be, the delete says so.
 - **Finished upgrades step aside.** The Upgrades tab lists what is still
   pending; replaced ones fold into a single History line with Show and Clear.
 

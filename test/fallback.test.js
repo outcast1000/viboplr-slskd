@@ -118,6 +118,7 @@ function fallbackHost(opts) {
   const file = { filename: "Music\\Radiohead\\OK Computer\\03 - Karma Police.mp3", size: 9000000, length: 264, bitRate: 320 };
   const h = fakeHost({
     store: o.store,
+    collections: o.collections,
     fetch: async (url, init) => {
       const json = (v, status) => ({ status: status || 200, text: async () => JSON.stringify(v) });
       const method = (init && init.method) || "GET";
@@ -833,5 +834,96 @@ test("Lossless only with no lossless file: nothing is downloaded, and the Fallba
     assert.ok(view.includes("no lossless file — 2 other matching files skipped by the Fallback quality setting"), view.slice(0, 1500));
   } finally {
     plugin.deactivate();
+  }
+});
+
+// --- automatic cleanup ------------------------------------------------------------
+
+const DAY = 24 * 60 * 60 * 1000;
+const GiB = 1024 * 1024 * 1024;
+
+test("fallbackEvictions: age first, then the least recently played until the total fits", () => {
+  const now = 100 * DAY;
+  const kept = (lastUsedAt, size) => ({ state: "kept", lastUsedAt, size, path: "/d/viboplr/fallback/1-x/a.mp3" });
+  const index = {
+    old: kept(now - 60 * DAY, 1 * GiB),
+    mid: kept(now - 20 * DAY, 2 * GiB),
+    fresh: kept(now - 2 * DAY, 2 * GiB),
+    playing: kept(now - 60 * 1000, 5 * GiB),
+    pending: { state: "pending", at: now - 90 * DAY, size: 9 * GiB }
+  };
+  const ev = p._fallbackEvictions;
+  assert.deepEqual(ev(index, { maxBytes: 0, maxAgeMs: 0, now }), [], "both limits off → nothing");
+  assert.deepEqual(ev(index, { maxBytes: 0, maxAgeMs: 30 * DAY, now }), ["old"], "only what is past the age");
+  // 10 GiB kept in all; a 7 GiB cap drops the two least recently played. The
+  // file played a minute ago counts toward the total but is never picked.
+  assert.deepEqual(ev(index, { maxBytes: 7 * GiB, maxAgeMs: 0, now }), ["old", "mid"]);
+  assert.deepEqual(ev(index, { maxBytes: 1, maxAgeMs: 0, now }), ["old", "mid", "fresh"], "never the recent one, never a pending one");
+  assert.deepEqual(ev(index, { maxBytes: 1, maxAgeMs: 0, now, protect: (e) => e === index.mid }), ["old", "fresh"], "a protected file (in a collection) is skipped");
+});
+
+test("fallbackDirB64 rebuilds the Files API address from a kept file's path", () => {
+  assert.equal(p._fallbackDirB64("C:\\slskd\\downloads\\viboplr\\fallback\\4-x\\Song.mp3"), "dmlib3Bsci9mYWxsYmFjay80LXg=", "base64 of viboplr/fallback/4-x");
+  assert.equal(p._fallbackDirB64("/music/Song.mp3"), null);
+  assert.equal(p._fallbackDirB64(null), null);
+});
+
+test("integration: a kept file inside a collection is a library track — automatic cleanup never deletes it", async () => {
+  const plugin = loadPlugin();
+  // The fake slskd downloads under /Users/me/Music/slskd, inside the host's
+  // default "/Users/me/Music" collection.
+  const { h, calls } = fallbackHost();
+  await plugin.activate(h.api);
+  try {
+    await h.resolvers["meta:" + plugin._FALLBACK_ID]("Karma Police", "Radiohead", null, 264, {});
+    const fkey = Object.keys(plugin._fallbackIndex())[0];
+    plugin._fallbackIndex()[fkey].lastUsedAt = Date.now() - 400 * DAY;
+    h.actions["set-fallback-max-gb"]({ value: "1" });
+    h.actions["set-fallback-max-age"]({ value: "7" });
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(calls.deletes.length, 0);
+    assert.equal(Object.keys(plugin._fallbackIndex()).length, 1);
+  } finally {
+    plugin.deactivate();
+  }
+});
+
+test("integration: an age limit deletes a stale kept file through slskd; off by default, a refusal is shown under the setting", async () => {
+  const plugin = loadPlugin();
+  const { h, calls } = fallbackHost({ collections: [] });
+  await plugin.activate(h.api);
+  try {
+    await h.resolvers["meta:" + plugin._FALLBACK_ID]("Karma Police", "Radiohead", null, 264, {});
+    const fkey = Object.keys(plugin._fallbackIndex())[0];
+    plugin._fallbackIndex()[fkey].lastUsedAt = Date.now() - 40 * DAY;
+
+    await plugin._enforceFallbackLimits(true);
+    assert.equal(calls.deletes.length, 0, "no limit set → nothing is deleted");
+
+    h.actions["set-fallback-max-age"]({ value: "30" });
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(calls.deletes.length, 1, "the stale file is deleted");
+    assert.deepEqual(plugin._fallbackIndex(), {});
+    assert.ok(!h.calls.notifications.some((m) => /Deleted/.test(m)), "unattended cleanup raises no toast");
+    h.actions["main-tab"]({ tabId: "settings" });
+    assert.match(JSON.stringify(h.calls.views[h.calls.views.length - 1].data), /Last cleanup deleted 1 file/);
+  } finally {
+    plugin.deactivate();
+  }
+
+  const plugin2 = loadPlugin();
+  const second = fallbackHost({ deleteStatus: 403, collections: [] });
+  await plugin2.activate(second.h.api);
+  try {
+    await second.h.resolvers["meta:" + plugin2._FALLBACK_ID]("Karma Police", "Radiohead", null, 264, {});
+    const fkey = Object.keys(plugin2._fallbackIndex())[0];
+    plugin2._fallbackIndex()[fkey].lastUsedAt = Date.now() - 40 * DAY;
+    second.h.actions["set-fallback-max-age"]({ value: "30" });
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(Object.keys(plugin2._fallbackIndex()).length, 1, "a refused delete keeps the file and its record");
+    second.h.actions["main-tab"]({ tabId: "settings" });
+    assert.match(JSON.stringify(second.h.calls.views[second.h.calls.views.length - 1].data), /Last cleanup stopped: .*remote_file_management/);
+  } finally {
+    plugin2.deactivate();
   }
 });

@@ -93,7 +93,17 @@ resolver, then plugins in load order) and gives each one **60 seconds**. Everyth
 - Audio only (declines `opts.preferVideo`); needs slskd on this computer (`tier === "local"`).
 - Delete of kept files: slskd Files API `DELETE /api/v0/files/downloads/directories/{b64}`,
   gated by slskd's **top-level** `remote_file_management: true` (not under `flags:`;
-  hot-reloaded). A 403 is explained to the user, never swallowed.
+  hot-reloaded). A 403 is explained to the user, never swallowed. With no transfer record,
+  `fallbackDirB64` rebuilds the address from the kept path (each fetch has its own folder);
+  a delete that can't be addressed throws rather than forgetting a file that is still on disk.
+- **Automatic cleanup** (owner, 2026-10-05): `fallbackMaxGb` / `fallbackMaxAgeDays`, both **off
+  by default** so an update never deletes anything unasked. `fallbackEvictions` (pure) drops
+  past-age files, then the least recently played (`lastUsedAt || at`) until the kept total fits.
+  Never picked: a file inside a collection (it is a library track — deleting it leaves a row with
+  no file), one played in the last 15 min (may be playing), a pending download.
+  `enforceFallbackLimits` runs from the poll at most every 10 min and on a setting change; the
+  first refusal stops the run, and the outcome shows under the setting (`fallbackCleanup`),
+  never as a toast — it runs unattended.
 
 Owner decisions that must hold:
 
