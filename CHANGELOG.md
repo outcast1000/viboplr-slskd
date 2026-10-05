@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.14.0
 
 - **A pending upgrade is yours to steer.** While an upgrade is searching,
   queued or downloading, its panel now has **Cancel** (stops it in slskd;
