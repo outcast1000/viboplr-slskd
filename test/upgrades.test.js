@@ -178,15 +178,14 @@ test("checkUpgrade: the finished file must be what it claimed, better than the c
 test("upgradeRowActions: only what does something to that upgrade", () => {
   const a = plugin._upgradeRowActions;
   const cands = [{ username: "a", filename: "x" }, { username: "b", filename: "y" }];
-  assert.deepEqual(a({ state: "ready" }), ["upgrade-show", "upgrade-replace", "upgrade-choose", "upgrade-remove"]);
-  assert.deepEqual(a({ state: "alternative" }), ["upgrade-show", "upgrade-take-alternative", "upgrade-choose", "upgrade-retry", "upgrade-remove"]);
-  assert.deepEqual(a({ state: "searching" }), ["upgrade-show", "upgrade-cancel", "upgrade-choose", "upgrade-remove"]);
+  // Try another sharer and Choose myself… are on the panel (Details), not the rows.
+  assert.deepEqual(a({ state: "ready" }), ["upgrade-show", "upgrade-replace", "upgrade-remove"]);
+  assert.deepEqual(a({ state: "alternative" }), ["upgrade-show", "upgrade-take-alternative", "upgrade-retry", "upgrade-remove"]);
+  assert.deepEqual(a({ state: "searching" }), ["upgrade-show", "upgrade-cancel", "upgrade-remove"]);
   assert.deepEqual(a({ state: "downloading", candidates: cands, triedUsers: ["a"] }),
-    ["upgrade-show", "upgrade-skip", "upgrade-cancel", "upgrade-choose", "upgrade-remove"]);
-  assert.deepEqual(a({ state: "downloading", candidates: cands, triedUsers: ["a", "b"] }),
-    ["upgrade-show", "upgrade-cancel", "upgrade-choose", "upgrade-remove"], "no other sharer left to try");
-  assert.deepEqual(a({ state: "none" }), ["upgrade-show", "upgrade-choose", "upgrade-retry", "upgrade-remove"]);
-  assert.deepEqual(a({ state: "cancelled" }), ["upgrade-show", "upgrade-choose", "upgrade-retry", "upgrade-remove"]);
+    ["upgrade-show", "upgrade-cancel", "upgrade-remove"]);
+  assert.deepEqual(a({ state: "none" }), ["upgrade-show", "upgrade-retry", "upgrade-remove"]);
+  assert.deepEqual(a({ state: "cancelled" }), ["upgrade-show", "upgrade-retry", "upgrade-remove"]);
   assert.deepEqual(a({ state: "replaced" }), ["upgrade-remove"]);
   assert.deepEqual(a({ state: "gone" }), ["upgrade-remove"], "nothing left to upgrade or retry");
 });
@@ -323,7 +322,7 @@ test("integration (older host): Upgrade opens the Upgrades tab, finds, downloads
     const list = findNodes(lastView(h), (n) => n.type === "track-row-list")[0];
     assert.equal(list.items.length, 1);
     assert.ok(list.items[0].subtitle.startsWith("Ready: FLAC"), list.items[0].subtitle);
-    assert.deepEqual(list.items[0].actions, ["upgrade-show", "upgrade-replace", "upgrade-choose", "upgrade-remove"]);
+    assert.deepEqual(list.items[0].actions, ["upgrade-show", "upgrade-replace", "upgrade-remove"]);
 
     h.actions["upgrade-replace-notice"]();
     assert.equal(h.calls.requestAction.length, 1);
@@ -441,11 +440,14 @@ test("the Upgrades panel shows the file you have, the file it is fetching and th
   const downloading = plugin._upgradePanel(Object.assign({}, base, { state: "downloading",
     active: { username: "peer", filename: "m\\DS\\03 - Sultans of Swing.flac", size: 38e6, extension: "flac", qualityTier: 0, bitDepth: 16, sampleRate: 44100 } }),
     { state: "InProgress", size: 38e6, bytesTransferred: 19e6, averageSpeed: 500000 }, true, false, true);
-  assert.match(text(downloading), /Your copy: MP3/);
+  assert.match(text(downloading), /"Your copy".*"MP3 ≈192kbps · 7\.9 MB"/, "your copy, next to the one on its way");
   assert.match(text(downloading), /C:\\\\Music\\\\DS\\\\Sultans of Swing\.mp3/, "the library file, as a Windows path");
   assert.match(text(downloading), /Downloading “03 - Sultans of Swing\.flac”/);
   assert.match(text(downloading), /from peer/);
   assert.equal(findNodes(downloading, (n) => n.type === "progress-bar")[0].value, 50);
+  assert.match(text(downloading), /✓ Search   ─   ● Download 50%   ─   ○ Check   ─   ○ Replace/, "the steps");
+  const dButtons = findNodes(downloading, (n) => n.type === "button").map((b) => b.label);
+  assert.equal(dButtons[dButtons.length - 1], "Cancel upgrade", "Cancel last, apart from the ways forward");
 
   const ready = plugin._upgradePanel(Object.assign({}, base, { state: "ready",
     file: { path: "/slskd/downloads/viboplr/upgrades/1/03 - Sultans of Swing.flac", size: 38e6, quality: { extension: "flac", qualityTier: 0, bitDepth: 16, sampleRate: 44100 } } }),
@@ -617,7 +619,10 @@ test("integration: the panel lists the sources found; Use this switches to anoth
     const sources = findNodes(panel, (n) => n.type === "track-row-list")[0];
     assert.ok(sources, "the sources list");
     assert.equal(sources.items.length, 2);
-    assert.match(sources.items[0].subtitle, /from a.*downloading now/);
+    assert.match(sources.items[0].subtitle, /^a · .*downloading now/);
+    assert.match(sources.items[0].cells.availability, /^a · /, "the sharer column");
+    assert.ok(sources.items[0].cells.quality, "the quality column");
+    assert.ok(sources.selectable && sources.columns.length, "columns render only on a selectable list");
     assert.deepEqual(sources.items[0].actions, [], "the one downloading can't be picked again");
     assert.deepEqual(sources.items[1].actions, ["upgrade-use-source"]);
 
@@ -644,7 +649,8 @@ test("integration: Try another sharer moves on without waiting out the stall tim
     await waitFor(() => calls.batches.length === 2, 2000, "the next sharer");
     assert.equal(calls.batches[1].username, "b");
     assert.deepEqual(calls.cancels, ["a"]);
-    assert.ok(!p._upgradeRowActions(entryOf(p)).includes("upgrade-skip"), "nobody left to try");
+    const panel = p._upgradePanel(entryOf(p), null, true, false, true);
+    assert.ok(!findNodes(panel, (n) => n.type === "button" && n.action === "upgrade-skip").length, "nobody left to try");
   } finally {
     p.deactivate();
   }
@@ -663,7 +669,7 @@ test("the Upgrades tab lists what is pending; finished upgrades are folded into 
     let lists = findNodes(lastView(h), (n) => n.type === "track-row-list");
     assert.equal(lists.length, 1, "only the pending list; history folded");
     assert.deepEqual(lists[0].items.map((i) => i.id), ["t3"]);
-    assert.ok(findNodes(lastView(h), (n) => n.type === "text" && /History: 2 finished/.test(n.content || "")).length);
+    assert.ok(findNodes(lastView(h), (n) => n.type === "toolbar" && n.title === "History" && n.status === "2 finished").length);
 
     h.actions["upgrade-history-toggle"]();
     lists = findNodes(lastView(h), (n) => n.type === "track-row-list");
@@ -688,9 +694,9 @@ test("integration: the Upgrade target is a setting, and Upgrade on a non-library
   const { h } = upgradeHost({ responses: [] });
   await p.activate(h.api);
   try {
-    h.actions["main-tab"]({ tabId: "settings" });
+    h.actions["main-tab"]({ tabId: "upgrades" });
     const select = findNodes(lastView(h), (n) => n.type === "settings-row" && n.label === "Upgrade to")[0];
-    assert.ok(select, "Settings shows the target");
+    assert.ok(select, "the Upgrades tab shows the target");
     assert.deepEqual(select.control.options.map((o) => o.value), ["flac16", "hires", "lossless", "mp3_320", "high", "lossy256", "best"]);
     h.actions["set-upgrade-target"]({ value: "high" });
     await waitFor(() => h.store.upgradeTarget === "high", 2000, "the setting to save");

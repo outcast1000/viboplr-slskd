@@ -59,7 +59,13 @@ each with the fix.
   them soonest (free upload slot, short queue, fast upload). An optional
   preferred-format list ("flac, mp3") goes on top.
 - **Files or Folders.** Soulseek users mostly share complete albums, so every
-  search also shows folders; one click queues the whole album.
+  search also shows folders (the Files / Folders switch on the results bar);
+  one click queues the whole album. Each card says who shares it, how many
+  tracks, the size, and whether they have a free slot or a queue.
+- **Format tiles.** Results show the file's format and quality as their
+  thumbnail — FLAC 16/44, FLAC 24/96, MP3 320 — tinted by quality; a folder
+  mixing lossless and lossy says MIX.
+- **Recent searches** sit under the box, one click each.
 - **Right-click → Soulseek: Search…** on any track, album or artist in
   Viboplr, and Cmd+K offers Soulseek as a source for whatever you typed.
 - **Right-click → Soulseek: Upgrade** on a library track finds a better copy
@@ -82,11 +88,13 @@ each with the fix.
 - **Right-click → Soulseek: Fill missing tracks…** on an album: every
   folder found is compared with the tracks you already have, and **Fill**
   downloads just the ones you don't. "Show everything found" lifts either filter.
-- **Downloads tab** with progress, your position in the other user's queue, and
-  per-row actions that show only what applies: Cancel while it runs, Retry /
-  Another source on a failure, Play / Add to library once it's done, Remove for
-  anything finished. Finished rows are ordinary tracks — right-click menu,
-  drag-to-queue, Download… all work.
+- **Downloads tab**, grouped: *Needs attention* (failures, in plain words, with
+  Retry all) first, then Downloading, Waiting (your place in the other user's
+  queue and how long you've waited), Finished and Cancelled. Per-row actions
+  show only what applies: Cancel while it runs, Another source while it waits
+  in someone's queue or after a failure, Play / Add to library once it's done,
+  Clear from list for anything at rest (the file stays). Finished rows are
+  ordinary tracks — right-click menu, drag-to-queue, Download… all work.
 - **Play** a finished download straight from slskd's folder.
 - **Playback fallback.** When a track has no playable source of its own — a
   library row whose file is gone, a streaming plugin's track it can't reach —
@@ -149,18 +157,16 @@ waiting:
    plugin remembers every file the fallback fetched, by normalized title +
    artist.
 
-The **Fallback tab** in the Soulseek view shows the last resolve step by step —
-the query, how long each step took, the **picked file** and what became of it,
-and every matching file with its match score, marked ✓ played, ↓ downloading or
-✗ tried and dropped. It is a read-out: no artwork, nothing to click. The files
-the fallback **kept** are listed on the **Downloads** tab, below slskd's own
-transfers, with Play, Add to library and **Delete file**. Delete is the one place
+The **Fallback tab** in the Soulseek view is the whole feature in one place: how
+often it played (and how fast), the last resolve — the query, the **picked file**
+and what became of it, with *Show trace* for each step and every matching file
+(match score, ✓ played, ↓ downloading, ✗ tried and dropped) — the recent
+resolves, the files the fallback **kept**, and its settings. Kept files have
+Play, Add to library and **Delete file**; Delete all asks first. Delete is the one place
 the plugin removes anything from disk, and it does so through slskd's own Files
 API, which slskd gates behind a top-level `remote_file_management: true` line in
 `slskd.yml` (or `SLSKD_REMOTE_FILE_MANAGEMENT=true`); without it the plugin
-tells you what to enable rather than failing quietly. Soulseek → Soulseek →
-Playback fallback shows the count and size of kept files and offers the same
-delete.
+tells you what to enable rather than failing quietly.
 
 Only audio: the fallback stays out of the host's "prefer video" pass. And it
 needs slskd on this computer — a `file://` path on another machine is no use to
@@ -211,9 +217,9 @@ assistant-queued file is tracked, located and imported identically.
   automatic path, and it is budgeted (see above). There is no metadata-based
   *download* provider: a download you ask for by hand deserves a file you
   picked, not the fallback's best guess.
-- **Delete your files.** Remove on the Downloads tab drops a row from slskd's
-  list; the file stays on disk. Only files the *fallback* fetched can be
-  deleted, from the Downloads tab, and only when you ask.
+- **Delete your files.** Clear from list on the Downloads tab drops a row from
+  slskd's list; the file stays on disk. Only files the *fallback* fetched can be
+  deleted, from the Fallback tab, and only when you ask.
 - **Manage your shares.** Do that in slskd.
 
 ## Sharing

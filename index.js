@@ -788,6 +788,8 @@ function transferSubtitle(t, rec, currentTier) {
     bits.push(t.placeInQueue != null
       ? "Waiting in " + user + "'s queue · position " + t.placeInQueue
       : "Queued with " + user);
+    var waited = waitedFor(t, Date.now());
+    if (waited) bits.push(waited);
     bits.push(formatBytes(t.size));
   } else if (phase === "succeeded") {
     bits.push("Finished");
@@ -796,7 +798,7 @@ function transferSubtitle(t, rec, currentTier) {
     if (currentTier === "local" && !(rec && rec.resolvedPath)) bits.push("locating file…");
   } else if (phase === "failed") {
     bits.push(!isWindowsPathBug(t.exception)
-      ? "Failed" + (t.exception ? " — " + t.exception : "")
+      ? "Failed — " + plainTransferError(t.exception, user)
       : misconfiguredSlskdDir(downloadsDir, incompleteDir)
         ? "Failed — " + MISCONFIGURED_DIR_TEXT
         : "Failed — slskd on Windows can't save a file whose folder or sharer name ends in a dot or space; try another source");
@@ -810,6 +812,32 @@ function transferSubtitle(t, rec, currentTier) {
     bits.push("from " + user);
   }
   return bits.filter(Boolean).join("  ·  ");
+}
+
+// Pure: slskd's failure text in the words a user would use, with what to do
+// about it implied (the row's first action is Another source). The raw text
+// stays for anything not recognised — an unknown message is still a clue.
+function plainTransferError(exception, user) {
+  var e = String(exception || "");
+  var who = user || "the sharer";
+  if (!e) return "the transfer stopped";
+  if (/file not shared/i.test(e)) return who + " no longer shares this file";
+  if (/(too many|queue (is )?full|limit)/i.test(e)) return who + "'s queue is full";
+  if (/banned|not allowed|denied/i.test(e)) return who + " isn't sending to you";
+  if (/offline|unreachable|connection (refused|reset)|no route|failed to connect|timed? ?out/i.test(e)) return who + " went offline or can't be reached";
+  if (/cancel/i.test(e)) return who + " cancelled it";
+  return e;
+}
+
+// Pure: "waiting 14 min" from slskd's enqueue/request timestamp, or "".
+function waitedFor(t, now) {
+  var at = Date.parse((t && (t.enqueuedAt || t.requestedAt)) || "");
+  if (!isFinite(at)) return "";
+  var m = Math.round(Math.max(0, now - at) / 60000);
+  if (m < 1) return "";
+  if (m < 60) return "waiting " + m + " min";
+  var h = Math.floor(m / 60);
+  return "waiting " + (h < 24 ? h + " h" : Math.floor(h / 24) + " d");
 }
 
 // Which of the list's declared actions a transfer row shows. Only what would
@@ -834,6 +862,11 @@ function transferRowActions(t, rec, currentTier) {
   } else if (phase === "cancelled") {
     ids.push("retry-transfer");
     ids.push("remove-transfer");
+  } else if (phase === "requested" || (phase === "queued" && hasFlag(t.state, "Remotely"))) {
+    // Waiting on a stranger, maybe for hours: moving on is a real option.
+    // (Queued *locally* is slskd's own queue, which another sharer won't skip.)
+    ids.push("another-source");
+    ids.push("cancel-transfer");
   } else {
     ids.push("cancel-transfer");
   }
@@ -1835,6 +1868,7 @@ function viewPrefs(extra) {
 // The sidebar's search: owns `search` (the view state) and re-renders as counts
 // arrive. A newer search supersedes an older one through `searchGen`.
 async function runSearch(query, extra) {
+  if (!(extra && extra.mode)) rememberSearch(query);
   if (!query || readiness.state !== "ready") return;
   var gen = ++searchGen;
   var mode = (extra && extra.mode) || null;
@@ -2328,7 +2362,86 @@ function finishResolve(rec, outcome, message, path) {
   rec.totalMs = nowMs() - rec.at;
   api.log(outcome === "played" || outcome === "cached" ? "info" : "warn",
     "fallback: " + outcome + (message ? " — " + message : "") + " (total " + Math.round(rec.totalMs / 100) / 10 + "s)", "slskd");
+  resolveHistory = withResolve(resolveHistory, historyEntry(rec), RESOLVE_HISTORY_MAX);
+  api.storage.set("resolveHistory", resolveHistory).catch(function (e) { console.error("slskd: couldn't save the fallback history:", e); });
   render();
+}
+
+// ---- resolve history -------------------------------------------------------
+// "Last resolve" is one run and gone at a restart; whether to trust the
+// fallback is a question about how often it works. So every finished resolve
+// leaves a small record (no candidate lists, no steps) — the Fallback tab's
+// numbers and its Recent list are read off these.
+var RESOLVE_HISTORY_MAX = 50;
+var resolveHistory = [];
+
+// Pure: the record kept for one finished resolve.
+function historyEntry(rec) {
+  var c = rec.chosen || rec.picked;
+  return {
+    at: rec.at, title: rec.title, artist: rec.artist, outcome: rec.outcome,
+    ms: rec.totalMs != null ? rec.totalMs : null, message: rec.message || null,
+    file: c ? { name: basenameRemote(c.filename), user: c.username, quality: qualityLabel(c) } : null
+  };
+}
+
+// Pure: newest first, capped.
+function withResolve(list, entry, max) {
+  return [entry].concat(list || []).slice(0, max);
+}
+
+// Pure: the Fallback tab's numbers. `started` counts what played, a copy
+// fetched earlier included; the median is over fresh fetches only, since a
+// kept copy plays at once and would flatter it.
+function resolveStats(list) {
+  var all = list || [];
+  var started = 0, times = [];
+  for (var i = 0; i < all.length; i++) {
+    var e = all[i];
+    if (e.outcome === "played" || e.outcome === "cached") started++;
+    if (e.outcome === "played" && e.ms != null) times.push(e.ms);
+  }
+  times.sort(function (a, b) { return a - b; });
+  var median = null;
+  if (times.length) {
+    var mid = Math.floor(times.length / 2);
+    median = times.length % 2 ? times[mid] : (times[mid - 1] + times[mid]) / 2;
+  }
+  return { total: all.length, started: started, medianMs: median };
+}
+
+var RESOLVE_OUTCOME_WORDS = {
+  running: "Working…",
+  played: "Played",
+  cached: "Played a kept copy",
+  timeout: "Ran out of time",
+  "no-match": "Nothing matched",
+  failed: "Failed"
+};
+
+function secondsLabel(ms) {
+  return Math.round(ms / 100) / 10 + " s";
+}
+
+// Pure: "3 h ago" / "2 d ago" / "just now".
+function agoLabel(at, now) {
+  var m = Math.round(Math.max(0, now - at) / 60000);
+  if (m < 1) return "just now";
+  if (m < 60) return m + " min ago";
+  var h = Math.round(m / 60);
+  return h < 24 ? h + " h ago" : Math.round(h / 24) + " d ago";
+}
+
+// Pure: one line of the Recent list.
+function historyLine(e, now) {
+  var mark = e.outcome === "played" || e.outcome === "cached" ? "✓" : e.outcome === "timeout" ? "…" : "✗";
+  var bits = [RESOLVE_OUTCOME_WORDS[e.outcome] || e.outcome];
+  if (e.outcome === "cached") bits[0] = "Played a kept copy";
+  else if (e.ms != null) bits.push(secondsLabel(e.ms));
+  if (e.file && e.outcome === "played") bits.push(e.file.quality + " from " + e.file.user);
+  else if (e.message && e.outcome !== "played") bits.push(e.message);
+  bits.push(agoLabel(e.at, now));
+  return mark + " " + "“" + e.title + "”" + (e.artist ? " — " + e.artist : "") + "  ·  " + bits.join("  ·  ");
 }
 
 function renderIfFallback() {
@@ -5166,11 +5279,85 @@ function folderCards() {
     return {
       id: "d:" + g.key,
       title: g.name,
-      subtitle: g.username + " · " + g.files.length + " files · " + formatBytes(g.totalSize),
+      subtitle: folderSubtitle(g),
       imageUrl: folderTile(g.files),
       action: "download-folder"
     };
   });
+}
+
+// Pure: a folder card's line — who, how much, and whether they will send it.
+// The format is on the card's tile (folderTile); what's left to choose by is
+// the sharer: a free slot or a queue, and how they did for us before.
+function folderSubtitle(g) {
+  var n = g.files.length;
+  var bits = [g.username, n + (n === 1 ? " track" : " tracks"), formatBytes(g.totalSize), availabilityLabel(g)];
+  var rep = sharerLabel(sharers[g.username]);
+  if (rep) bits.push(rep);
+  return bits.join(" · ");
+}
+
+// The bar over the results: how much was found, Files / Folders, and — once a
+// column header re-sorted the files — the way back to the ranked order. The
+// host's headers toggle asc/desc and never offer a third state, so without it
+// one click on a column cost you the ranking until you searched again.
+//
+// A toolbar, not a second `tabs` node: drawn like the main tabs right under
+// them, Files / Folders read as more navigation, and users never found
+// Folders at all (owner, 2026-10-06). The action and payload are the old
+// tabs' (`result-mode`, `{ tabId }`).
+function resultsToolbar(fileCount, folderCount, upgrading) {
+  var folders = activeTab === "folders";
+  var title = upgrading
+    ? formatCount(fileCount) + (fileCount === 1 ? " better file" : " better files")
+    : formatCount(folderCount) + (folderCount === 1 ? " folder" : " folders") + " · " + formatCount(fileCount) + (fileCount === 1 ? " file" : " files");
+  var buttons = [];
+  if (!upgrading) {
+    buttons.push({ label: "Files", action: "result-mode", variant: folders ? "secondary" : "accent", data: { tabId: "files" } });
+    buttons.push({ label: "Folders", action: "result-mode", variant: folders ? "accent" : "secondary", data: { tabId: "folders" } });
+  }
+  var status = search.responseCount ? "from " + formatCount(search.responseCount) + (search.responseCount === 1 ? " sharer" : " sharers") : undefined;
+  if (!folders && search.sortColumn) {
+    var col = RESULT_COLUMNS.filter(function (c) { return c.id === search.sortColumn; })[0];
+    status = "sorted by " + (col ? col.label : search.sortColumn);
+    buttons.push({ label: "Best match", action: "sort-best", variant: "secondary", icon: "↺" });
+  }
+  return { type: "toolbar", title: title, buttons: buttons, status: status };
+}
+
+// ---- recent searches -------------------------------------------------------
+// The last few plain searches as one-click buttons under the box, in place of
+// retyping. Modes (Upgrade, Fill) aren't remembered: they come from a track or
+// an album, not from the box.
+var RECENT_SEARCH_MAX = 6;
+var recentSearches = [];
+
+// Pure: `list` with `query` at the front, case-insensitive duplicates dropped.
+function withRecentSearch(list, query, max) {
+  var q = String(query || "").trim();
+  if (!q) return list || [];
+  var low = q.toLowerCase();
+  var out = [q];
+  var src = list || [];
+  for (var i = 0; i < src.length && out.length < max; i++) {
+    if (String(src[i]).toLowerCase() !== low) out.push(src[i]);
+  }
+  return out;
+}
+
+function rememberSearch(query) {
+  recentSearches = withRecentSearch(recentSearches, query, RECENT_SEARCH_MAX);
+  api.storage.set("recentSearches", recentSearches).catch(function (e) { console.error("slskd: couldn't save recent searches:", e); });
+}
+
+function recentSearchRow() {
+  if (!recentSearches.length) return [];
+  var buttons = [mutedText("Recent")];
+  for (var i = 0; i < recentSearches.length; i++) {
+    buttons.push(actionButton(recentSearches[i], "recent-search", "secondary", { data: { query: recentSearches[i] } }));
+  }
+  buttons.push(actionButton("Clear", "recent-search-clear"));
+  return [buttonRow(buttons)];
 }
 
 // The line above a mode's results: what was asked for, what the library has,
@@ -5240,6 +5427,7 @@ function searchTab() {
     pasteButton: true
   });
   var mode = search.mode;
+  if (!mode && !search.running) children = children.concat(recentSearchRow());
   children = children.concat(modeHeader());
 
   if (search.error) {
@@ -5282,22 +5470,10 @@ function searchTab() {
       : "Every file found is already in your library. Show everything found to browse the folders anyway." });
     return { type: "layout", direction: "vertical", children: children };
   }
-  if (!upgrading) {
-    children.push({ type: "tabs", tabs: [
-      { id: "files", label: "Files", count: files.length },
-      { id: "folders", label: "Folders", count: folders.length }
-    ], activeTab: activeTab === "folders" ? "folders" : "files", action: "result-mode" });
-  }
+  children.push(resultsToolbar(files.length, folders.length, upgrading));
 
   var trimmed = truncationNote();
   if (trimmed) children.push({ type: "text", content: trimmed, className: "plugin-muted" });
-
-  // The host's headers toggle asc/desc and never offer a third state, so the way
-  // back to the ranked order needs its own control — otherwise one click on a
-  // column costs you the ranking until you search again.
-  if (activeTab !== "folders" && search.sortColumn) {
-    children.push({ type: "button", label: "Back to best match", action: "sort-best", variant: "secondary" });
-  }
 
   if (activeTab === "folders") {
     children.push({ type: "card-grid", items: folderCards() });
@@ -5336,56 +5512,128 @@ function searchTab() {
   return { type: "layout", direction: "vertical", children: children };
 }
 
-function transfersTab() {
-  var children = [];
-  if (!transfers.length) {
-    children.push({ type: "text", content: "No downloads yet.", className: "plugin-muted" });
-    return { type: "layout", direction: "vertical", children: children.concat(keptSection()) };
-  }
+// Pure: which group of the Downloads tab a transfer sits in. Problems come
+// first so a failure can't hide thirty rows down; a finished file is the one
+// thing nobody needs to look at again.
+function transferGroup(t) {
+  var p = transferPhase(t && t.state);
+  if (p === "failed") return "attention";
+  if (p === "downloading" || p === "starting") return "active";
+  if (p === "succeeded") return "finished";
+  if (p === "cancelled") return "cancelled";
+  return "waiting";
+}
 
-  if (tier === "remote") {
-    children.push({ type: "text", content: "slskd is running on another machine, so finished files can't be played or added to the library from here. Add slskd's downloads folder (or its mount) as a music source in Collections.", className: "plugin-muted" });
-  } else {
-    var col = downloadsCollection();
-    children.push({ type: "text", className: "plugin-muted", content: col
-      ? "Finished downloads land in “" + col.name + "” and are added to your library automatically."
-      : "Finished downloads play from here. Add to library copies one into a collection; or add slskd's downloads folder as a collection and they will be picked up automatically." });
-  }
+var TRANSFER_GROUPS = [
+  { id: "attention", title: "Needs attention" },
+  { id: "active", title: "Downloading" },
+  { id: "waiting", title: "Waiting" },
+  { id: "finished", title: "Finished" },
+  { id: "cancelled", title: "Cancelled" }
+];
 
-  // Live rows keep showing a percentage in the subtitle; a progress bar per row
-  // isn't a thing the list can draw, and the phase text reads the same way down
-  // the column.
-  var active = transfers.filter(function (t) {
-    var p = transferPhase(t.state);
-    return p === "downloading" || p === "starting";
-  });
-  if (active.length) {
-    var done = 0, total = 0;
-    for (var i = 0; i < active.length; i++) { done += active[i].bytesTransferred || 0; total += active[i].size || 0; }
-    children.push({ type: "progress-bar", value: done, max: total || 1,
-      label: active.length + (active.length === 1 ? " download" : " downloads") + " in progress · " + formatBytes(done) + " of " + formatBytes(total) });
-  }
+// Finished rows past this many fold behind "Show all".
+var FINISHED_SHOWN = 10;
+var showAllFinished = false;
 
-  children.push({
+// Pure: one line for the summary bar over the groups.
+function transfersSummary(groups, collectionName) {
+  var active = groups.active, done = 0, total = 0, speed = 0;
+  for (var i = 0; i < active.length; i++) {
+    done += active[i].bytesTransferred || 0;
+    total += active[i].size || 0;
+    speed += active[i].averageSpeed || 0;
+  }
+  var bits = [];
+  if (active.length) bits.push(active.length + " downloading");
+  if (groups.waiting.length) bits.push(groups.waiting.length + " waiting");
+  if (active.length) bits.push(formatBytes(done) + " of " + formatBytes(total));
+  if (speed) bits.push("↓ " + formatSpeed(speed));
+  if (collectionName) bits.push("lands in “" + collectionName + "”");
+  return { done: done, total: total, label: bits.join(" · ") };
+}
+
+function transferList(rows, actionIds) {
+  var all = {
+    "play-transfer": { id: "play-transfer", label: "Play", icon: "▶" },
+    "replace-transfer": { id: "replace-transfer", label: "Replace in library…", icon: "⇪" },
+    "import-transfer": { id: "import-transfer", label: "Add to library…", icon: "＋" },
+    "retry-transfer": { id: "retry-transfer", label: "Retry", icon: "↻" },
+    "another-source": { id: "another-source", label: "Another source", icon: "⇄" },
+    "cancel-transfer": { id: "cancel-transfer", label: "Cancel", icon: "■" },
+    // Leaves the file where it is — a list, not a trash can. The bin icon is
+    // kept for "Delete file", which really deletes.
+    "remove-transfer": { id: "remove-transfer", label: "Clear from list", icon: "✕" }
+  };
+  return {
     type: "track-row-list",
-    items: transferRows(),
+    items: rows,
     selectable: true,
     showHeader: true,
     // Which of these a row shows is transferRowActions' call — only what would
     // do something to THAT transfer.
-    actions: [
-      { id: "play-transfer", label: "Play", icon: "▶" },
-      { id: "replace-transfer", label: "Replace in library…", icon: "⇪" },
-      { id: "import-transfer", label: "Add to library…", icon: "＋" },
-      { id: "retry-transfer", label: "Retry", icon: "↻" },
-      { id: "another-source", label: "Another source", icon: "⇄" },
-      { id: "cancel-transfer", label: "Cancel", icon: "⏹" },
-      { id: "remove-transfer", label: "Remove", icon: "🗑" }
-    ]
-  });
-  return { type: "layout", direction: "vertical", children: children.concat(keptSection()) };
+    actions: actionIds.map(function (id) { return all[id]; })
+  };
 }
 
+function transfersTab() {
+  var children = [];
+  var col = tier === "local" ? downloadsCollection() : null;
+  if (!transfers.length) {
+    children.push({ type: "text", className: "plugin-muted", content: "No downloads yet. Search, then Download a file or a whole folder." +
+      (lastFallbackKeptCount() ? " Files the playback fallback fetched are on the Fallback tab." : "") });
+    return { type: "layout", direction: "vertical", children: children };
+  }
+
+  // Where finished files go is one clause on the summary bar when it's good
+  // news; the longer explanation is only for when the user has to act on it.
+  if (tier === "remote") {
+    children.push({ type: "text", content: "slskd is running on another machine, so finished files can't be played or added to the library from here. Add slskd's downloads folder (or its mount) as a music source in Collections.", className: "plugin-muted" });
+  } else if (!col) {
+    children.push({ type: "text", className: "plugin-muted", content: "Finished downloads play from here; Add to library copies one into a collection. Add slskd's downloads folder as a collection and they'll be picked up by themselves." });
+  }
+
+  var groups = { attention: [], active: [], waiting: [], finished: [], cancelled: [] };
+  var rows = transferRows();
+  for (var i = 0; i < transfers.length; i++) {
+    var g = transferGroup(transfers[i]);
+    groups[g].push(transfers[i]);
+    rows[i].group = g;
+  }
+  var sum = transfersSummary(groups, col ? col.name : null);
+  if (groups.active.length) {
+    children.push({ type: "progress-bar", value: sum.done, max: sum.total || 1, label: sum.label });
+  } else if (sum.label) {
+    children.push({ type: "text", className: "plugin-muted", content: sum.label.charAt(0).toUpperCase() + sum.label.slice(1) + "." });
+  }
+
+  for (var k = 0; k < TRANSFER_GROUPS.length; k++) {
+    var id = TRANSFER_GROUPS[k].id;
+    var mine = rows.filter(function (r) { return r.group === id; });
+    if (!mine.length) continue;
+    var buttons = [];
+    if (id === "attention") buttons.push({ label: "Retry all", action: "retry-transfer", icon: "↻", data: { selectedIds: mine.map(function (r) { return r.id; }) } });
+    if (id === "finished" || id === "cancelled") buttons.push({ label: "Clear", action: "remove-transfer", icon: "✕", data: { selectedIds: mine.map(function (r) { return r.id; }) } });
+    var shown = mine;
+    if (id === "finished" && mine.length > FINISHED_SHOWN) {
+      buttons.unshift({ label: showAllFinished ? "Show fewer" : "Show all " + mine.length, action: "finished-toggle" });
+      if (!showAllFinished) shown = mine.slice(0, FINISHED_SHOWN);
+    }
+    var status = String(mine.length);
+    if (id === "finished" && col) status += " · in your library";
+    children.push({ type: "toolbar", title: TRANSFER_GROUPS[k].title, status: status, buttons: buttons,
+      statusVariant: id === "attention" ? "error" : undefined });
+    children.push(transferList(shown, id === "attention" ? ["another-source", "retry-transfer", "remove-transfer"]
+      : id === "finished" ? ["play-transfer", "replace-transfer", "import-transfer", "remove-transfer"]
+      : id === "cancelled" ? ["retry-transfer", "remove-transfer"]
+      : ["another-source", "cancel-transfer"]));
+  }
+  return { type: "layout", direction: "vertical", children: children };
+}
+
+function lastFallbackKeptCount() {
+  return fallbackTotals(fallback).count;
+}
 
 // The Fallback tab: what the last automatic resolve did, step by step — the
 // file it picked and every file it weighed. Mirrors the yt-dlp plugin's "Last
@@ -5497,58 +5745,98 @@ function outcomeLine(rec) {
   return bits.join("  ·  ");
 }
 
+var showResolveTrace = false;   // the Fallback tab's step-by-step trace, folded by default
+var keptConfirm = false;        // "Delete all kept files?" showing
+
+// The Fallback tab is the whole feature in one place: is it working (numbers),
+// what it did last (summary first, the trace on request), what it did lately,
+// the files it kept, and its settings. Those used to sit on three tabs.
 function fallbackTab() {
   var children = [];
   children.push({ type: "text", className: "plugin-muted",
-    content: "When a track has no playable source of its own, Viboplr asks its fallback sources in turn. This one searches Soulseek for the song, " +
-      "fetches the best match from a sharer with a free slot, and plays it once it lands — all within the minute the host allows. " +
-      "Turn it on or off, and order it against other sources, in Settings → Providers → Playback fallback. The files it fetched are under Downloads." });
+    content: "Plays a track from Soulseek when nothing else can. Turn it on and set its order in Settings → Providers → Playback fallback." });
 
-  children.push({ type: "toolbar", title: "Last resolve",
-    buttons: lastResolve ? [{ label: "Clear", action: "clear-resolve", icon: "✕" }] : [] });
-  if (!lastResolve) {
-    children.push({ type: "text", className: "plugin-muted",
-      content: "No fallback resolve yet this session. Play a track that has no source of its own — a library row whose file is gone, a track from a streaming plugin that can't reach it — and what happened appears here." });
-    return { type: "layout", direction: "vertical", children: children };
+  var st = resolveStats(resolveHistory);
+  var totals = fallbackTotals(fallback);
+  var lt = ledgerTotals(sharers);
+  if (st.total || totals.count || lt.seen) {
+    children.push({ type: "stats-grid", items: [
+      { label: "played", value: st.started + " of " + st.total },
+      { label: "median time to start", value: st.medianMs != null ? secondsLabel(st.medianMs) : "—" },
+      { label: "files kept · " + formatBytes(totals.bytes), value: totals.count },
+      { label: "sharers proven / unreliable", value: lt.proven + " / " + lt.burned }
+    ] });
   }
 
-  var lr = lastResolve;
-  children.push({ type: "text", content: "“" + lr.title + "”" + (lr.artist ? " — " + lr.artist : "") +
-    (lr.durationSecs != null ? "  ·  " + formatDurationSecs(lr.durationSecs) : "") });
-  children.push({ type: "text", className: "plugin-muted", content: "Searched for “" + lr.query + "”" });
-  for (var i = 0; i < lr.steps.length; i++) {
-    var s = lr.steps[i];
-    var line = (i + 1) + ". " + s.label + (s.outcome ? " → " + s.outcome : "…") + (s.ms != null ? " (" + Math.round(s.ms / 100) / 10 + "s)" : "");
-    children.push({ type: "text", content: line, className: s.level === "error" ? "plugin-error" : "plugin-muted" });
-  }
-  if (lr.outcome === "running" && lr.live) {
-    if (lr.progress != null) {
-      children.push({ type: "progress-bar", value: Math.round(lr.progress * 100), max: 100, label: liveLine(lr) });
-    } else {
-      children.push({ type: "loading", message: liveLine(lr) });
+  children = children.concat(lastResolveSection());
+
+  if (resolveHistory.length) {
+    var now = Date.now();
+    children.push({ type: "toolbar", title: "Recent", status: resolveHistory.length + (resolveHistory.length === 1 ? " resolve" : " resolves"),
+      buttons: [{ label: "Clear", action: "clear-resolve-history", icon: "✕" }] });
+    var shown = resolveHistory.slice(0, 10);
+    for (var i = 0; i < shown.length; i++) {
+      var e = shown[i];
+      children.push({ type: "text", content: historyLine(e, now),
+        className: e.outcome === "failed" ? "plugin-error" : "plugin-muted" });
     }
-  } else if (lr.outcome === "running") {
-    children.push({ type: "loading", message: "Working…" });
-  }
-  children.push({ type: "text", content: outcomeLine(lr), className: lr.outcome === "failed" ? "plugin-error" : undefined });
-
-  var picked = pickedLine(lr);
-  if (picked) {
-    children.push({ type: "toolbar", title: "Picked file" });
-    children = children.concat(picked);
   }
 
-  if (lr.candidates.length) {
-    children.push({ type: "toolbar", title: "Matching files",
-      status: lr.candidates.length + (lr.candidates.length === 1 ? " file" : " files") + ", best first" });
-    children.push({ type: "text", className: "plugin-muted",
-      content: "✓ played · ↓ downloading · ✗ tried and dropped. Match is how closely the file name fits the title and artist." });
-    children = children.concat(candidateLines(lr));
-  }
+  children = children.concat(keptSection());
+  children.push(fallbackSettingsSection());
   return { type: "layout", direction: "vertical", children: children };
 }
 
-// Under Downloads: the files the playback fallback fetched. They are the
+// The last resolve: what happened, to which song, with which file. The
+// numbered steps and every candidate weighed (✓ ↓ ✗) are the debugging view,
+// one click away instead of the first thing on the tab.
+function lastResolveSection() {
+  var out = [];
+  var buttons = [];
+  if (lastResolve) {
+    buttons.push({ label: showResolveTrace ? "Hide trace" : "Show trace", action: "fallback-trace-toggle" });
+    buttons.push({ label: "Clear", action: "clear-resolve", icon: "✕" });
+  }
+  out.push({ type: "toolbar", title: "Last resolve", buttons: buttons,
+    status: lastResolve ? outcomeLine(lastResolve) : undefined,
+    statusVariant: lastResolve && lastResolve.outcome === "failed" ? "error"
+      : lastResolve && (lastResolve.outcome === "played" || lastResolve.outcome === "cached") ? "success" : undefined });
+  if (!lastResolve) {
+    out.push({ type: "text", className: "plugin-muted",
+      content: "Nothing yet this session. Play a track with no source of its own — a library row whose file is gone, a streaming track that can't be reached — and what happened shows here." });
+    return out;
+  }
+
+  var lr = lastResolve;
+  out.push({ type: "text", content: "“" + lr.title + "”" + (lr.artist ? " — " + lr.artist : "") +
+    (lr.durationSecs != null ? "  ·  " + formatDurationSecs(lr.durationSecs) : "") });
+  if (lr.outcome === "running" && lr.live) {
+    if (lr.progress != null) out.push({ type: "progress-bar", value: Math.round(lr.progress * 100), max: 100, label: liveLine(lr) });
+    else out.push({ type: "loading", message: liveLine(lr) });
+  } else if (lr.outcome === "running") {
+    out.push({ type: "loading", message: "Working…" });
+  }
+  out.push(mutedText("Searched for “" + lr.query + "”"));
+  var picked = pickedLine(lr);
+  if (picked) out = out.concat(picked);
+  if (lr.candidates.length && !showResolveTrace) {
+    out.push(mutedText(lr.candidates.length + (lr.candidates.length === 1 ? " matching file" : " matching files") + " weighed — Show trace for each step and file."));
+  }
+  if (!showResolveTrace) return out;
+
+  for (var i = 0; i < lr.steps.length; i++) {
+    var s = lr.steps[i];
+    var line = (i + 1) + ". " + s.label + (s.outcome ? " → " + s.outcome : "…") + (s.ms != null ? " (" + Math.round(s.ms / 100) / 10 + "s)" : "");
+    out.push({ type: "text", content: line, className: s.level === "error" ? "plugin-error" : "plugin-muted" });
+  }
+  if (lr.candidates.length) {
+    out.push(mutedText("Matching files, best first — ✓ played · ↓ downloading · ✗ tried and dropped. Match is how closely the file name fits the title and artist."));
+    out = out.concat(candidateLines(lr));
+  }
+  return out;
+}
+
+// On the Fallback tab: the files the playback fallback fetched. They are the
 // plugin's own record (slskd's transfer list may have forgotten them), kept so
 // the same song plays instantly next time, and deletable from disk here.
 function keptSection() {
@@ -5556,12 +5844,19 @@ function keptSection() {
   var keys = Object.keys(fallback);
   if (!keys.length) return [];
   var out = [];
-  out.push({ type: "toolbar", title: "Fetched by the playback fallback",
-    status: totals.count + (totals.count === 1 ? " file" : " files") + " · " + formatBytes(totals.bytes),
-    buttons: [{ label: "Delete all", action: "delete-all-kept", icon: "🗑" }] });
+  var col = downloadsCollection();
+  out.push({ type: "toolbar", title: "Kept files",
+    status: totals.count + (totals.count === 1 ? " file" : " files") + " · " + formatBytes(totals.bytes) + (col ? " · in your library via “" + col.name + "”" : ""),
+    buttons: totals.count ? [{ label: "Delete all…", action: "delete-all-kept-ask", icon: "🗑" }] : [] });
+  if (keptConfirm) {
+    out.push({ type: "confirm", title: "Delete every kept file?",
+      message: "Deletes " + totals.count + (totals.count === 1 ? " file" : " files") + " (" + formatBytes(totals.bytes) + ") from slskd's downloads folder. A song is simply fetched again the next time it's needed." +
+        (col ? " They are library tracks too, through “" + col.name + "”, and leave the library with the files." : ""),
+      confirmLabel: "Delete " + totals.count + (totals.count === 1 ? " file" : " files"), cancelLabel: "Keep them", confirmVariant: "danger",
+      confirmAction: "delete-all-kept", cancelAction: "delete-all-kept-cancel" });
+  }
   out.push({ type: "text", className: "plugin-muted",
-    content: "These stay in slskd's downloads folder so the same song plays instantly next time. Delete removes the file from disk through slskd" +
-      (downloadsCollection() ? "; they are already part of your library through the collection that folder sits in." : ".") });
+    content: "Kept in slskd's downloads folder so the same song plays at once next time. Delete file removes it from disk through slskd." });
   out.push({
     type: "track-row-list",
     items: keptRows(),
@@ -5596,8 +5891,7 @@ function fallbackQualityDescription(mode, preferredFormats) {
 // Pure-ish: the line under "Keep at most" — what cleanup does, what it skips,
 // and how the last run went (a refusal stays here until it clears).
 function fallbackCleanupDescription() {
-  var text = "When the kept files outgrow this, the least recently played are deleted through slskd. " +
-    "Files inside one of your collections (they are library tracks too) and anything played in the last 15 minutes are never deleted automatically.";
+  var text = "Least recently played go first. Files inside a collection and anything played in the last 15 minutes are never deleted automatically.";
   var c = fallbackCleanup;
   if (c && c.error) text += " Last cleanup stopped: " + c.error;
   else if (c && c.deleted) text += " Last cleanup deleted " + c.deleted + (c.deleted === 1 ? " file" : " files") + " (" + formatBytes(c.bytes) + ").";
@@ -5607,10 +5901,7 @@ function fallbackCleanupDescription() {
 function fallbackSettingsSection() {
   var totals = fallbackTotals(fallback);
   var children = [
-    { type: "text", className: "plugin-muted",
-      content: "When a track has no playable source, Viboplr can fetch it from Soulseek: one bounded search, then the best-matching file from a sharer who has delivered before or advertises a free slot, played as soon as it lands. " +
-        "Enable it and set its order among the other sources in Settings → Providers → Playback fallback." },
-    { type: "settings-row", label: "Fallback quality",
+    { type: "settings-row", label: "Quality",
       description: fallbackQualityDescription(fallbackModeOf(settings.fallbackQuality), settings.preferredFormats),
       control: { type: "select", action: "set-fallback-quality", value: fallbackModeOf(settings.fallbackQuality),
         options: [
@@ -5622,27 +5913,21 @@ function fallbackSettingsSection() {
     { type: "settings-row", label: "Sharers",
       description: (function () {
         var lt = ledgerTotals(sharers);
-        if (!lt.seen) return "No downloads watched yet. Every sharer's deliveries, failures and stalls are remembered, and sharers who have delivered are ranked above ones who only advertise a free slot — in the Search tab and in the fallback.";
-        return lt.seen + (lt.seen === 1 ? " sharer" : " sharers") + " seen · " + lt.proven + " proven · " + lt.burned + " unreliable. Proven sharers rank first in results and in the fallback.";
+        if (!lt.seen) return "None watched yet. Sharers who have delivered rank first, here and in Search.";
+        return lt.seen + (lt.seen === 1 ? " sharer" : " sharers") + " seen · " + lt.proven + " proven · " + lt.burned + " unreliable. Proven sharers rank first, here and in Search.";
       })() },
-    { type: "settings-row", label: "Files kept by the fallback",
-      description: totals.count
-        ? totals.count + (totals.count === 1 ? " file" : " files") + " · " + formatBytes(totals.bytes) + ", in slskd's downloads folder under “" + DEST_ROOT + "/" + FALLBACK_SUBDIR + "”. The Downloads tab lists each one."
-        : "None yet. Fetched files stay in slskd's downloads folder, under “" + DEST_ROOT + "/" + FALLBACK_SUBDIR + "”, so a song plays instantly the next time." },
     { type: "settings-row", label: "Keep at most",
       description: fallbackCleanupDescription(),
       control: { type: "select", action: "set-fallback-max-gb", value: String(Number(settings.fallbackMaxGb) || 0),
         options: FALLBACK_MAX_GB_OPTIONS.map(function (g) { return { value: String(g), label: g ? g + " GB" : "No limit" }; }) } },
     { type: "settings-row", label: "Delete if not played for",
-      description: "Files nobody has played for this long are deleted. A song deleted here is simply fetched again the next time it's needed.",
+      description: "A deleted song is fetched again when it's needed.",
       control: { type: "select", action: "set-fallback-max-age", value: String(Number(settings.fallbackMaxAgeDays) || 0),
         options: FALLBACK_MAX_AGE_DAY_OPTIONS.map(function (d) { return { value: String(d), label: d ? d + " days" : "Never" }; }) } },
-    { type: "toolbar", buttons: [
-      { label: "Show in Soulseek", action: "open-fallback", variant: "secondary" }
-    ].concat(totals.count ? [{ label: "Delete all kept files", action: "delete-all-kept", variant: "secondary", icon: "🗑" }] : [])
-     .concat(Object.keys(sharers).length ? [{ label: "Forget sharer history", action: "reset-sharers", variant: "secondary" }] : []) }
-  ];
-  return { type: "section", title: "Playback fallback", children: children };
+    Object.keys(sharers).length ? buttonRow([actionButton("Forget sharer history", "reset-sharers")]) : null
+  ].filter(Boolean);
+  void totals;
+  return { type: "section", title: "Settings", children: children };
 }
 
 function render() {
@@ -5703,11 +5988,51 @@ function mainTabFor(tab) {
 // Connection section themselves, so nothing here is unreachable while slskd
 // isn't ready.
 function renderSettings() {
-  if (activeTab === "settings") render();
+  if (activeTab === "settings" || activeTab === "fallback" || activeTab === "upgrades") render();
+}
+
+// Pure: the Status checklist on top of Settings while slskd is ready — the
+// four things that must hold for downloads to work and reach the library,
+// each with its fix on the same row. (Not ready, `fixNodes` explains instead.)
+// `share` says how to fix sharing: "roadie" (the card below has Share…),
+// "slskd" (slskd's own settings), or null.
+function statusChecklist(rd, cfg, currentTier, col, share, ago) {
+  var rows = [];
+  rows.push(optionRow("✓ Connected as " + (rd.username || "?"),
+    (rd.version ? "slskd " + rd.version + " · " : "") + (cfg.managedBy === "roadie" ? "slskd from Roadie · " : "") + (cfg.url || "") + (ago ? " · " + ago : ""),
+    checkButton("Test")));
+  if (rd.shareCount == null) {
+    // slskd didn't say; nothing to claim either way.
+  } else if (rd.shareCount > 0) {
+    rows.push({ type: "settings-row", label: "✓ Sharing " + rd.shareCount + (rd.shareCount === 1 ? " folder" : " folders"),
+      description: "Soulseek serves people who share first." });
+  } else {
+    rows.push(share === "slskd"
+      ? optionRow("⚠ Not sharing anything", "Sharers serve people who share first, so your downloads may queue a long time. Add a shared folder in slskd's settings.",
+        actionButton("Open slskd", "open-slskd"))
+      : { type: "settings-row", label: "⚠ Not sharing anything",
+        description: "Sharers serve people who share first, so your downloads may queue a long time." + (share === "roadie" ? " Share your collections from the card below." : "") });
+  }
+  if (currentTier !== "local") {
+    rows.push({ type: "settings-row", label: "⚠ slskd is on another computer",
+      description: "Finished files can't be played or added from here. Add slskd's downloads folder (or its mount) as a music source in Collections." });
+  } else if (col) {
+    rows.push({ type: "settings-row", label: "✓ Downloads reach your library",
+      description: "slskd's downloads folder is inside “" + col.name + "”." });
+  } else {
+    rows.push({ type: "settings-row", label: "⚠ Downloads stay in slskd's folder",
+      description: "Add that folder (or a parent) as a music source in Collections and finished downloads reach the library by themselves. Until then, use Add to library on each one." });
+  }
+  return { type: "section", title: "Status", children: rows };
 }
 
 function settingsTab() {
   var children = fixNodes(readiness.state, settings, roadie, readiness.detail, signinWhy);
+  if (readiness.state === "ready") {
+    var share = settings.managedBy === "roadie" && roadieCanShareDirs(roadie.tool) ? "roadie" : "slskd";
+    children.push(statusChecklist(readiness, settings, tier, tier === "local" && downloadsDir ? downloadsCollection() : null,
+      share, checkedAgo(connCheck.at, Date.now())));
+  }
   children.push(connectionSection());
   var webPage = webPageSection();
   if (webPage) children.push(webPage);
@@ -5716,42 +6041,20 @@ function settingsTab() {
     type: "section",
     title: "Downloads",
     children: [
+      { type: "settings-row", label: "Preferred formats",
+        description: "Best first, e.g. “flac, mp3”. Empty ranks by quality.",
+        control: { type: "text-input", placeholder: "flac, mp3", action: "set-formats", value: settings.preferredFormats } },
       { type: "settings-row", label: "slskd runs on this computer",
-        description: "When on, finished downloads can be played and imported directly. Turn off if slskd runs in Docker or on a NAS.",
+        description: "Turn off when slskd runs in Docker or on a NAS.",
         control: { type: "toggle", label: "", action: "set-local",
           checked: detectTier(settings.url, settings.tierOverride) === "local" } },
-      { type: "settings-row", label: "Preferred formats",
-        description: "Comma-separated, best first — e.g. \"flac, mp3\". Leave empty to rank purely by quality.",
-        control: { type: "text-input", placeholder: "flac, mp3", action: "set-formats", value: settings.preferredFormats } },
       { type: "settings-row", label: "Downloads folder",
         description: misconfiguredSlskdDir(downloadsDir, incompleteDir)
           ? downloadsDir + " — " + MISCONFIGURED_DIR_TEXT + "."
           : downloadsDir || "Read from slskd once connected." }
     ]
   });
-
-  children.push(upgradeSettingsSection());
-  children.push(fallbackSettingsSection());
-
-  if (readiness.state === "ready" && tier === "local" && downloadsDir) {
-    var col = downloadsCollection();
-    children.push({
-      type: "section",
-      title: "Library",
-      children: [{ type: "text", className: "plugin-muted", content: col
-        ? "slskd's downloads folder is inside your “" + col.name + "” collection, so finished downloads are added to the library automatically."
-        : "slskd's downloads folder isn't inside any of your collections. Add it (or a parent folder) as a music source in Collections and finished downloads will reach the library on their own; until then, use Add to library on a finished download to copy it into one." }]
-    });
-  }
-
-  if (readiness.state === "ready" && readiness.shareCount === 0 && !(settings.managedBy === "roadie" && roadieCanShareDirs(roadie.tool))) {
-    children.push({
-      type: "section",
-      title: "Sharing",
-      children: [{ type: "text", content: "slskd isn't sharing any folders. Soulseek gives priority to users who share, so your downloads may queue for a long time. Add a shared folder in slskd's own settings.", className: "plugin-muted" }]
-    });
-  }
-
+  children.push(mutedText("Upgrade and playback-fallback settings are on their own tabs."));
   return { type: "layout", direction: "vertical", children: children };
 }
 
@@ -5907,10 +6210,44 @@ function registerActions() {
     deleteFallbackFiles(keys).catch(function (e) { console.error("slskd: deleting fallback files failed:", e); });
   });
 
+  api.ui.onAction("delete-all-kept-ask", function () {
+    keptConfirm = true;
+    render();
+  });
+
+  api.ui.onAction("delete-all-kept-cancel", function () {
+    keptConfirm = false;
+    render();
+  });
+
+  api.ui.onAction("fallback-trace-toggle", function () {
+    showResolveTrace = !showResolveTrace;
+    render();
+  });
+
+  api.ui.onAction("clear-resolve-history", function () {
+    resolveHistory = [];
+    api.storage.set("resolveHistory", resolveHistory).catch(function (e) { console.error("slskd: couldn't clear the fallback history:", e); });
+    render();
+  });
+
   api.ui.onAction("delete-all-kept", function () {
+    keptConfirm = false;
     var keys = Object.keys(fallback);
     if (!keys.length) return;
     deleteFallbackFiles(keys).catch(function (e) { console.error("slskd: deleting fallback files failed:", e); });
+  });
+
+  api.ui.onAction("recent-search", function (data) {
+    var q = String((data && data.query) || "").trim();
+    if (!q) return;
+    runSearch(q).catch(function (e) { console.error("slskd: recent search failed:", e); });
+  });
+
+  api.ui.onAction("recent-search-clear", function () {
+    recentSearches = [];
+    api.storage.set("recentSearches", recentSearches).catch(function (e) { console.error("slskd: couldn't clear recent searches:", e); });
+    render();
   });
 
   api.ui.onAction("result-mode", function (data) {
@@ -6157,6 +6494,11 @@ function registerActions() {
   // Drops the row from slskd's list. The file on disk is untouched — this is a
   // list, not a trash can, and slskd's own remote_file_management gate exists
   // precisely so an API caller can't delete downloads by default.
+  api.ui.onAction("finished-toggle", function () {
+    showAllFinished = !showAllFinished;
+    render();
+  });
+
   api.ui.onAction("remove-transfer", function (data) {
     var keys = rowIds(data);
     var chain = Promise.resolve();
@@ -6682,10 +7024,10 @@ function upgradeRowActions(e) {
   if (!upgradeIsHistory(e)) ids.push("upgrade-show");
   if (e.state === "ready") ids.push("upgrade-replace");
   if (e.state === "alternative") ids.push("upgrade-take-alternative");
-  if (e.state === "downloading" && nextUntriedSource(e)) ids.push("upgrade-skip");
-  if (upgradeIsBusy(e)) ids.push("upgrade-cancel");
-  if (!upgradeIsHistory(e)) ids.push("upgrade-choose");
   if (e.state === "none" || e.state === "failed" || e.state === "alternative" || e.state === "cancelled") ids.push("upgrade-retry");
+  // Try another sharer and Choose myself… are on the panel (Details), not on
+  // every row: a row offering five verbs is one nobody reads.
+  if (upgradeIsBusy(e)) ids.push("upgrade-cancel");
   ids.push("upgrade-remove");
   return ids;
 }
@@ -7200,17 +7542,17 @@ function upgradeSourceRows(e) {
   return upgradeSources(e).map(function (c, i) {
     var active = !!(e.active && e.state === "downloading" && e.active.username === c.username && e.active.filename === c.filename);
     var tried = !active && (e.triedUsers || []).indexOf(c.username) >= 0;
-    var bits = [qualityLabel(c)];
-    if (c.size) bits.push(formatBytes(c.size));
-    bits.push("from " + c.username);
-    bits.push(availabilityLabel(c));
+    var bits = [c.username + " · " + dirnameRemote(c.filename).replace(/\\/g, "/")];
     if (!meetsQualityTarget(c, e.target)) bits.push("below your target");
     if (active) bits.push("downloading now");
     else if (tried) bits.push("tried");
+    var rep = sharerLabel(sharers[c.username]);
     return {
       id: key + "#" + i,
       title: basenameRemote(c.filename),
       subtitle: bits.join("  ·  "),
+      cells: { quality: qualityLabel(c), size: c.size ? formatBytes(c.size) : undefined,
+        availability: c.username + " · " + availabilityLabel(c) + (rep ? " · " + rep : "") },
       imageUrl: fileTile(c),
       kind: "audio",
       actions: active ? [] : ["upgrade-use-source"]
@@ -7291,41 +7633,76 @@ function panelUpgrade(all, focused) {
 // `t` is the active transfer, `ready` whether slskd is up, `asking` whether
 // the host's Replace dialog is open for it, `inPlace` whether this host
 // replaces behind its own dialog.
+// Pure: the four steps of an automatic upgrade as one line — ✓ done, ● now,
+// ○ to come — or null for a state that isn't on that road (nothing found,
+// failed, cancelled, gone). It answers "where is it?" without reading.
+var UPGRADE_STEPS = ["Search", "Download", "Check", "Replace"];
+function upgradeStepper(state, pct) {
+  var at = { searching: 0, downloading: 1, checking: 2, ready: 3, replaced: 4 }[state];
+  if (at == null) return null;
+  return UPGRADE_STEPS.map(function (label, i) {
+    var mark = i < at ? "✓" : i === at ? "●" : "○";
+    return mark + " " + label + (i === 1 && i === at && pct != null ? " " + Math.round(pct * 100) + "%" : "");
+  }).join("   ─   ");
+}
+
+// One side of the compare: a caption and what's under it.
+function compareSide(caption, lines) {
+  return { type: "layout", direction: "vertical", children: [mutedText(caption)].concat(lines) };
+}
+
+// Pure: the panel on top of the Upgrades tab — the steps, then the copy you
+// have next to the one on its way (or ready), then what you can do.
+// `t` is the active transfer, `ready` whether slskd is up, `asking` whether
+// the host's Replace dialog is open for it, `inPlace` whether this host
+// replaces behind its own dialog.
 function upgradePanel(e, t, ready, asking, inPlace) {
   var key = upgradeKey(e.trackId);
+  var phase = t ? transferPhase(t.state) : null;
+  var pct = t && (phase === "downloading" || phase === "starting") ? transferProgress(t) : null;
   var lines = [
-    { type: "text", content: "“" + e.title + "”" + (e.artist ? " · " + e.artist : ""), className: "plugin-heading" },
-    mutedText("Your copy: " + (e.currentLabel || "?")),
-    mutedText(displayPath(e.path)),
-    mutedText("Looking for: " + UPGRADE_TARGETS[upgradeTargetOf(e.target)])
+    { type: "text", content: "“" + e.title + "”" + (e.artist ? " · " + e.artist : ""), className: "plugin-heading" }
   ];
+  var steps = upgradeStepper(e.state, pct);
+  if (steps) lines.push(mutedText(steps));
+
+  var mine = compareSide("Your copy", [
+    { type: "text", content: e.currentLabel || "?" },
+    mutedText(displayPath(e.path))
+  ]);
+  var theirs = null;
   var buttons = [];
+  var cancel = actionButton("Cancel upgrade", "upgrade-cancel", "secondary", { data: { itemId: key } });
   if (e.state === "searching") {
-    lines.push({ type: "text", content: ready ? "Searching Soulseek…" : "Waiting for slskd to be ready…" });
-    buttons.push(actionButton("Cancel", "upgrade-cancel", "secondary", { data: { itemId: key } }));
+    theirs = compareSide("Looking for", [
+      { type: "text", content: UPGRADE_TARGETS[upgradeTargetOf(e.target)] },
+      mutedText(ready ? "Searching Soulseek…" : "Waiting for slskd to be ready…")
+    ]);
   } else if (e.state === "downloading" && e.active) {
     var a = e.active;
-    lines.push({ type: "text", content: "Downloading “" + basenameRemote(a.filename) + "” — " + qualityLabel(a) + (a.size ? " · " + formatBytes(a.size) : "") + " from " + a.username });
-    var phase = t ? transferPhase(t.state) : null;
-    var pct = t ? transferProgress(t) : null;
-    if ((phase === "downloading" || phase === "starting") && pct != null) {
-      lines.push({ type: "progress-bar", value: Math.round(pct * 100), max: 100,
+    var side = [
+      { type: "text", content: qualityLabel(a) + (a.size ? " · " + formatBytes(a.size) : "") },
+      mutedText("Downloading “" + basenameRemote(a.filename) + "” from " + a.username +
+        (sharerLabel(sharers[a.username]) ? " · " + sharerLabel(sharers[a.username]) : ""))
+    ];
+    if (pct != null) {
+      side.push({ type: "progress-bar", value: Math.round(pct * 100), max: 100,
         label: Math.round(pct * 100) + "%" + (t.averageSpeed ? " · ↓ " + formatSpeed(t.averageSpeed) : "") });
     } else if (t && t.placeInQueue != null) {
-      lines.push(mutedText("Waiting in " + a.username + "'s queue · position " + t.placeInQueue));
+      side.push(mutedText("Waiting in " + a.username + "'s queue · position " + t.placeInQueue));
     } else {
-      lines.push(mutedText("Queued with " + a.username));
+      side.push(mutedText("Queued with " + a.username));
     }
-    if (e.triedUsers && e.triedUsers.length > 1) lines.push(mutedText("Sharer " + e.triedUsers.length + " — the earlier ones didn't deliver, or you moved on."));
+    if (e.triedUsers && e.triedUsers.length > 1) side.push(mutedText("Sharer " + e.triedUsers.length + " — the earlier ones didn't deliver, or you moved on."));
+    theirs = compareSide("On its way", side);
     if (nextUntriedSource(e)) buttons.push(actionButton("Try another sharer", "upgrade-skip", "secondary", { data: { itemId: key } }));
-    buttons.push(actionButton("Cancel", "upgrade-cancel", "secondary", { data: { itemId: key } }));
   } else if (e.state === "checking") {
-    lines.push({ type: "text", content: "Checking the downloaded file…" });
-    buttons.push(actionButton("Cancel", "upgrade-cancel", "secondary", { data: { itemId: key } }));
+    theirs = compareSide("Downloaded", [{ type: "text", content: "Checking the downloaded file…" }]);
   } else if (e.state === "ready" && e.file) {
-    lines.push({ type: "text", content: "Ready: " + qualityLabel(e.file.quality) + (e.file.size ? " · " + formatBytes(e.file.size) : "") });
-    lines.push(mutedText(displayPath(e.file.path)));
-    if (e.message) lines.push(mutedText(e.message));
+    var r = [{ type: "text", content: "Ready: " + qualityLabel(e.file.quality) + (e.file.size ? " · " + formatBytes(e.file.size) : "") },
+      mutedText(displayPath(e.file.path))];
+    if (e.message) r.push(mutedText(e.message));
+    theirs = compareSide("Replaces it", r);
     if (asking) lines.push({ type: "text", content: "Waiting for your answer in the Replace dialog…" });
     else buttons.push(actionButton(inPlace ? "Replace…" : "Compare & replace…", "upgrade-replace", "accent", { data: { itemId: key } }));
   } else if (e.state === "replaced") {
@@ -7335,38 +7712,49 @@ function upgradePanel(e, t, ready, asking, inPlace) {
     if (e.state === "alternative") buttons.push(actionButton("Take the best found", "upgrade-take-alternative", "accent", { data: { itemId: key } }));
     if (e.state === "none" || e.state === "failed" || e.state === "alternative" || e.state === "cancelled") buttons.push(actionButton("Search again", "upgrade-retry", "secondary", { data: { itemId: key } }));
   }
+  lines.push(theirs ? { type: "layout", direction: "horizontal", children: [mine, { type: "text", content: "→" }, theirs] } : mine);
+
   if (!upgradeIsHistory(e) && e.state !== "ready") buttons.push(actionButton("Choose myself…", "upgrade-choose", "secondary", { data: { itemId: key } }));
+  // Cancel goes last, apart from the ways forward.
+  if (upgradeIsBusy(e)) buttons.push(cancel);
   if (buttons.length) lines.push(buttonRow(buttons));
   // Every file the search found for it, so the user can take a different
   // source than the automatic pick — a sharer with a shorter queue, a smaller
-  // file, the one below the target.
+  // file, the one below the target. `selectable` is what makes the columns
+  // render at all (see searchTab).
   if (canPickUpgradeSource(e)) {
-    lines.push(mutedText("Sources found (" + upgradeSources(e).length + ") — choose Use this to download a different one instead:"));
+    lines.push({ type: "toolbar", title: "Sources found", status: upgradeSources(e).length + " · Use this downloads a different one", buttons: [] });
     lines.push({
       type: "track-row-list",
       items: upgradeSourceRows(e),
-      showHeader: false,
+      showHeader: true,
+      selectable: true,
+      columns: SOURCE_COLUMNS,
+      contextMenu: false,
       actions: [{ id: "upgrade-use-source", label: "Use this", icon: "⬇" }]
     });
   }
   return { type: "section", title: "Upgrading", children: lines };
 }
 
+var SOURCE_COLUMNS = [
+  { id: "quality", label: "Quality", width: 130 },
+  { id: "size", label: "Size", width: 80, align: "right" },
+  { id: "availability", label: "Sharer", width: 170 }
+];
+
 function upgradesTab() {
-  var children = [];
-  var target = UPGRADE_TARGETS[upgradeTargetOf(settings.upgradeTarget)];
+  var children = [upgradeTargetRow()];
   var inPlace = canReplaceInPlace();
   if (!Object.keys(upgrades).length) {
     children.push({ type: "text", className: "plugin-muted",
-      content: "Nothing being upgraded. Choose Upgrade on a track in your library and a better copy is found, downloaded and checked here; you replace it after comparing the two." });
+      content: "Nothing being upgraded. Choose Soulseek: Upgrade on a track in your library and a better copy is found, downloaded and checked here; you replace it after comparing the two." });
   } else {
     var shown = panelUpgrade(upgrades, focusedUpgrade);
     if (shown) {
       children.push(upgradePanel(shown, shown.active ? transferByKey(shown.active.key) : null,
         readiness.state === "ready", !!replaceOffers[upgradeKey(shown.trackId)], inPlace));
     }
-    children.push({ type: "text", className: "plugin-muted",
-      content: "Upgrading to: " + target + " (change it in Settings). Each track gets the best matching file from a sharer likely to deliver; nothing in your library changes until you say Replace." });
     var pending = upgradeRows(false);
     if (pending.length) {
       children.push({
@@ -7377,11 +7765,10 @@ function upgradesTab() {
           { id: "upgrade-show", label: "Details", icon: "☰" },
           { id: "upgrade-replace", label: inPlace ? "Replace…" : "Compare & replace…", icon: "⇪" },
           { id: "upgrade-take-alternative", label: "Take the best found", icon: "⬇" },
-          { id: "upgrade-skip", label: "Try another sharer", icon: "⇄" },
-          { id: "upgrade-cancel", label: "Cancel", icon: "■" },
-          { id: "upgrade-choose", label: "Choose myself…", icon: "⌕" },
           { id: "upgrade-retry", label: "Search again", icon: "↻" },
-          { id: "upgrade-remove", label: "Remove", icon: "🗑" }
+          { id: "upgrade-cancel", label: "Cancel", icon: "■" },
+          // Drops the entry; a downloaded file stays where it is.
+          { id: "upgrade-remove", label: "Remove", icon: "✕" }
         ]
       });
     } else {
@@ -7391,17 +7778,15 @@ function upgradesTab() {
     // list only on request.
     var history = upgradeRows(true);
     if (history.length) {
-      children.push(buttonRow([
-        mutedText("History: " + history.length + " finished"),
-        actionButton(showUpgradeHistory ? "Hide" : "Show", "upgrade-history-toggle"),
-        actionButton("Clear", "upgrade-history-clear")
-      ]));
+      children.push({ type: "toolbar", title: "History", status: history.length + " finished",
+        buttons: [{ label: showUpgradeHistory ? "Hide" : "Show", action: "upgrade-history-toggle" },
+          { label: "Clear", action: "upgrade-history-clear", icon: "✕" }] });
       if (showUpgradeHistory) {
         children.push({
           type: "track-row-list",
           items: history,
           showHeader: false,
-          actions: [{ id: "upgrade-remove", label: "Remove", icon: "🗑" }]
+          actions: [{ id: "upgrade-remove", label: "Remove", icon: "✕" }]
         });
       }
     }
@@ -7409,19 +7794,14 @@ function upgradesTab() {
   return { type: "layout", direction: "vertical", children: children };
 }
 
-function upgradeSettingsSection() {
+// The one setting that decides what an upgrade looks for, on the tab it
+// steers rather than three tabs away in Settings.
+function upgradeTargetRow() {
   var t = upgradeTargetOf(settings.upgradeTarget);
-  return {
-    type: "section",
-    title: "Upgrades",
-    children: [
-      { type: "settings-row", label: "Upgrade to",
-        description: UPGRADE_TARGET_HELP[t] +
-          (t === "best" ? "" : " When nothing at the target turns up, the Upgrades tab offers the best better copy it did find."),
-        control: { type: "select", action: "set-upgrade-target", value: t,
-          options: Object.keys(UPGRADE_TARGETS).map(function (k) { return { value: k, label: UPGRADE_TARGETS[k] }; }) } }
-    ]
-  };
+  return { type: "settings-row", label: "Upgrade to",
+    description: UPGRADE_TARGET_HELP[t] + " Nothing in your library changes until you replace.",
+    control: { type: "select", action: "set-upgrade-target", value: t,
+      options: Object.keys(UPGRADE_TARGETS).map(function (k) { return { value: k, label: UPGRADE_TARGETS[k] }; }) } };
 }
 
 // ---------------------------------------------------------------------------
@@ -7910,6 +8290,10 @@ async function loadSettings() {
     if (sh && typeof sh === "object") sharers = sh;
     var up = await api.storage.get("upgrades");
     if (up && typeof up === "object") upgrades = up;
+    var hist = await api.storage.get("resolveHistory");
+    if (Array.isArray(hist)) resolveHistory = hist.slice(0, RESOLVE_HISTORY_MAX);
+    var rs = await api.storage.get("recentSearches");
+    if (Array.isArray(rs)) recentSearches = rs.filter(function (q) { return typeof q === "string" && q; }).slice(0, RECENT_SEARCH_MAX);
   } catch (e) {
     console.error("slskd: couldn't read stored state:", e);
   }
@@ -8008,6 +8392,18 @@ return {
   _hasFlag: hasFlag,
   _qualityTier: qualityTier,
   _formatTile: formatTile,
+  _transferGroup: transferGroup,
+  _transfersSummary: transfersSummary,
+  _plainTransferError: plainTransferError,
+  _waitedFor: waitedFor,
+  _withRecentSearch: withRecentSearch,
+  _folderSubtitle: folderSubtitle,
+  _resolveStats: resolveStats,
+  _withResolve: withResolve,
+  _historyEntry: historyEntry,
+  _historyLine: historyLine,
+  _upgradeStepper: upgradeStepper,
+  _statusChecklist: statusChecklist,
   _fileTile: fileTile,
   _folderTile: folderTile,
   _tileTier: tileTier,

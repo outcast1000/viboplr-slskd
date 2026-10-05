@@ -162,7 +162,9 @@ test("Upgrade: reads the library copy, shows only better files, and stamps the d
     assert.ok(list, "results rendered");
     assert.deepEqual(list.items.map((i) => i.title), ["06 - Karma Police.flac", "06 - Karma Police (320).mp3"], "the 192 kbps twin is hidden");
     assert.equal(list.actions[0].label, "Upgrade");
-    assert.equal(findNodes(view, (n) => n.type === "tabs" && n.action === "result-mode").length, 0, "no Folders view for a single track");
+    const bar = findNodes(view, (n) => n.type === "toolbar" && (n.buttons || []).length >= 0 && /better file/.test(n.title || ""))[0];
+    assert.ok(bar, "the results toolbar counts the better files");
+    assert.ok(!bar.buttons.some((b) => b.action === "result-mode"), "no Folders view for a single track");
     assert.equal(findNodes(view, (n) => n.type === "text" && /Showing the best/.test(n.content || "")).length, 0, "no truncation note under the filter");
 
     // Lifting the filter shows all three, the better two still marked.
@@ -331,8 +333,8 @@ test("Fill: compares each folder with the album's library rows and downloads onl
     assert.ok(header.content.includes("you have 2 tracks"), "counts this album's rows only: " + header.content);
 
     // Opens on Folders; the folder that has nothing new is hidden.
-    const tabs = findNodes(view, (n) => n.type === "tabs" && n.action === "result-mode")[0];
-    assert.equal(tabs.activeTab, "folders");
+    const bar = findNodes(view, (n) => n.type === "toolbar" && (n.buttons || []).some((b) => b.action === "result-mode"))[0];
+    assert.equal(bar.buttons.filter((b) => b.variant === "accent")[0].label, "Folders");
     let grid = findNodes(view, (n) => n.type === "card-grid")[0];
     assert.ok(grid, "folder cards");
     assert.equal(grid.items.length, 1);

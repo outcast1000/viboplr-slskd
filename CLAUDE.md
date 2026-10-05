@@ -49,8 +49,8 @@ call's shape.
 
 | Surface | Where | Notes |
 |---|---|---|
-| Sidebar view `slskd-browse` | Search / Downloads / Fallback / Settings tabs | `render()` |
-| Settings tab | 4th tab of `slskd-browse` (no host settings panel) | `settingsTab()`; `renderSettings()` re-renders only while it is showing |
+| Sidebar view `slskd-browse` | Search / Downloads / Upgrades / Fallback / Settings tabs | `render()`; one job per tab (see *View layout*) |
+| Settings tab | last tab of `slskd-browse` (no host settings panel) | `settingsTab()`: Status checklist + Connection + Downloads; `renderSettings()` also redraws Upgrades / Fallback, which hold their own settings |
 | Stream resolver `slskd-fallback` | `api.playback.onStreamResolve` | the **playback fallback**, see below |
 | URI scheme `slsk://` | `api.playback.onResolveStreamByUri` | plays a finished download |
 | Download provider `slskd-import` | `api.downloads.onResolveByUri` | "Add to library…" via the host modal |
@@ -166,7 +166,7 @@ Owner decisions that must hold:
   always goes through the host's compare dialog, so a wrong pick costs a download, never a
   library file. Don't add an auto-replace.
 - The plugin deletes only files the **fallback** fetched, and only when asked. The
-  Downloads tab's "Remove" drops slskd's row and leaves the file.
+  Downloads tab's "Clear from list" drops slskd's row and leaves the file.
 - Nothing installs itself; a successful operation announces nothing; failures stay visible.
 
 ## Automatic upgrades (the Upgrades tab)
@@ -204,10 +204,44 @@ than by a long-running promise, because a stranger's queue can outlast a restart
   untried candidate without waiting out the stall timer) and a **Sources found** list
   (`upgradeSources` = the picks plus the alternative; row ids `t<id>#<index>`) where *Use this*
   (`useUpgradeSource`) downloads exactly that file — past the 4-sharer cap, and a pick below the
-  target lowers it to `best` for this upgrade, as *Take the best found* does. The rows carry the
-  same actions plus *Details*, which points the panel at that upgrade.
+  target lowers it to `best` for this upgrade, as *Take the best found* does. The rows carry
+  *Details* (points the panel at that upgrade), Replace / Take the best found / Search again
+  when they apply, *Cancel* and Remove; *Try another sharer* and *Choose myself…* are on the
+  panel only (UX review, 2026-10-06 — five verbs on a row is a row nobody reads).
 - **History is folded.** The tab lists only pending upgrades; **replaced** / **gone** collapse
-  into one "History: N finished" line with *Show* / *Clear* (`showUpgradeHistory`, memory only).
+  into a "History · N finished" toolbar with *Show* / *Clear* (`showUpgradeHistory`, memory only).
+
+## View layout (UX review, owner-approved 2026-10-06)
+
+Each tab owns one job, and a setting lives next to what it controls:
+
+- **Search** — search box; **recent searches** (`recentSearches`, storage, last 6 plain
+  searches; modes aren't remembered) as buttons; a **results toolbar** (`resultsToolbar`:
+  counts, Files / Folders as accent/secondary buttons on the old `result-mode` action, and
+  "sorted by X · Best match" once a column re-sorted). Files / Folders used to be a second
+  `tabs` node right under the main tabs; the owner had never noticed Folders existed. Don't
+  bring the second tab bar back.
+- **Format tiles** (`formatTile`, v0.15.0) are the thumbnail wherever the cover would be a
+  guess: search rows, folder cards, upgrade sources, downloads not yet finished. Real covers
+  stay on finished downloads, kept files and the Upgrades list. Folder cards carry who / tracks
+  / size / slot-or-queue / sharer record (`folderSubtitle`); the format is on the tile.
+- **Downloads** — grouped by `transferGroup`: Needs attention (failed, with *Retry all*) ·
+  Downloading · Waiting · Finished (*Clear*, folded past 10) · Cancelled. Failures read in
+  plain words (`plainTransferError`, raw text kept for anything unrecognised); waiting rows say
+  for how long (`waitedFor`) and offer *Another source* when queued **remotely**. "Remove" is
+  labelled **Clear from list** with ✕ — the bin icon is only for *Delete file*, which deletes.
+- **Upgrades** — the *Upgrade to* select on top (moved from Settings); the panel shows the
+  four steps (`upgradeStepper`), your copy beside the one on its way, *Cancel upgrade* last;
+  Sources found is a selectable list so its columns render.
+- **Fallback** — the whole feature: `stats-grid` (played N of M, median time to start, kept
+  files, sharers), the last resolve as a summary with the step trace and candidates behind
+  *Show trace*, **Recent** (`resolveHistory`, storage, last 50, one small record per resolve
+  from `finishResolve`), **Kept files** (moved from Downloads; *Delete all…* goes through a
+  `confirm` node), and the fallback's settings.
+- **Settings** — `fixNodes` when not ready; when ready a **Status** checklist
+  (`statusChecklist`: connected · sharing · downloads reach the library, each fix on its row),
+  then the Connection card (unchanged, Roadie's card order still holds), slskd's web page,
+  Downloads. The old Library and Sharing sections became checklist rows.
 
 ## slskd facts that bit
 

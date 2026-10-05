@@ -100,6 +100,7 @@ test("transferRowActions offers only what would act on THAT transfer", () => {
   assert.deepEqual(act({ state: "Completed, Errored" }, null, "local"), ["retry-transfer", "another-source", "remove-transfer"]);
   assert.deepEqual(act({ state: "Completed, Cancelled" }, null, "local"), ["retry-transfer", "remove-transfer"]);
   assert.deepEqual(act({ state: "InProgress" }, null, "local"), ["cancel-transfer"]);
+  assert.deepEqual(act({ state: "Queued, Remotely" }, null, "local"), ["another-source", "cancel-transfer"], "a long queue can be left for another sharer");
   assert.deepEqual(act({ state: "Queued, Locally" }, null, "local"), ["cancel-transfer"]);
 });
 

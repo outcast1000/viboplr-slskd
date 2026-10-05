@@ -254,7 +254,7 @@ test("a search slskd is still running at the fallback's deadline is stopped and 
   }
 });
 
-test("the Fallback tab is a read-out — picked file, matches as text, no lists to act on — and kept files live under Downloads", async () => {
+test("the Fallback tab holds the whole feature: numbers, the last resolve (trace folded), recent resolves, kept files", async () => {
   const plugin = loadPlugin();
   const { h } = fallbackHost();
   await plugin.activate(h.api);
@@ -269,18 +269,29 @@ test("the Fallback tab is a read-out — picked file, matches as text, no lists 
     };
 
     h.actions["main-tab"]({ tabId: "fallback" });
-    const fb = nodes(lastView());
-    assert.ok(!fb.some((n) => n.type === "track-row-list"), "no row list: no artwork, no row actions");
-    const texts = fb.filter((n) => n.type === "text").map((n) => n.content);
+    let fb = nodes(lastView());
+    let texts = fb.filter((n) => n.type === "text").map((n) => n.content);
     assert.ok(texts.some((t) => /^Picked: 03 - Karma Police\.mp3 {2}— {2}played$/.test(t)), "the picked file and what became of it: " + texts.join(" | "));
-    assert.ok(texts.some((t) => t.startsWith("✓ ") && t.includes("03 - Karma Police.mp3")), "the played candidate is marked");
-    assert.ok(!texts.some((t) => /Kept files|Delete all/.test(t)));
+    assert.ok(!texts.some((t) => t.startsWith("✓ ") && t.includes("03 - Karma Police.mp3")), "candidates are folded behind Show trace");
+    const stats = fb.filter((n) => n.type === "stats-grid")[0];
+    assert.ok(stats, "the numbers");
+    assert.equal(stats.items[0].value, "1 of 1", "played 1 of 1");
+    assert.ok(texts.some((t) => /^✓ “Karma Police” — Radiohead {2}· {2}Played/.test(t)), "a Recent line: " + texts.join(" | "));
+    assert.equal(h.store.resolveHistory.length, 1, "the history is kept across restarts");
+
+    // Kept files moved here from Downloads; the only list on the tab.
+    assert.ok(fb.some((n) => n.type === "toolbar" && n.title === "Kept files"));
+    const lists = fb.filter((n) => n.type === "track-row-list");
+    assert.equal(lists.length, 1);
+    assert.deepEqual(lists[0].actions.map((a) => a.id), ["play-kept", "import-kept", "delete-kept"]);
+
+    h.actions["fallback-trace-toggle"]();
+    texts = nodes(lastView()).filter((n) => n.type === "text").map((n) => n.content);
+    assert.ok(texts.some((t) => t.startsWith("✓ ") && t.includes("03 - Karma Police.mp3")), "the played candidate is marked in the trace");
 
     h.actions["main-tab"]({ tabId: "transfers" });
     const dl = nodes(lastView());
-    assert.ok(dl.some((n) => n.type === "toolbar" && n.title === "Fetched by the playback fallback"));
-    const kept = dl.filter((n) => n.type === "track-row-list").pop();
-    assert.deepEqual(kept.actions.map((a) => a.id), ["play-kept", "import-kept", "delete-kept"]);
+    assert.ok(!dl.some((n) => n.type === "toolbar" && n.title === "Kept files"), "not on Downloads any more");
   } finally {
     plugin.deactivate();
   }
@@ -905,7 +916,7 @@ test("integration: an age limit deletes a stale kept file through slskd; off by 
     assert.equal(calls.deletes.length, 1, "the stale file is deleted");
     assert.deepEqual(plugin._fallbackIndex(), {});
     assert.ok(!h.calls.notifications.some((m) => /Deleted/.test(m)), "unattended cleanup raises no toast");
-    h.actions["main-tab"]({ tabId: "settings" });
+    h.actions["main-tab"]({ tabId: "fallback" });
     assert.match(JSON.stringify(h.calls.views[h.calls.views.length - 1].data), /Last cleanup deleted 1 file/);
   } finally {
     plugin.deactivate();
@@ -921,7 +932,7 @@ test("integration: an age limit deletes a stale kept file through slskd; off by 
     second.h.actions["set-fallback-max-age"]({ value: "30" });
     await new Promise((r) => setTimeout(r, 50));
     assert.equal(Object.keys(plugin2._fallbackIndex()).length, 1, "a refused delete keeps the file and its record");
-    second.h.actions["main-tab"]({ tabId: "settings" });
+    second.h.actions["main-tab"]({ tabId: "fallback" });
     assert.match(JSON.stringify(second.h.calls.views[second.h.calls.views.length - 1].data), /Last cleanup stopped: .*remote_file_management/);
   } finally {
     plugin2.deactivate();
