@@ -252,6 +252,13 @@ Each tab owns one job, and a setting lives next to what it controls:
   then the Connection card (unchanged, Roadie's card order still holds), slskd's web page,
   Downloads. The old Library and Sharing sections became checklist rows.
 
+- **Row chips and bars** (host `track-row-list` `badge` / `progress`, hosts after 1.0.90; older
+  hosts ignore them, so every subtitle still says the same thing in text). A chip only where rows of
+  different states share a list — Upgrades (`upgradeBadge`), Sources found (Downloading / Tried /
+  Below target), a kept file still downloading — or where a row is special in its group (an
+  **Upgrade** chip on a download fetched as one). Never a "Downloading" chip under the Downloading
+  group title. Bars only while bytes move (`transferRowProgress`), never a 0% bar for a queued file.
+
 ## slskd facts that bit
 
 - One search at a time (`POST /api/v0/searches` answers 429 otherwise) — everything goes

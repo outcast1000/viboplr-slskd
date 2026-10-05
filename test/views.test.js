@@ -267,3 +267,50 @@ test("Fallback: Delete all asks first, through a confirm node", async () => {
     p.deactivate();
   }
 });
+
+// --- row status chips and bars (host track-row-list `badge` / `progress`) ---------
+
+test("transferRowProgress: a bar only while bytes move", () => {
+  const p = plugin._transferRowProgress;
+  assert.equal(p({ state: "InProgress", size: 100, bytesTransferred: 25 }), 0.25);
+  assert.equal(p({ state: "Initializing", size: 100, bytesTransferred: 0 }), 0);
+  assert.equal(p({ state: "Queued, Remotely", size: 100, bytesTransferred: 0 }), null, "queued: no bar stuck at 0");
+  assert.equal(p({ state: "Completed, Succeeded", size: 100, bytesTransferred: 100 }), null, "finished: the group says so");
+});
+
+test("upgradeBadge / upgradeRowProgress: one chip per state; a queued download says Queued", () => {
+  const b = (state, t) => plugin._upgradeBadge({ state }, t);
+  assert.deepEqual(b("searching"), { label: "Searching", variant: "muted" });
+  assert.deepEqual(b("downloading", { state: "Queued, Remotely" }), { label: "Queued", variant: "warning" });
+  assert.deepEqual(b("downloading", { state: "InProgress" }), { label: "Downloading", variant: "accent" });
+  assert.deepEqual(b("ready"), { label: "Ready", variant: "success" });
+  assert.deepEqual(b("alternative"), { label: "Below target", variant: "warning" });
+  assert.deepEqual(b("failed"), { label: "Failed", variant: "error" });
+  assert.equal(plugin._upgradeBadge(null), null);
+  assert.equal(plugin._upgradeRowProgress({ state: "downloading" }, { state: "InProgress", size: 10, bytesTransferred: 5 }), 0.5);
+  assert.equal(plugin._upgradeRowProgress({ state: "ready" }, { state: "InProgress", size: 10, bytesTransferred: 5 }), null);
+});
+
+test("Downloads rows: a bar on the moving one, an Upgrade chip on a file fetched as one", async () => {
+  const p = loadPlugin();
+  const key = "c" + "\u0000" + "m\\C\\03 - Moving.flac";
+  const h = downloadsHost([
+    transfer("c", "m\\C\\03 - Moving.flac", "InProgress", { bytesTransferred: 5e6 }),
+    transfer("b", "m\\B\\02 - Waiting.flac", "Queued, Remotely")
+  ]);
+  h.store.tracked = { [key]: { upgrade: { trackId: 42 }, meta: {} } };
+  await p.activate(h.api);
+  try {
+    await p._refreshTransfers();
+    h.actions["main-tab"]({ tabId: "transfers" });
+    const lists = findNodes(lastView(h), (n) => n.type === "track-row-list");
+    const moving = lists[0].items[0];
+    assert.equal(moving.progress, 0.5);
+    assert.deepEqual(moving.badge, { label: "Upgrade", variant: "accent" });
+    const waiting = lists[1].items[0];
+    assert.equal(waiting.progress, null);
+    assert.equal(waiting.badge, undefined, "the group title already says Waiting");
+  } finally {
+    p.deactivate();
+  }
+});

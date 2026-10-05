@@ -5249,6 +5249,10 @@ function transferRows() {
       // A file still on its way (or one that never arrived) shows its format;
       // once it is here and tagged, its real cover takes over by name.
       imageUrl: playable ? undefined : transferTile(t, rec),
+      progress: transferRowProgress(t),
+      // The group title says the state; what it can't say is that this one
+      // was fetched to replace a library copy.
+      badge: rec && rec.upgrade ? { label: "Upgrade", variant: "accent" } : undefined,
       kind: "audio",
       actions: transferRowActions(t, rec, tier),
       action: playable ? "play-transfer" : undefined
@@ -5512,6 +5516,49 @@ function searchTab() {
   return { type: "layout", direction: "vertical", children: children };
 }
 
+// ---- row status (the host's track-row-list `badge` / `progress`) -----------------
+// Hosts after 1.0.90 draw a state chip at the start of a row's subtitle and a
+// thin bar under it; older hosts ignore both fields, which is why every row
+// still says the same thing in its subtitle text. A chip is only worth it where
+// rows of different states share a list (Upgrades) or a row is special within
+// its group (a download fetched as an upgrade) — under a "Downloading" group
+// title, a "Downloading" chip on every row would say it twice.
+
+// Pure: a transfer's bar, 0–1, while bytes are moving; null otherwise (no bar
+// at all rather than one stuck at 0 for a queued file).
+function transferRowProgress(t) {
+  var p = transferPhase(t && t.state);
+  if (p !== "downloading" && p !== "starting") return null;
+  return transferProgress(t);
+}
+
+// Pure: the chip on an Upgrades row, by state.
+var UPGRADE_BADGES = {
+  searching: { label: "Searching", variant: "muted" },
+  downloading: { label: "Downloading", variant: "accent" },
+  checking: { label: "Checking", variant: "accent" },
+  ready: { label: "Ready", variant: "success" },
+  alternative: { label: "Below target", variant: "warning" },
+  none: { label: "Nothing better", variant: "muted" },
+  failed: { label: "Failed", variant: "error" },
+  cancelled: { label: "Cancelled", variant: "muted" },
+  replaced: { label: "Replaced", variant: "success" },
+  gone: { label: "Not in library", variant: "muted" }
+};
+function upgradeBadge(e, t) {
+  if (!e) return null;
+  if (e.state === "downloading") {
+    var p = t ? transferPhase(t.state) : null;
+    if (p !== "downloading" && p !== "starting") return { label: "Queued", variant: "warning" };
+  }
+  return UPGRADE_BADGES[e.state] || null;
+}
+
+// Pure: an upgrade row's bar — the active download's, while it moves.
+function upgradeRowProgress(e, t) {
+  return e && e.state === "downloading" && t ? transferRowProgress(t) : null;
+}
+
 // Pure: which group of the Downloads tab a transfer sits in. Problems come
 // first so a failure can't hide thirty rows down; a finished file is the one
 // thing nobody needs to look at again.
@@ -5721,6 +5768,7 @@ function keptRows() {
       durationSecs: rec && rec.length != null ? rec.length : null,
       path: playable ? SCHEME + "://" + e.ref : null,
       kind: "audio",
+      badge: e.state === "kept" ? undefined : { label: "Downloading", variant: "accent" },
       actions: playable ? ["play-kept", "import-kept", "delete-kept"] : ["delete-kept"],
       action: playable ? "play-kept" : undefined,
       sortAt: e.lastUsedAt || e.at || 0
@@ -7673,10 +7721,15 @@ function upgradeSourceRows(e) {
     if (active) bits.push("downloading now");
     else if (tried) bits.push("tried");
     var rep = sharerLabel(sharers[c.username]);
+    var badge = active ? { label: "Downloading", variant: "accent" }
+      : tried ? { label: "Tried", variant: "muted" }
+      : !meetsQualityTarget(c, e.target) ? { label: "Below target", variant: "warning" }
+      : undefined;
     return {
       id: key + "#" + i,
       title: basenameRemote(c.filename),
       subtitle: bits.join("  ·  "),
+      badge: badge,
       cells: { quality: qualityLabel(c), size: c.size ? formatBytes(c.size) : undefined,
         availability: c.username + " · " + availabilityLabel(c) + (rep ? " · " + rep : "") },
       imageUrl: fileTile(c),
@@ -7723,6 +7776,8 @@ function upgradeRows(history) {
         id: upgradeKey(e.trackId),
         title: e.title,
         subtitle: upgradeLine(e, t),
+        badge: upgradeBadge(e, t) || undefined,
+        progress: upgradeRowProgress(e, t),
         album: e.album || undefined,
         duration: e.durationSecs != null ? formatDurationSecs(e.durationSecs) : undefined,
         durationSecs: e.durationSecs,
@@ -8528,6 +8583,9 @@ return {
   _qualityTier: qualityTier,
   _formatTile: formatTile,
   _transferGroup: transferGroup,
+  _transferRowProgress: transferRowProgress,
+  _upgradeBadge: upgradeBadge,
+  _upgradeRowProgress: upgradeRowProgress,
   _queueUpgrades: queueUpgrades,
   _batchUpgradeNote: batchUpgradeNote,
   _replaceAllReady: replaceAllReady,
