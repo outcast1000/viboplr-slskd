@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.15.0
+
+- **Thumbnails show the format.** Search results, folder cards, an
+  upgrade's Sources found and downloads still on their way now carry a small
+  tile with the file's format and quality — FLAC 16/44, FLAC 24/96, MP3 320,
+  M4A 256 — tinted by quality: violet for hi-res, blue for lossless, teal for
+  high-bitrate lossy, amber for lower rates, grey when the sharer reports
+  nothing. A folder mixing lossless and lossy files says MIX. These rows used
+  to show a blank square (folder cards had no picture at all). Finished
+  downloads, kept files and the Upgrades list keep their album covers.
+
 ## 0.14.0
 
 - **A pending upgrade is yours to steer.** While an upgrade is searching,
