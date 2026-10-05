@@ -6321,13 +6321,27 @@ function registerActions() {
 
   api.ui.onAction("upgrade-replace", function (data) {
     var ids = rowIds(data);
-    if (ids.length) openUpgradeReplace(ids[0]);
+    if (ids.length > 1 && canReplaceInPlace()) {
+      replaceAllReady(ids).catch(function (e) { console.error("slskd: replacing the selected upgrades failed:", e); });
+    } else if (ids.length) {
+      openUpgradeReplace(ids[0]);
+    }
+  });
+
+  api.ui.onAction("upgrade-replace-all", function () {
+    replaceAllReady(readyUpgradeKeys()).catch(function (e) { console.error("slskd: replacing the ready upgrades failed:", e); });
+  });
+
+  api.ui.onAction("upgrade-replace-stop", function () {
+    if (replaceWalk) replaceWalk.stop = true;
+    render();
   });
 
   api.ui.onAction("upgrade-take-alternative", function (data) {
     var ids = rowIds(data);
-    if (!ids.length) return;
-    takeUpgradeAlternative(ids[0]).catch(function (e) { console.error("slskd: taking the upgrade alternative failed:", e); });
+    for (var i = 0; i < ids.length; i++) {
+      takeUpgradeAlternative(ids[i]).catch(function (e) { console.error("slskd: taking the upgrade alternative failed:", e); });
+    }
   });
 
   // The interactive search the context menu used to open: the same filter,
@@ -6760,6 +6774,9 @@ function registerActions() {
   });
 
   api.contextMenu.onAction("slskd-upgrade", function (target) {
+    if (target && target.kind === "multi-track") {
+      return queueUpgrades(target.trackIds || []).catch(function (e) { console.error("slskd batch upgrade failed:", e); });
+    }
     return queueUpgrade(target).catch(function (e) { console.error("slskd upgrade failed:", e); });
   });
 
@@ -7060,6 +7077,110 @@ async function queueUpgrade(target) {
   render();
 }
 
+// Upgrade on a selection of library tracks. Each becomes an ordinary entry on
+// the Upgrades tab; the poll runs their searches one at a time (slskd allows
+// one search, and `upgradeSearchRunning` keeps upgrades from hogging it), so
+// a large batch simply takes a while and the Search tab stays usable.
+//
+// A batch differs from a single Upgrade in one way: nothing pops up when a
+// file is ready. Thirty Replace dialogs arriving at random over an hour would
+// be thirty interruptions, so batch entries wait at Ready with Replace… on
+// their rows and "Replace all ready…" on the tab, which walks the host's
+// compare dialogs one after another. Every replace still goes through that
+// dialog — the rule for Upgrade holds.
+//
+// Skipped, and said so in one notice: rows that aren't local files (nothing
+// to replace), ones already searching, downloading or ready (a ready file is
+// kept, not thrown away for a new search), and anything past the cap.
+var UPGRADE_BATCH_MAX = 100;
+
+async function queueUpgrades(trackIds) {
+  var ids = [];
+  var seen = {};
+  for (var i = 0; i < (trackIds || []).length; i++) {
+    var id = Number(trackIds[i]);
+    if (!isFinite(id) || seen[id]) continue;
+    seen[id] = 1;
+    ids.push(id);
+  }
+  activeTab = "upgrades";
+  api.ui.navigateToView(VIEW_ID);
+  if (!ids.length) {
+    api.ui.showNotification("Upgrade works on tracks in your library — none of the selected tracks is one.");
+    render();
+    return;
+  }
+  var over = Math.max(0, ids.length - UPGRADE_BATCH_MAX);
+  if (over) ids = ids.slice(0, UPGRADE_BATCH_MAX);
+
+  var started = [], notLocal = 0, missing = 0, already = 0;
+  for (var j = 0; j < ids.length; j++) {
+    var row = null;
+    try { row = await api.library.getTrackById(ids[j]); } catch (e) { console.error("slskd: could not read library track " + ids[j] + ":", e); }
+    if (!row) { missing++; continue; }
+    if (!row.path || String(row.path).indexOf("file://") !== 0) { notLocal++; continue; }
+    var prev = upgrades[upgradeKey(row.id)];
+    if (prev && (upgradeIsBusy(prev) || prev.state === "ready")) { already++; continue; }
+    var e = await beginUpgrade(row, { origin: "batch", deferred: true });
+    if (e) started.push(e);
+  }
+  if (started.length) {
+    focusedUpgrade = upgradeKey(started[0].trackId);
+    await saveUpgrades();
+    if (readiness.state === "ready") advanceUpgrades().catch(function (e) { console.error("slskd: advancing upgrades failed:", e); });
+    schedulePoll(true);
+  }
+  render();
+  var note = batchUpgradeNote(started.length, { notLocal: notLocal, missing: missing, already: already, over: over });
+  if (note) api.ui.showNotification(note);
+}
+
+// Pure: the one notice after a batch Upgrade, or null when every selected
+// track was started (the Upgrades tab filling up is the feedback then).
+function batchUpgradeNote(startedCount, skipped) {
+  var s = skipped || {};
+  var parts = [];
+  if (s.notLocal) parts.push(s.notLocal + (s.notLocal === 1 ? " isn't a local file" : " aren't local files"));
+  if (s.already) parts.push(s.already + (s.already === 1 ? " is already being upgraded" : " are already being upgraded"));
+  if (s.missing) parts.push(s.missing + (s.missing === 1 ? " isn't in your library" : " aren't in your library"));
+  if (s.over) parts.push(s.over + " over the limit of " + UPGRADE_BATCH_MAX + " at a time");
+  if (!parts.length) return null;
+  var skippedCount = (s.notLocal || 0) + (s.already || 0) + (s.missing || 0) + (s.over || 0);
+  var head = startedCount
+    ? "Upgrading " + startedCount + (startedCount === 1 ? " track" : " tracks") + ". "
+    : "Nothing to upgrade. ";
+  return head + "Skipped " + skippedCount + ": " + parts.join(", ") + ".";
+}
+
+// The ready upgrades, each through the host's compare dialog in turn. A
+// dialog answered "Keep current" leaves that one ready and moves on; Stop
+// (the tab's button while the walk runs) ends the walk after the open dialog.
+var replaceWalk = null;   // { stop: bool } while "Replace all ready" runs
+
+async function replaceAllReady(keys) {
+  if (replaceWalk || !canReplaceInPlace()) return;
+  replaceWalk = { stop: false };
+  render();
+  try {
+    for (var i = 0; i < keys.length; i++) {
+      if (replaceWalk.stop) break;
+      var e = upgrades[keys[i]];
+      if (!e || e.state !== "ready" || !e.file) continue;
+      await offerReplace(e);
+    }
+  } finally {
+    replaceWalk = null;
+    render();
+  }
+}
+
+function readyUpgradeKeys() {
+  return Object.keys(upgrades).filter(function (k) {
+    var e = upgrades[k];
+    return e && e.state === "ready" && e.file;
+  }).sort(function (a, b) { return (upgrades[a].createdAt || 0) - (upgrades[b].createdAt || 0); });
+}
+
 // Start (or restart) the automatic upgrade of one local library row. Returns
 // the entry, or null when one is already running for it. `origin` "user" is a
 // click in Viboplr: the view is already showing it, so no toast, and the
@@ -7067,7 +7188,9 @@ async function queueUpgrade(target) {
 // assistant tool) announces itself and leaves the replace to its caller.
 async function beginUpgrade(row, opts) {
   var key = upgradeKey(row.id);
-  var byUser = !!(opts && opts.origin === "user");
+  var origin = opts && (opts.origin === "user" || opts.origin === "batch") ? opts.origin : "assistant";
+  var byUser = origin !== "assistant";
+  var deferred = !!(opts && opts.deferred);   // a batch saves and advances once, at the end
   var open = { label: "Show", id: "open-upgrades" };
   if (upgradeIsBusy(upgrades[key])) {
     if (!byUser) api.ui.showNotification("“" + row.title + "” is already being upgraded.", { action: open });
@@ -7093,10 +7216,11 @@ async function beginUpgrade(row, opts) {
     active: null,
     file: null,
     replaceRequested: false,
-    origin: byUser ? "user" : "assistant",
+    origin: origin,
     createdAt: nowMs(),
     updatedAt: nowMs()
   };
+  if (deferred) return upgrades[key];
   await saveUpgrades();
   if (!byUser) {
     api.ui.showNotification(readiness.state === "ready"
@@ -7309,7 +7433,9 @@ async function advanceUpgradeCheck(e) {
   await saveUpgrades();
   // One more question, and only one: the host's Replace dialog, straight away
   // for an upgrade the user started here. An assistant's upgrade is replaced
-  // by the assistant; an older host gets the toast into its download modal.
+  // by the assistant; a batch's waits for "Replace all ready" (see
+  // queueUpgrades); an older host gets the toast into its download modal.
+  if (e.origin === "batch") return;
   if (e.origin !== "assistant" && canReplaceInPlace()) {
     offerReplace(e).catch(function (err) { console.error("slskd: offering the replace failed:", err); });
     return;
@@ -7757,9 +7883,18 @@ function upgradesTab() {
     }
     var pending = upgradeRows(false);
     if (pending.length) {
+      var ready = readyUpgradeKeys();
+      var bar = [];
+      if (replaceWalk) bar.push({ label: "Stop after this one", action: "upgrade-replace-stop", icon: "■" });
+      else if (ready.length > 1 && inPlace) bar.push({ label: "Replace all ready (" + ready.length + ")…", action: "upgrade-replace-all", variant: "accent", icon: "⇪" });
+      children.push({ type: "toolbar", title: "Pending", buttons: bar,
+        status: pending.length + (ready.length ? " · " + ready.length + " ready" : "") + (replaceWalk ? " · replacing one at a time" : "") });
       children.push({
         type: "track-row-list",
         items: pending,
+        // Selectable, so Cancel / Search again / Remove / Replace reach many
+        // at once from the selection bar (their handlers take every id).
+        selectable: true,
         showHeader: false,
         actions: [
           { id: "upgrade-show", label: "Details", icon: "☰" },
@@ -8393,6 +8528,9 @@ return {
   _qualityTier: qualityTier,
   _formatTile: formatTile,
   _transferGroup: transferGroup,
+  _queueUpgrades: queueUpgrades,
+  _batchUpgradeNote: batchUpgradeNote,
+  _replaceAllReady: replaceAllReady,
   _transfersSummary: transfersSummary,
   _plainTransferError: plainTransferError,
   _waitedFor: waitedFor,

@@ -85,6 +85,9 @@ each with the fix.
   or *Best available* (lossless when someone has it). When nothing meets the
   target, the row offers the best better copy it did find. *Choose myself…*
   opens the search, filtered to better files, so you can pick one by hand.
+  Select several tracks to upgrade them all (up to 100 at a time); their
+  searches run one after another, and finished ones wait at Ready until you
+  choose *Replace all ready…*, which shows Viboplr's compare dialog for each.
 - **Right-click → Soulseek: Fill missing tracks…** on an album: every
   folder found is compared with the tracks you already have, and **Fill**
   downloads just the ones you don't. "Show everything found" lifts either filter.

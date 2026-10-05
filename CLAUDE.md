@@ -55,7 +55,7 @@ call's shape.
 | URI scheme `slsk://` | `api.playback.onResolveStreamByUri` | plays a finished download |
 | Download provider `slskd-import` | `api.downloads.onResolveByUri` | "Add to library…" via the host modal |
 | Context menu `slskd-search` | track / album / artist | "Search…" (shown as "Soulseek: Search…") |
-| Context menu `slskd-upgrade` | track | "Upgrade" (shown as "Soulseek: Upgrade") — **automatic**: `queueUpgrade` adds an entry to the Upgrades tab, which finds, downloads and checks a better copy (see *Automatic upgrades* below); "Choose myself…" on the row opens the old interactive search (`startUpgrade`, filtered by `isUpgradeOver`). Both stamp the download `upgrade: { trackId }`, and "Compare & replace…" / the Downloads row's "Replace in library…" hand the host modal `libraryTrackId` |
+| Context menu `slskd-upgrade` | track, multi-track | "Upgrade" (shown as "Soulseek: Upgrade") — **automatic**: `queueUpgrade` adds an entry to the Upgrades tab, which finds, downloads and checks a better copy (see *Automatic upgrades* below); "Choose myself…" on the row opens the old interactive search (`startUpgrade`, filtered by `isUpgradeOver`). Both stamp the download `upgrade: { trackId }`, and "Compare & replace…" / the Downloads row's "Replace in library…" hand the host modal `libraryTrackId` |
 | Context menu `slskd-fill-album` | album | "Fill missing tracks…" (shown as "Soulseek: Fill missing tracks…") — folders compared against the album's library rows (`ownedTrackFor`); "Fill" downloads only the missing files |
 | Assistant tools | `status`, `search` (+ `upgradeFor`), `download`, `list_downloads` (+ `uri`), `upgrade`, `list_upgrades` | for the host's control API / MCP; uris are `toolUri` (percent-encoded), resolvers `decodeRef` them |
 
@@ -208,6 +208,15 @@ than by a long-running promise, because a stranger's queue can outlast a restart
   *Details* (points the panel at that upgrade), Replace / Take the best found / Search again
   when they apply, *Cancel* and Remove; *Try another sharer* and *Choose myself…* are on the
   panel only (UX review, 2026-10-06 — five verbs on a row is a row nobody reads).
+- **Upgrade on a selection** (`multi-track` → `queueUpgrades`, 2026-10-06): one entry per
+  local track, origin **`batch`**, at most `UPGRADE_BATCH_MAX` (100) per click; not-local,
+  missing, and already busy **or ready** rows are skipped (a ready file is kept) and named in one
+  notice (`batchUpgradeNote`; silent when nothing was skipped). Searches still run one at a time.
+  A batch entry **never raises the Replace dialog by itself** — thirty dialogs at random over an
+  hour would be thirty interruptions — it waits at Ready; *Replace all ready (N)…* on the
+  Pending bar (or Replace on a selection) walks the host's compare dialogs in turn
+  (`replaceAllReady`, *Stop after this one*). The pending list is selectable, so Cancel /
+  Search again / Remove / Take the best found reach many rows at once.
 - **History is folded.** The tab lists only pending upgrades; **replaced** / **gone** collapse
   into a "History · N finished" toolbar with *Show* / *Clear* (`showUpgradeHistory`, memory only).
 

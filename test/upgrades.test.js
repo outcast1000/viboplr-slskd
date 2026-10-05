@@ -849,3 +849,62 @@ test("assistant: upgrade refuses a track that isn't a local library file, and un
     p.deactivate();
   }
 });
+
+// --- Upgrade on a selection ---------------------------------------------------
+
+test("batchUpgradeNote: silent when everything started, one line naming each kind of skip otherwise", () => {
+  const n = plugin._batchUpgradeNote;
+  assert.equal(n(5, {}), null, "the Upgrades tab filling up is the feedback");
+  assert.equal(n(2, { notLocal: 1, already: 1, missing: 1 }),
+    "Upgrading 2 tracks. Skipped 3: 1 isn't a local file, 1 is already being upgraded, 1 isn't in your library.");
+  assert.equal(n(0, { notLocal: 2 }), "Nothing to upgrade. Skipped 2: 2 aren't local files.");
+  assert.equal(n(100, { over: 20 }), "Upgrading 100 tracks. Skipped 20: 20 over the limit of 100 at a time.");
+});
+
+test("integration: Upgrade on a selection starts one entry per local track and skips the rest, in one notice", async () => {
+  const p = loadPlugin();
+  const ready = { trackId: 45, title: "Lucky", state: "ready", file: { path: "/x.flac", quality: {} }, createdAt: 1, currentLabel: "MP3" };
+  const { h, library } = upgradeHost({ responses: [], store: { upgrades: { t45: ready } } });
+  library.tracks.push(
+    Object.assign({}, LIBRARY_MP3, { id: 43, title: "Airbag", path: "file:///Users/me/Music/RH/01 Airbag.mp3" }),
+    Object.assign({}, LIBRARY_MP3, { id: 44, title: "Streamed", path: "subsonic://server/44" }),
+    Object.assign({}, LIBRARY_MP3, { id: 45, title: "Lucky", path: "file:///Users/me/Music/RH/11 Lucky.mp3" })
+  );
+  await p.activate(h.api);
+  try {
+    await h.actions["ctx:slskd-upgrade"]({ kind: "multi-track", trackIds: [42, 43, 44, 45, 999, 42] });
+    const all = p._upgrades();
+    assert.equal(all.t42.origin, "batch");
+    assert.ok(all.t43, "the second local track");
+    assert.ok(!all.t44, "not a local file");
+    assert.equal(all.t45.state, "ready", "a ready file is kept, not thrown away for a new search");
+    assert.deepEqual(h.calls.notifications.slice(-1),
+      ["Upgrading 2 tracks. Skipped 3: 1 isn't a local file, 1 is already being upgraded, 1 isn't in your library."]);
+    assert.deepEqual(h.calls.navigated, ["slskd-browse"]);
+    const bar = findNodes(lastView(h), (n) => n.type === "toolbar" && n.title === "Pending")[0];
+    assert.ok(bar, "the pending bar");
+    const list = findNodes(lastView(h), (n) => n.type === "track-row-list")[0];
+    assert.ok(list.selectable, "many rows can be cancelled / removed at once");
+  } finally {
+    p.deactivate();
+  }
+});
+
+test("integration: a batch upgrade waits at Ready — no dialog by itself — and Replace all ready walks the dialogs", async () => {
+  const p = loadPlugin();
+  const { h, asked } = replacingHost(["replaced"]);
+  await p.activate(h.api);
+  try {
+    await h.actions["ctx:slskd-upgrade"]({ kind: "multi-track", trackIds: [42] });
+    await waitFor(() => entryOf(p) && entryOf(p).state === "downloading", 8000, "the download to start");
+    await pollUntil(p, () => entryOf(p).state === "ready", "ready");
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(asked.length, 0, "nothing pops up for a batch");
+
+    h.actions["upgrade-replace-all"]();
+    await waitFor(() => asked.length === 1, 2000, "the dialog, asked by the user");
+    await waitFor(() => entryOf(p).state === "replaced", 2000, "replaced");
+  } finally {
+    p.deactivate();
+  }
+});

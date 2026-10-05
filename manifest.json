@@ -114,7 +114,7 @@
       {
         "id": "slskd-upgrade",
         "label": "Upgrade",
-        "targets": ["track"]
+        "targets": ["track", "multi-track"]
       },
       {
         "id": "slskd-fill-album",
