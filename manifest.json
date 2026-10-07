@@ -1,17 +1,27 @@
 {
   "id": "slskd",
   "name": "Soulseek",
-  "version": "0.16.0",
+  "version": "0.17.0",
   "author": "Viboplr",
   "description": "Search and download from the Soulseek network via a slskd daemon: ranked results, whole-album grabs, live transfer progress, finished files that play and reach your library, and a playback fallback that fetches a missing track from Soulseek.",
   "minAppVersion": "1.0.85",
   "runtime": "worker",
-  "permissions": ["network:*", "exec:roadie", "files:read", "system:open", "library:read", "library:write", "playback:control"],
+  "permissions": [
+    "network:*",
+    "exec:roadie",
+    "files:read",
+    "system:open",
+    "library:read",
+    "library:write",
+    "playback:control"
+  ],
   "stability": "experimental",
   "homepage": "https://github.com/outcast1000/viboplr-slskd",
   "updateUrl": "https://github.com/outcast1000/viboplr-slskd/releases/latest/download/update.json",
   "icon": "M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0M11 15.4V7.9l5-1.3v2.3l-5 1.3M11 15.4a2 2 0 1 1-4 0 2 2 0 0 1 4 0",
-  "viewHeader": { "subtitle": "Search and download from the Soulseek network" },
+  "viewHeader": {
+    "subtitle": "Search and download from the Soulseek network"
+  },
   "binaryDependencies": [
     {
       "name": "roadie",
@@ -19,17 +29,50 @@
     }
   ],
   "apiUsage": [
-    { "api": "network.fetch", "reason": "Talk to your slskd daemon's REST API" },
-    { "api": "system.getDependency", "reason": "See whether Viboplr has Roadie, which can install slskd for you" },
-    { "api": "system.exec", "reason": "Ask Roadie to install or start slskd (it asks you first), and read the address and key it gives Viboplr" },
-    { "api": "storage.set", "reason": "Remember the slskd address, API key, preferences and which downloads this plugin started" },
-    { "api": "playback.onResolveStreamByUri", "reason": "Play finished Soulseek downloads straight from slskd's downloads folder" },
-    { "api": "playback.onStreamResolve", "reason": "Fetch a track from Soulseek when it has no playable source of its own (the Playback fallback in Settings → Providers)" },
-    { "api": "downloads.onResolveByUri", "reason": "Add a finished download to a collection through Viboplr's own download modal (tags and cover art written)" },
-    { "api": "downloads.onResolveByMetadata", "reason": "Download a track the Playback fallback played — copies the file it already fetched, never searches again" },
-    { "api": "system.readAudioTags", "reason": "Read title, artist and album out of a finished file instead of guessing from its name" },
-    { "api": "collections.resync", "reason": "Rescan your library when a download finishes inside one of your collections" },
-    { "api": "library.getTracks", "reason": "Read your copy's quality before offering an upgrade, and an album's tracks to tell which ones you're missing" }
+    {
+      "api": "network.fetch",
+      "reason": "Talk to your slskd daemon's REST API"
+    },
+    {
+      "api": "system.getDependency",
+      "reason": "See whether Viboplr has Roadie, which can install slskd for you"
+    },
+    {
+      "api": "system.exec",
+      "reason": "Ask Roadie to install or start slskd (it asks you first), and read the address and key it gives Viboplr"
+    },
+    {
+      "api": "storage.set",
+      "reason": "Remember the slskd address, API key, preferences and which downloads this plugin started"
+    },
+    {
+      "api": "playback.onResolveStreamByUri",
+      "reason": "Play finished Soulseek downloads straight from slskd's downloads folder"
+    },
+    {
+      "api": "playback.onStreamResolve",
+      "reason": "Fetch a track from Soulseek when it has no playable source of its own (the Playback fallback in Settings → Providers)"
+    },
+    {
+      "api": "downloads.onResolveByUri",
+      "reason": "Add a finished download to a collection through Viboplr's own download modal (tags and cover art written)"
+    },
+    {
+      "api": "downloads.onResolveByMetadata",
+      "reason": "Download a track the Playback fallback played — copies the file it already fetched, never searches again"
+    },
+    {
+      "api": "system.readAudioTags",
+      "reason": "Read title, artist and album out of a finished file instead of guessing from its name"
+    },
+    {
+      "api": "collections.resync",
+      "reason": "Rescan your library when a download finishes inside one of your collections"
+    },
+    {
+      "api": "library.getTracks",
+      "reason": "Read your copy's quality before offering an upgrade, and an album's tracks to tell which ones you're missing"
+    }
   ],
   "contributes": {
     "assistant": {
@@ -45,11 +88,26 @@
           "inputSchema": {
             "type": "object",
             "properties": {
-              "query": { "type": "string", "description": "Free text — artist, album and/or track. Soulseek matches on file and folder names" },
-              "limit": { "type": "number", "description": "1-100, default 25" },
-              "durationSecs": { "type": "number", "description": "Expected track length; candidates more than 5s off are dropped (catches mislabeled files)" },
-              "upgradeFor": { "type": "number", "description": "Library track id of a LOCAL file to upgrade: query and duration default to that track, and only results that beat its quality are returned. A download from this search is stamped as that track's upgrade" },
-              "showAll": { "type": "boolean", "description": "With upgradeFor: return every result, each flagged better true/false" }
+              "query": {
+                "type": "string",
+                "description": "Free text — artist, album and/or track. Soulseek matches on file and folder names"
+              },
+              "limit": {
+                "type": "number",
+                "description": "1-100, default 25"
+              },
+              "durationSecs": {
+                "type": "number",
+                "description": "Expected track length; candidates more than 5s off are dropped (catches mislabeled files)"
+              },
+              "upgradeFor": {
+                "type": "number",
+                "description": "Library track id of a LOCAL file to upgrade: query and duration default to that track, and only results that beat its quality are returned. A download from this search is stamped as that track's upgrade"
+              },
+              "showAll": {
+                "type": "boolean",
+                "description": "With upgradeFor: return every result, each flagged better true/false"
+              }
             }
           }
         },
@@ -59,9 +117,17 @@
           "inputSchema": {
             "type": "object",
             "properties": {
-              "ids": { "type": "array", "items": { "type": "string" }, "description": "Result ids from search. Pass every file of a folder to grab a whole album" }
+              "ids": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Result ids from search. Pass every file of a folder to grab a whole album"
+              }
             },
-            "required": ["ids"]
+            "required": [
+              "ids"
+            ]
           }
         },
         {
@@ -74,10 +140,25 @@
           "inputSchema": {
             "type": "object",
             "properties": {
-              "trackId": { "type": "number", "description": "Library track id" },
-              "action": { "type": "string", "enum": ["start", "retry", "take_alternative", "cancel", "remove"], "description": "Default start" }
+              "trackId": {
+                "type": "number",
+                "description": "Library track id"
+              },
+              "action": {
+                "type": "string",
+                "enum": [
+                  "start",
+                  "retry",
+                  "take_alternative",
+                  "cancel",
+                  "remove"
+                ],
+                "description": "Default start"
+              }
             },
-            "required": ["trackId"]
+            "required": [
+              "trackId"
+            ]
           }
         },
         {
@@ -109,17 +190,26 @@
       {
         "id": "slskd-search",
         "label": "Search…",
-        "targets": ["track", "album", "artist"]
+        "targets": [
+          "track",
+          "album",
+          "artist"
+        ]
       },
       {
         "id": "slskd-upgrade",
         "label": "Upgrade",
-        "targets": ["track", "multi-track"]
+        "targets": [
+          "track",
+          "multi-track"
+        ]
       },
       {
         "id": "slskd-fill-album",
         "label": "Fill missing tracks…",
-        "targets": ["album"]
+        "targets": [
+          "album"
+        ]
       }
     ]
   }

@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.17.0
+
+- **State at a glance.** Rows on Upgrades and Downloads now carry a short
+  state chip, such as Searching, Queued, Downloading, Ready, Below target or
+  Failed, and a progress bar while a file is moving. Upgrade files are marked
+  on the Downloads tab. Needs Viboplr 1.0.91 or newer to show them; older
+  versions keep the same facts in the row's text.
+- **Test server, for developing the plugin.** A fake slskd
+  (`npm run fake-slskd` in the plugin's repository) can stand in for slskd
+  where the Soulseek network can't be reached. When one is running,
+  Settings shows a **Test server** section with a switch. Your own slskd
+  connection is kept, and its downloads are kept apart from the test
+  server's. Nobody else sees the section.
+
 ## 0.16.0
 
 - **Upgrade many tracks at once.** Select several tracks and choose
