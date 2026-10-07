@@ -136,8 +136,39 @@ var settings = {
   fallbackMaxAgeDays: 0,    // automatic cleanup: delete fallback files not played for this many days (0 = off)
   upgradeTarget: "flac16", // a UPGRADE_TARGETS key — what an automatic upgrade looks for
   batchSeq: 0,
-  managedBy: null         // null | "roadie" — the address/key came from Roadie and follow it
+  managedBy: null,        // null | "roadie" — the address/key came from Roadie and follow it
+  debugServer: false,     // talk to the fake slskd (npm run fake-slskd) instead — see "Test server"
+  debugUrl: "http://127.0.0.1:5039"
 };
+
+// ---------------------------------------------------------------------------
+// Test server
+// ---------------------------------------------------------------------------
+// The repo's fake slskd (`npm run fake-slskd`, docs/fake-slskd.md) stands in
+// for slskd where Soulseek can't be reached. Switching to it leaves the real
+// address and key untouched — `conn()` is what every request and every
+// readiness surface reads — and keeps a SEPARATE copy of the state that only
+// means something for one server (`stateKey`): the fake's transfer list holds
+// none of the real downloads, and reading it as the real one would have the
+// plugin forget them as "vanished".
+var DEBUG_STATE_PREFIX = "debug.";
+var debugDetected = null;   // null = not checked; else { mode } from the fake's X-Fake-Slskd header, or false
+
+function conn() {
+  if (!settings.debugServer) return settings;
+  return Object.assign({}, settings, {
+    url: settings.debugUrl || "http://127.0.0.1:5039",
+    apiKey: settings.apiKey || "fake-slskd",
+    insecure: false,
+    managedBy: null,
+    tierOverride: null,
+    debug: true
+  });
+}
+
+function stateKey(key) {
+  return settings.debugServer ? DEBUG_STATE_PREFIX + key : key;
+}
 
 var readiness = { state: "unconfigured", detail: null, username: null, version: null, shareCount: null };
 // slskd's own word for its Soulseek connection ("Connecting", "Connected,
@@ -1432,7 +1463,7 @@ function fallbackTotals(index) {
 // slskd client
 // ---------------------------------------------------------------------------
 function baseUrl() {
-  return String(settings.url || "").replace(/\/+$/, "");
+  return String(conn().url || "").replace(/\/+$/, "");
 }
 
 // slskd returns a bare JSON string for most failures, e.g.
@@ -1457,13 +1488,13 @@ async function slskd(method, path, body) {
   var url = baseUrl() + path;
   var init = {
     method: method,
-    headers: { "X-API-Key": settings.apiKey || "", "Accept": "application/json" }
+    headers: { "X-API-Key": conn().apiKey || "", "Accept": "application/json" }
   };
   if (body !== undefined) {
     init.headers["Content-Type"] = "application/json";
     init.body = JSON.stringify(body);
   }
-  if (settings.insecure) init.insecure = true;
+  if (conn().insecure) init.insecure = true;
 
   var res = await api.network.fetch(url, init);
   var text = "";
@@ -1474,7 +1505,8 @@ async function slskd(method, path, body) {
 }
 
 async function probe() {
-  if (!settings.url || !settings.apiKey) return { kind: "unconfigured" };
+  var c = conn();
+  if (!c.url || !c.apiKey) return { kind: "unconfigured" };
   var res;
   try {
     res = await slskd("GET", "/api/v0/application");
@@ -1620,9 +1652,9 @@ function viewHeaderFor(rd, cfg, r, tierNow, setup) {
   if (st === "unconfigured") {
     return { subtitle: "Search and download from the Soulseek network", status: { variant: "muted", label: "Not set up" }, actions: [] };
   }
-  var where = (roadieSlskd ? "slskd from Roadie · " : "") + url;
+  var where = (cfg.debug ? "Test server · " : (roadieSlskd ? "slskd from Roadie · " : "")) + url;
   if (st === "ready") {
-    var sub = "Connected as " + (rd.username || "?") + (rd.version ? " · slskd " + rd.version : "");
+    var sub = (cfg.debug ? "Test server · " : "") + "Connected as " + (rd.username || "?") + (rd.version ? " · slskd " + rd.version : "");
     if (tierNow !== "local") sub += " · on another computer";
     return { subtitle: sub, status: { variant: "success", label: "Ready" }, actions: open };
   }
@@ -1641,7 +1673,7 @@ function viewHeaderFor(rd, cfg, r, tierNow, setup) {
 var lastViewHeader = null;
 function pushViewHeader() {
   if (!api || !api.ui || typeof api.ui.setViewHeader !== "function") return; // older hosts
-  var header = viewHeaderFor(readiness, settings, roadie, tier, roadie.setup);
+  var header = viewHeaderFor(readiness, conn(), roadie, tier, roadie.setup);
   var key = JSON.stringify(header);
   if (key === lastViewHeader) return;
   lastViewHeader = key;
@@ -1668,7 +1700,7 @@ async function refreshReadiness() {
   // The first run looks for slskd by itself first; Roadie comes in only once
   // nothing was found (it is then one way to install slskd).
   var firstRunLooking = p.kind === "unconfigured" && discovery.state !== "none";
-  if (!firstRunLooking && (p.kind !== "ok" || settings.managedBy === "roadie" || p.isLoggedIn === false)) {
+  if (!settings.debugServer && !firstRunLooking && (p.kind !== "ok" || settings.managedBy === "roadie" || p.isLoggedIn === false)) {
     try {
       await probeRoadie();
       if (await reconcileRoadie(p.kind)) p = await probe();
@@ -1684,7 +1716,8 @@ async function refreshReadiness() {
     version: next.version,
     shareCount: next.shareCount
   };
-  tier = detectTier(settings.url, settings.tierOverride);
+  tier = detectTier(conn().url, conn().tierOverride);
+  if (!settings.debugServer && !debugDetected) await detectDebugServer();
 
   api.ui.setBadge(VIEW_ID, badgeFor(next.state));
 
@@ -1696,7 +1729,7 @@ async function refreshReadiness() {
   }
 
   if (next.state === "ready" && !downloadsDir) await loadDownloadsDir();
-  if (next.state === "ready" || settings.managedBy === "roadie") await loadCollections();
+  if (next.state === "ready" || conn().managedBy === "roadie") await loadCollections();
   await rescanSharesIfPending();
   await loadSlskdShared();
 
@@ -1704,8 +1737,8 @@ async function refreshReadiness() {
   // read as "this plugin is broken", so say it once, informationally.
   if (next.state === "ready" && readiness.shareCount === 0 && !sharesWarned) {
     sharesWarned = true;
-    await api.storage.set("sharesWarned", true);
-    var canShare = settings.managedBy === "roadie" && shareGap(localCollections, roadie.tool).length > 0;
+    await api.storage.set(stateKey("sharesWarned"), true);
+    var canShare = conn().managedBy === "roadie" && shareGap(localCollections, roadie.tool).length > 0;
     api.ui.showNotification("slskd isn't sharing any folders. Soulseek prioritises users who share, so downloads may be slow or queue for a long time.",
       canShare ? { action: { label: "Share collections", id: "roadie-share-collections" } } : undefined);
   }
@@ -1970,7 +2003,7 @@ async function enqueueBatch(username, files, label, subdir, recExtra) {
     tracked[username + KEY_SEP + files[i].filename] = rec;
     queued.push(files[i]);
   }
-  await api.storage.set("tracked", tracked);
+  await api.storage.set(stateKey("tracked"), tracked);
   schedulePoll(true);
   return { queued: queued, failures: failures };
 }
@@ -2113,7 +2146,7 @@ async function reconcilePendingFallbacks() {
   }
   if (changed) {
     await saveFallbackIndex();
-    await api.storage.set("tracked", tracked);
+    await api.storage.set(stateKey("tracked"), tracked);
   }
 }
 
@@ -2141,7 +2174,7 @@ async function readTagsForResolved() {
         rec.meta = mergeMeta(rec.meta, tags);
         rec.tagsRead = true;
       }
-      return api.storage.set("tracked", tracked);
+      return api.storage.set(stateKey("tracked"), tracked);
     })
     .catch(function (e) {
       console.error("slskd: could not read tags for finished files:", e);
@@ -2263,7 +2296,7 @@ async function resolveTransferPath(transfer, rec) {
   if (!hit) return null;
   rec.resolvedPath = absolutePath(downloadsDir, hit.fullName);
   tracked[trackKeyOf(transfer)] = rec;
-  await api.storage.set("tracked", tracked);
+  await api.storage.set(stateKey("tracked"), tracked);
   return rec.resolvedPath;
 }
 
@@ -2363,7 +2396,7 @@ function finishResolve(rec, outcome, message, path) {
   api.log(outcome === "played" || outcome === "cached" ? "info" : "warn",
     "fallback: " + outcome + (message ? " — " + message : "") + " (total " + Math.round(rec.totalMs / 100) / 10 + "s)", "slskd");
   resolveHistory = withResolve(resolveHistory, historyEntry(rec), RESOLVE_HISTORY_MAX);
-  api.storage.set("resolveHistory", resolveHistory).catch(function (e) { console.error("slskd: couldn't save the fallback history:", e); });
+  api.storage.set(stateKey("resolveHistory"), resolveHistory).catch(function (e) { console.error("slskd: couldn't save the fallback history:", e); });
   render();
 }
 
@@ -2453,7 +2486,7 @@ function recordSharer(username, event, bytes) {
   // says nothing about the sharer, so don't let it sink their standing.
   if (event === "failed" && misconfiguredSlskdDir(downloadsDir, incompleteDir)) return;
   noteSharer(sharers, username, event, bytes);
-  api.storage.set("sharers", sharers).catch(function (e) { console.error("slskd: couldn't save the sharer ledger:", e); });
+  api.storage.set(stateKey("sharers"), sharers).catch(function (e) { console.error("slskd: couldn't save the sharer ledger:", e); });
 }
 
 // Count one transfer's outcome exactly once. `owner` is true for the race
@@ -2468,7 +2501,7 @@ function ledgerCount(key, username, event, bytes, owner) {
 
 async function saveFallbackIndex() {
   try {
-    await api.storage.set("fallback", fallback);
+    await api.storage.set(stateKey("fallback"), fallback);
   } catch (e) {
     console.error("slskd: couldn't save the fallback index:", e);
   }
@@ -2656,7 +2689,7 @@ async function raceSharers(rec, matches, ctx) {
 
   async function persist() {
     await saveFallbackIndex();
-    await api.storage.set("tracked", tracked);
+    await api.storage.set(stateKey("tracked"), tracked);
   }
 
   // Queue the next candidate from a sharer not yet tried. False when there is
@@ -2977,7 +3010,7 @@ async function deleteFallbackFile(fkey) {
   }
   delete tracked[entry.ref];
   delete fallback[fkey];
-  await api.storage.set("tracked", tracked);
+  await api.storage.set(stateKey("tracked"), tracked);
   await saveFallbackIndex();
 }
 
@@ -5999,7 +6032,7 @@ function render() {
   var body = [];
   // Not ready, like yt-dlp without its binary: the view stays, the problem
   // is one line on top with the click that fixes it.
-  var banner = readinessBanner(st, settings, roadie, signinWhy, mainTab === "settings");
+  var banner = readinessBanner(st, conn(), roadie, signinWhy, mainTab === "settings");
   if (banner) {
     body.push(banner);
     body = body.concat(roadieJobNodes());
@@ -6075,12 +6108,14 @@ function statusChecklist(rd, cfg, currentTier, col, share, ago) {
 }
 
 function settingsTab() {
-  var children = fixNodes(readiness.state, settings, roadie, readiness.detail, signinWhy);
+  var children = fixNodes(readiness.state, conn(), roadie, readiness.detail, signinWhy);
   if (readiness.state === "ready") {
-    var share = settings.managedBy === "roadie" && roadieCanShareDirs(roadie.tool) ? "roadie" : "slskd";
-    children.push(statusChecklist(readiness, settings, tier, tier === "local" && downloadsDir ? downloadsCollection() : null,
+    var share = conn().managedBy === "roadie" && roadieCanShareDirs(roadie.tool) ? "roadie" : "slskd";
+    children.push(statusChecklist(readiness, conn(), tier, tier === "local" && downloadsDir ? downloadsCollection() : null,
       share, checkedAgo(connCheck.at, Date.now())));
   }
+  var testServer = testServerSection(settings, debugDetected);
+  if (testServer) children.push(testServer);
   children.push(connectionSection());
   var webPage = webPageSection();
   if (webPage) children.push(webPage);
@@ -6275,7 +6310,7 @@ function registerActions() {
 
   api.ui.onAction("clear-resolve-history", function () {
     resolveHistory = [];
-    api.storage.set("resolveHistory", resolveHistory).catch(function (e) { console.error("slskd: couldn't clear the fallback history:", e); });
+    api.storage.set(stateKey("resolveHistory"), resolveHistory).catch(function (e) { console.error("slskd: couldn't clear the fallback history:", e); });
     render();
   });
 
@@ -6800,11 +6835,27 @@ function registerActions() {
   });
   api.ui.onAction("reset-sharers", function () {
     sharers = {};
-    api.storage.set("sharers", sharers).catch(function (e) { console.error("slskd: couldn't reset the sharer ledger:", e); });
+    api.storage.set(stateKey("sharers"), sharers).catch(function (e) { console.error("slskd: couldn't reset the sharer ledger:", e); });
     render();
     renderSettings();
   });
   api.ui.onAction("set-insecure", function (data) { saveSetting("insecure", !!(data && data.value)); });
+  api.ui.onAction("set-debug-server", function (data) {
+    switchServer(!!(data && data.value)).catch(function (e) { console.error("slskd: switching server failed:", e); });
+  });
+  api.ui.onAction("set-debug-url", function (data) {
+    var v = data && typeof data.value === "string" ? data.value.trim() : "";
+    settings.debugUrl = v || "http://127.0.0.1:5039";
+    api.storage.set("debugUrl", settings.debugUrl).catch(function (e) { console.error("slskd: couldn't save debugUrl:", e); });
+    debugDetected = null;
+    if (settings.debugServer) {
+      downloadsDir = null;
+      incompleteDir = null;
+      refreshReadiness().catch(function (e) { console.error("slskd probe failed:", e); });
+    } else {
+      detectDebugServer().then(renderSettings).catch(function (e) { console.error("slskd: test server check failed:", e); });
+    }
+  });
   api.ui.onAction("set-local", function (data) {
     saveSetting("tierOverride", (data && data.value) ? "local" : "remote");
   });
@@ -7046,7 +7097,7 @@ function upgradesNeedPoll() {
 }
 
 async function saveUpgrades() {
-  await api.storage.set("upgrades", upgrades);
+  await api.storage.set(stateKey("upgrades"), upgrades);
 }
 
 function setUpgradeState(e, state, message) {
@@ -7373,7 +7424,7 @@ async function abandonUpgradeAttempt(e, t, reason, drop) {
   if (drop && t) await dropStalled(t);
   if (drop) delete tracked[a.key];
   e.active = null;
-  await api.storage.set("tracked", tracked);
+  await api.storage.set(stateKey("tracked"), tracked);
   await startNextUpgradeCandidate(e);
 }
 
@@ -7470,7 +7521,7 @@ async function advanceUpgradeCheck(e) {
     e.file = null;
     e.active = null;
     e.lastRejected = verdict.note;
-    await api.storage.set("tracked", tracked);
+    await api.storage.set(stateKey("tracked"), tracked);
     await startNextUpgradeCandidate(e);
     if (e.state === "failed") e.message = "No file held up (" + verdict.note + ")";
     await saveUpgrades();
@@ -7587,7 +7638,7 @@ async function removeUpgrade(key) {
     if (t && transferPhase(t.state) !== "succeeded") {
       await dropStalled(t);
       delete tracked[e.active.key];
-      await api.storage.set("tracked", tracked);
+      await api.storage.set(stateKey("tracked"), tracked);
     }
   }
   delete upgrades[key];
@@ -7645,7 +7696,7 @@ async function dropActiveUpgradeTransfer(e) {
   if (t && transferPhase(t.state) === "succeeded") return;
   if (t) await dropStalled(t);
   delete tracked[a.key];
-  await api.storage.set("tracked", tracked);
+  await api.storage.set(stateKey("tracked"), tracked);
 }
 
 // "Cancel" on a pending upgrade: stop the search or the download and rest the
@@ -8274,7 +8325,8 @@ function registerAssistantTools() {
       detail: readiness.detail || null,
       soulseekUsername: readiness.username || null,
       slskdVersion: readiness.version || null,
-      slskdAddress: settings.url || null,
+      slskdAddress: conn().url || null,
+      testServer: !!settings.debugServer,
       sharesAnything: readiness.shareCount == null ? null : readiness.shareCount > 0,
       slskdOnThisComputer: tier === "local",
       downloadsFolder: downloadsDir || null,
@@ -8430,7 +8482,7 @@ function saveSetting(key, value) {
       incompleteDir = null;
       refreshReadiness().catch(function (e) { console.error("slskd probe failed:", e); });
     } else {
-      tier = detectTier(settings.url, settings.tierOverride);
+      tier = detectTier(conn().url, conn().tierOverride);
       render();
       renderSettings();
     }
@@ -8460,7 +8512,7 @@ function schedulePoll(fast) {
 // Lifecycle
 // ---------------------------------------------------------------------------
 async function loadSettings() {
-  var keys = ["url", "apiKey", "tierOverride", "insecure", "preferredFormats", "fallbackQuality", "fallbackMaxGb", "fallbackMaxAgeDays", "upgradeTarget", "batchSeq", "managedBy"];
+  var keys = ["url", "apiKey", "tierOverride", "insecure", "preferredFormats", "fallbackQuality", "fallbackMaxGb", "fallbackMaxAgeDays", "upgradeTarget", "batchSeq", "managedBy", "debugServer", "debugUrl"];
   for (var i = 0; i < keys.length; i++) {
     try {
       var v = await api.storage.get(keys[i]);
@@ -8469,19 +8521,36 @@ async function loadSettings() {
       console.error("slskd: couldn't read setting " + keys[i] + ":", e);
     }
   }
+  await loadServerState();
+}
+
+// The state that belongs to ONE slskd (see "Test server"): read under the
+// current server's keys, and reset first so a switch never carries the old
+// server's records across.
+async function loadServerState() {
+  sharesWarned = false;
+  tracked = {};
+  fallback = {};
+  sharers = {};
+  upgrades = {};
+  resolveHistory = [];
   try {
-    var w = await api.storage.get("sharesWarned");
+    var w = await api.storage.get(stateKey("sharesWarned"));
     sharesWarned = !!w;
-    var t = await api.storage.get("tracked");
+    var t = await api.storage.get(stateKey("tracked"));
     if (t && typeof t === "object") tracked = t;
-    var fb = await api.storage.get("fallback");
+    var fb = await api.storage.get(stateKey("fallback"));
     if (fb && typeof fb === "object") fallback = fb;
-    var sh = await api.storage.get("sharers");
+    var sh = await api.storage.get(stateKey("sharers"));
     if (sh && typeof sh === "object") sharers = sh;
-    var up = await api.storage.get("upgrades");
+    var up = await api.storage.get(stateKey("upgrades"));
     if (up && typeof up === "object") upgrades = up;
-    var hist = await api.storage.get("resolveHistory");
+    var hist = await api.storage.get(stateKey("resolveHistory"));
     if (Array.isArray(hist)) resolveHistory = hist.slice(0, RESOLVE_HISTORY_MAX);
+  } catch (e) {
+    console.error("slskd: couldn't read stored state:", e);
+  }
+  try {
     var rs = await api.storage.get("recentSearches");
     if (Array.isArray(rs)) recentSearches = rs.filter(function (q) { return typeof q === "string" && q; }).slice(0, RECENT_SEARCH_MAX);
   } catch (e) {
@@ -8489,10 +8558,77 @@ async function loadSettings() {
   }
 }
 
+// Is a fake slskd answering at the test address? It marks every answer with
+// X-Fake-Slskd (generated / replay / record), which is what keeps the Test
+// server row out of sight for everyone who isn't running one. One short
+// localhost request; a refused connection answers at once.
+async function detectDebugServer() {
+  var url = String(settings.debugUrl || "").replace(/\/+$/, "");
+  if (!url) { debugDetected = false; return; }
+  try {
+    var res = await api.network.fetch(url + "/api/v0/session/enabled", { method: "GET", timeoutMs: 1500, headers: { "Accept": "application/json" } });
+    var mode = res && res.headers ? res.headers["x-fake-slskd"] : null;
+    debugDetected = mode ? { mode: String(mode) } : false;
+  } catch (e) {
+    debugDetected = false;
+  }
+}
+
+// Pure: the "Test server" section — only while a fake answers or the switch is on.
+function testServerSection(cfg, detected) {
+  if (!cfg.debugServer && !detected) return null;
+  var mode = detected && detected.mode ? detected.mode : null;
+  var what = mode === "replay" ? "replaying a recording" : (mode === "record" ? "recording a real slskd" : (mode ? "generated results" : null));
+  return { type: "section", title: "Test server", children: [
+    { type: "settings-row", label: "Use the test server",
+      description: cfg.debugServer
+        ? "On: searches and downloads go to the fake slskd" + (what ? " (" + what + ")" : "") + ". Your own slskd's address and key are kept, and its downloads come back when you switch off."
+        : "A fake slskd is running" + (what ? " (" + what + ")" : "") + ". Switch to it to test without the Soulseek network. Its downloads are kept apart from your real ones.",
+      control: { type: "toggle", label: "", action: "set-debug-server", checked: !!cfg.debugServer } },
+    { type: "settings-row", label: "Test server address", description: "Where `npm run fake-slskd` listens.",
+      control: { type: "text-input", placeholder: "http://127.0.0.1:5039", action: "set-debug-url", value: cfg.debugUrl || "" } }
+  ] };
+}
+
+// Switch between the user's slskd and the test server. Everything held in
+// memory about the old server goes; its stored state stays under its own keys.
+async function switchServer(on) {
+  if (!!settings.debugServer === !!on) return;
+  settings.debugServer = !!on;
+  try {
+    await api.storage.set("debugServer", settings.debugServer);
+  } catch (e) {
+    console.error("slskd: couldn't save debugServer:", e);
+  }
+  searchGen++;
+  search = { query: "", id: null, running: false, responseCount: 0, fileCount: 0, matchCount: 0, folderCount: 0, results: [], folders: [], error: null, sortColumn: null, sortDir: "desc", mode: null };
+  transfers = [];
+  toolResults = {};
+  toolMode = null;
+  knownDone = {};
+  ledgerSeen = {};
+  completionsSeeded = false;
+  tagsPending = {};
+  lastResolve = null;
+  replaceOffers = {};
+  focusedUpgrade = null;
+  lastReadyUpgrade = null;
+  downloadsDir = null;
+  incompleteDir = null;
+  lastServerState = null;
+  signinWhy = null;
+  slskdShared = null;
+  readiness = { state: "connecting", detail: null, username: null, version: null, shareCount: null };
+  await loadServerState();
+  api.log("info", on ? "switched to the test server at " + conn().url : "switched back to slskd at " + (settings.url || "(not set)"), "slskd");
+  await refreshReadiness();
+  schedulePoll(true);
+}
+
 async function activate(hostApi) {
   api = hostApi;
   await loadSettings();
-  tier = detectTier(settings.url, settings.tierOverride);
+  tier = detectTier(conn().url, conn().tierOverride);
 
   registerActions();
   registerAssistantTools();
@@ -8578,6 +8714,7 @@ return {
   deactivate: deactivate,
 
   // Exposed for the test harness.
+  _testServerSection: testServerSection,
   _b64encode: b64encode,
   _hasFlag: hasFlag,
   _qualityTier: qualityTier,

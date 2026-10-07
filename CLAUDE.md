@@ -309,6 +309,24 @@ Useful calls (`Authorization: Bearer <token>`):
 The installed plugin is the released one, not this checkout — a code change needs a
 release and an update from Viboplr's Extensions view before a live run reflects it.
 
+**Without a reachable Soulseek network** (the owner's work Mac is behind a VPN that blocks
+it): `npm run fake-slskd` is a local slskd stand-in, either with deterministic generated
+results and scenarios (`--scenario vpn-blocked`, `slow`, `peer-fails`, …) or replaying an
+anonymised recording of a real slskd made off the VPN (`--record --upstream …`, then
+`--replay DIR`). The plugin switches to it from Settings → **Test server** (`settings.debugServer`,
+`debugUrl`), a row shown only while a fake answers at that address (`X-Fake-Slskd` header) or
+the switch is on. Every request and readiness surface reads **`conn()`** — the effective
+connection — never `settings.url` / `apiKey` / `insecure` directly; the per-server state
+(`tracked`, `fallback`, `sharers`, `upgrades`, `resolveHistory`, `sharesWarned`) is stored
+under **`stateKey(k)`** (`debug.` prefix on the test server), so the fake's transfer list can
+never make the plugin forget a real download. New per-server state goes through `stateKey`
+and is reset in `loadServerState`; new reads of the address go through `conn()`.
+Code: `test/harness/fakeSlskd.js` (server) + `slskdRecording.js` (anonymiser, recorder,
+replay); `test/fakeSlskd.test.js` drives the real plugin against it, record → replay
+included. Usage and the anonymising rules: `docs/fake-slskd.md`. When the plugin starts
+calling a new slskd endpoint, teach the fake to answer it too — its catch-all 404 names
+the method and path it didn't recognise.
+
 ## Releasing
 
 1. Add a `## <version>` section at the top of `CHANGELOG.md` (it becomes `update.json`'s
