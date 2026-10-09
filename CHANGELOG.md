@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.18.0
 
 - **Test server, easier to start.** The fake slskd now runs without a copy of
   the repository: `npx github:outcast1000/viboplr-slskd` (needs Node.js).
