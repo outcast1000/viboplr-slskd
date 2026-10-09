@@ -1,7 +1,11 @@
 {
   "private": true,
   "name": "viboplr-slskd-tests",
+  "version": "0.0.0",
   "description": "Test harness for the viboplr-slskd plugin (not published; the plugin itself is just index.js + manifest.json).",
+  "bin": {
+    "fake-slskd": "scripts/fake-slskd.js"
+  },
   "scripts": {
     "test": "node --test",
     "check": "node --check index.js",

@@ -250,14 +250,60 @@ test("record through a proxy, then replay: real answers come back anonymised", {
 
 // --- the plugin's Test server switch ------------------------------------------
 
-test("the Test server row shows only while a fake answers, or while it is on", () => {
+test("the Test server section offers the switch only while a fake answers, or while it is on", () => {
   const p = loadPlugin();
-  assert.equal(p._testServerSection({ debugServer: false }, false), null, "hidden from everyone not running a fake");
-  assert.equal(p._testServerSection({ debugServer: false }, null), null);
+  const idle = JSON.stringify(p._testServerSection({ debugServer: false }, false));
+  assert.doesNotMatch(idle, /set-debug-server/, "no switch with nothing to switch to");
+  assert.match(idle, /npx github:outcast1000\/viboplr-slskd/, "says how to start one");
+  assert.match(idle, /detect-test-server/);
+  assert.match(idle, /test-server-docs/);
+  assert.doesNotMatch(JSON.stringify(p._testServerSection({ debugServer: false }, null)), /set-debug-server/);
+  assert.doesNotMatch(idle, /Nothing answered/, "no verdict before anyone looked");
+  assert.match(JSON.stringify(p._testServerSection({ debugServer: false, debugUrl: "http://127.0.0.1:5039" }, false, Date.now())),
+    /Nothing answered at http:\/\/127.0.0.1:5039 or on ports 5039–5049/, "Look again says when it found nothing");
   const found = p._testServerSection({ debugServer: false, debugUrl: "http://127.0.0.1:5039" }, { mode: "replay" });
   assert.match(JSON.stringify(found), /set-debug-server/);
   assert.match(JSON.stringify(found), /replaying a recording/);
-  assert.ok(p._testServerSection({ debugServer: true }, false), "stays visible while on, even with the fake stopped, so it can be switched off");
+  assert.match(JSON.stringify(p._testServerSection({ debugServer: true }, false)), /set-debug-server/,
+    "stays switchable while on, even with the fake stopped, so it can be switched off");
+});
+
+test("a fake on this computer is looked for across the port range; a remote address only where it is", () => {
+  const p = loadPlugin();
+  const local = p._debugCandidates("http://127.0.0.1:5039/");
+  assert.equal(local[0], "http://127.0.0.1:5039", "the saved address first");
+  assert.equal(local.length, 11, "5039–5049, the saved one not repeated");
+  assert.ok(local.includes("http://127.0.0.1:5049"));
+  assert.equal(p._debugCandidates("http://localhost:7000")[0], "http://localhost:7000");
+  assert.ok(p._debugCandidates("http://localhost:7000").includes("http://localhost:5040"));
+  assert.deepEqual(p._debugCandidates("http://192.168.1.5:5039"), ["http://192.168.1.5:5039"], "no scanning someone else's machine");
+  assert.deepEqual(p._debugCandidates(""), []);
+});
+
+test("a fake started on another port is found and its address saved", { timeout: 20000 }, async () => {
+  const real = await createFakeSlskd({ port: 0, downloads: tmp("real"), scale: 0.02, audio: "stub" });
+  const p = loadPlugin();
+  const marker = { status: 200, headers: { "x-fake-slskd": "generated" }, text: async () => "true", json: async () => true };
+  const h = hostFor(real.url, {
+    fetch: async (u, init) => {
+      if (u.startsWith("http://127.0.0.1:5043/")) return marker;
+      if (!u.startsWith(real.url)) return undefined;
+      const r = await fetch(u, { method: init.method, headers: init.headers, body: init.body });
+      const text = await r.text();
+      return { status: r.status, headers: {}, text: async () => text, json: async () => JSON.parse(text) };
+    }
+  });
+  await p.activate(h.api);
+  try {
+    await until(async () => (await h.tools.status({})).state === "ready", 10000, "ready");
+    await h.actions["detect-test-server"]();
+    assert.equal(h.store.debugUrl, "http://127.0.0.1:5043", "the found address is saved");
+    await h.actions["main-tab"]({ tabId: "settings" });
+    assert.match(JSON.stringify(h.calls.views[h.calls.views.length - 1].data), /set-debug-server/, "and the switch is offered");
+  } finally {
+    p.deactivate();
+    await real.close();
+  }
 });
 
 test("switching to the test server and back keeps the real server's downloads", { timeout: 40000 }, async () => {

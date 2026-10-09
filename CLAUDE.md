@@ -310,12 +310,17 @@ The installed plugin is the released one, not this checkout — a code change ne
 release and an update from Viboplr's Extensions view before a live run reflects it.
 
 **Without a reachable Soulseek network** (the owner's work Mac is behind a VPN that blocks
-it): `npm run fake-slskd` is a local slskd stand-in, either with deterministic generated
+it): `npm run fake-slskd` (or, with no checkout, `npx github:outcast1000/viboplr-slskd` — the
+`bin` in `package.json`, which is why that file carries a `version`) is a local slskd stand-in, either with deterministic generated
 results and scenarios (`--scenario vpn-blocked`, `slow`, `peer-fails`, …) or replaying an
 anonymised recording of a real slskd made off the VPN (`--record --upstream …`, then
 `--replay DIR`). The plugin switches to it from Settings → **Test server** (`settings.debugServer`,
-`debugUrl`), a row shown only while a fake answers at that address (`X-Fake-Slskd` header) or
-the switch is on. Every request and readiness surface reads **`conn()`** — the effective
+`debugUrl`). That section always exists: while a fake answers (`X-Fake-Slskd` header) or the
+switch is on it sits above Connection with the switch; otherwise it sits at the bottom with the
+command to start one. `detectDebugServer` tries the saved address and, when it is loopback,
+ports 5039–5049 too (`debugCandidates`), saving the address it finds — also while the switch is
+on and the fake stopped answering, so a restart on another port is followed. Recordings default
+to `./recordings` in the **current** folder, since under npx the script lives in a package cache. Every request and readiness surface reads **`conn()`** — the effective
 connection — never `settings.url` / `apiKey` / `insecure` directly; the per-server state
 (`tracked`, `fallback`, `sharers`, `upgrades`, `resolveHistory`, `sharesWarned`) is stored
 under **`stateKey(k)`** (`debug.` prefix on the test server), so the fake's transfer list can

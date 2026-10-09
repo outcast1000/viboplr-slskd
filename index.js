@@ -137,7 +137,7 @@ var settings = {
   upgradeTarget: "flac16", // a UPGRADE_TARGETS key — what an automatic upgrade looks for
   batchSeq: 0,
   managedBy: null,        // null | "roadie" — the address/key came from Roadie and follow it
-  debugServer: false,     // talk to the fake slskd (npm run fake-slskd) instead — see "Test server"
+  debugServer: false,     // talk to the fake slskd (FAKE_SLSKD_COMMAND) instead — see "Test server"
   debugUrl: "http://127.0.0.1:5039"
 };
 
@@ -153,6 +153,13 @@ var settings = {
 // plugin forget them as "vanished".
 var DEBUG_STATE_PREFIX = "debug.";
 var debugDetected = null;   // null = not checked; else { mode } from the fake's X-Fake-Slskd header, or false
+// Runs the fake from GitHub, no checkout needed (the repo's package.json `bin`).
+var FAKE_SLSKD_COMMAND = "npx github:outcast1000/viboplr-slskd";
+var FAKE_SLSKD_DOCS = "https://github.com/outcast1000/viboplr-slskd/blob/main/docs/fake-slskd.md";
+var debugLookedAt = 0;      // when Look again last ran, for its "nothing answered"
+// Where a fake started with --port is looked for, beside the saved address.
+var DEBUG_PORT_FIRST = 5039;
+var DEBUG_PORT_LAST = 5049;
 
 function conn() {
   if (!settings.debugServer) return settings;
@@ -1691,6 +1698,8 @@ function fixNodes(st, cfg, r, detail, why) {
 
 async function refreshReadiness() {
   var p = await probe();
+  // A fake restarted on another port: follow it rather than report it gone.
+  if (settings.debugServer && p.kind !== "ok" && await detectDebugServer()) p = await probe();
   lastServerState = p.kind === "ok" ? p.serverState : null;
   // Not ready → look for Roadie. It may hold the connection we lack, or say
   // that a managed slskd was removed. A changed connection is re-probed once.
@@ -6114,8 +6123,11 @@ function settingsTab() {
     children.push(statusChecklist(readiness, conn(), tier, tier === "local" && downloadsDir ? downloadsCollection() : null,
       share, checkedAgo(connCheck.at, Date.now())));
   }
-  var testServer = testServerSection(settings, debugDetected);
-  if (testServer) children.push(testServer);
+  // Above Connection while a fake runs or is in use; otherwise a footnote at
+  // the bottom saying how to start one.
+  var testServer = testServerSection(settings, debugDetected, debugLookedAt);
+  var testServerActive = !!(settings.debugServer || debugDetected);
+  if (testServerActive) children.push(testServer);
   children.push(connectionSection());
   var webPage = webPageSection();
   if (webPage) children.push(webPage);
@@ -6137,6 +6149,7 @@ function settingsTab() {
           : downloadsDir || "Read from slskd once connected." }
     ]
   });
+  if (!testServerActive) children.push(testServer);
   children.push(mutedText("Upgrade and playback-fallback settings are on their own tabs."));
   return { type: "layout", direction: "vertical", children: children };
 }
@@ -6842,6 +6855,14 @@ function registerActions() {
   api.ui.onAction("set-insecure", function (data) { saveSetting("insecure", !!(data && data.value)); });
   api.ui.onAction("set-debug-server", function (data) {
     switchServer(!!(data && data.value)).catch(function (e) { console.error("slskd: switching server failed:", e); });
+  });
+  api.ui.onAction("detect-test-server", function () {
+    return detectDebugServer()
+      .then(function () { debugLookedAt = Date.now(); renderSettings(); })
+      .catch(function (e) { console.error("slskd: test server check failed:", e); });
+  });
+  api.ui.onAction("test-server-docs", function () {
+    api.network.openUrl(FAKE_SLSKD_DOCS).catch(console.error);
   });
   api.ui.onAction("set-debug-url", function (data) {
     var v = data && typeof data.value === "string" ? data.value.trim() : "";
@@ -8559,24 +8580,67 @@ async function loadServerState() {
 }
 
 // Is a fake slskd answering at the test address? It marks every answer with
-// X-Fake-Slskd (generated / replay / record), which is what keeps the Test
-// server row out of sight for everyone who isn't running one. One short
-// localhost request; a refused connection answers at once.
+// X-Fake-Slskd (generated / replay / record), which is what tells it apart
+// from a real slskd. A fake on this computer is also looked for on ports
+// DEBUG_PORT_FIRST–DEBUG_PORT_LAST, so one started with --port is found
+// without typing its address; finding it elsewhere saves the new address.
+// All candidates go at once: a refused connection answers straight away.
+// Resolves true when the address moved.
 async function detectDebugServer() {
   var url = String(settings.debugUrl || "").replace(/\/+$/, "");
-  if (!url) { debugDetected = false; return; }
-  try {
-    var res = await api.network.fetch(url + "/api/v0/session/enabled", { method: "GET", timeoutMs: 1500, headers: { "Accept": "application/json" } });
-    var mode = res && res.headers ? res.headers["x-fake-slskd"] : null;
-    debugDetected = mode ? { mode: String(mode) } : false;
-  } catch (e) {
-    debugDetected = false;
+  var candidates = debugCandidates(url);
+  if (!candidates.length) { debugDetected = false; return false; }
+  var answers = await Promise.all(candidates.map(function (base) {
+    return api.network.fetch(base + "/api/v0/session/enabled", { method: "GET", timeoutMs: 1500, headers: { "Accept": "application/json" } })
+      .then(function (res) { return res && res.headers ? res.headers["x-fake-slskd"] || null : null; })
+      .catch(function () { return null; });   // nothing listening there — the usual answer, not an error
+  }));
+  for (var i = 0; i < candidates.length; i++) {
+    if (!answers[i]) continue;
+    debugDetected = { mode: String(answers[i]) };
+    if (candidates[i] === url) return false;
+    settings.debugUrl = candidates[i];
+    try {
+      await api.storage.set("debugUrl", settings.debugUrl);
+    } catch (e) {
+      console.error("slskd: couldn't save debugUrl:", e);
+    }
+    api.log("info", "found the test server at " + settings.debugUrl, "slskd");
+    return true;
   }
+  debugDetected = false;
+  return false;
 }
 
-// Pure: the "Test server" section — only while a fake answers or the switch is on.
-function testServerSection(cfg, detected) {
-  if (!cfg.debugServer && !detected) return null;
+// Pure: the addresses to look for a fake at — the saved one first, then, when
+// it is on this computer, the same host on each port of the range.
+function debugCandidates(url) {
+  url = String(url || "").replace(/\/+$/, "");
+  if (!url) return [];
+  var out = [url];
+  var m = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(?::\d+)?$/i.exec(url);
+  if (!m) return out;
+  for (var port = DEBUG_PORT_FIRST; port <= DEBUG_PORT_LAST; port++) {
+    var u = "http://" + m[1] + ":" + port;
+    if (out.indexOf(u) < 0) out.push(u);
+  }
+  return out;
+}
+
+// Pure: the "Test server" section. While a fake answers or the switch is on,
+// the switch and its address; otherwise how to start one, and — once Look
+// again has run — that nothing answered.
+function testServerSection(cfg, detected, lookedAt) {
+  if (!cfg.debugServer && !detected) {
+    var children = [
+      optionRow("Test without the Soulseek network",
+        "For developers, or a network that blocks Soulseek: run `" + FAKE_SLSKD_COMMAND + "` in a terminal (needs Node.js) for a stand-in slskd, then press Look again. It's also found by itself within a minute.",
+        actionButton("Look again", "detect-test-server", "secondary"))
+    ];
+    if (lookedAt) children.push(mutedText("Nothing answered at " + String(cfg.debugUrl || "").replace(/\/+$/, "") + " or on ports " + DEBUG_PORT_FIRST + "–" + DEBUG_PORT_LAST + ". Is the fake still running?"));
+    children.push(buttonRow([actionButton("How it works", "test-server-docs", "secondary")]));
+    return { type: "section", title: "Test server", children: children };
+  }
   var mode = detected && detected.mode ? detected.mode : null;
   var what = mode === "replay" ? "replaying a recording" : (mode === "record" ? "recording a real slskd" : (mode ? "generated results" : null));
   return { type: "section", title: "Test server", children: [
@@ -8585,7 +8649,8 @@ function testServerSection(cfg, detected) {
         ? "On: searches and downloads go to the fake slskd" + (what ? " (" + what + ")" : "") + ". Your own slskd's address and key are kept, and its downloads come back when you switch off."
         : "A fake slskd is running" + (what ? " (" + what + ")" : "") + ". Switch to it to test without the Soulseek network. Its downloads are kept apart from your real ones.",
       control: { type: "toggle", label: "", action: "set-debug-server", checked: !!cfg.debugServer } },
-    { type: "settings-row", label: "Test server address", description: "Where `npm run fake-slskd` listens.",
+    { type: "settings-row", label: "Test server address",
+      description: "Where the fake listens. One on this computer is found by itself on ports " + DEBUG_PORT_FIRST + "–" + DEBUG_PORT_LAST + ".",
       control: { type: "text-input", placeholder: "http://127.0.0.1:5039", action: "set-debug-url", value: cfg.debugUrl || "" } }
   ] };
 }
@@ -8715,6 +8780,7 @@ return {
 
   // Exposed for the test harness.
   _testServerSection: testServerSection,
+  _debugCandidates: debugCandidates,
   _b64encode: b64encode,
   _hasFlag: hasFlag,
   _qualityTier: qualityTier,

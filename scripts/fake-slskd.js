@@ -2,16 +2,17 @@
 "use strict";
 // Run a fake slskd for testing the plugin where Soulseek is unreachable.
 //
-//   npm run fake-slskd -- [--scenario normal] [--port 5039] [--downloads DIR]
-//                         [--api-key KEY] [--speed 1] [--source FILE] [--stub] [--quiet]
+//   npx github:outcast1000/viboplr-slskd [options]   (no checkout needed)
+//   npm run fake-slskd -- [options]                  (in this repo)
+//   options: [--scenario normal] [--port 5039] [--downloads DIR]
+//            [--api-key KEY] [--speed 1] [--source FILE] [--stub] [--quiet]
 //   record (off the VPN):  --record [DIR] --upstream http://127.0.0.1:5030 [--api-key REAL_KEY]
 //   replay (on the VPN):   --replay DIR
 //
-// Then in Viboplr: Soulseek → Settings → Connection, address
-// http://127.0.0.1:5039 and any API key (or the --api-key you passed; when
-// recording, the real slskd's key unless --upstream-key is given).
-// Point --downloads inside one of your local collections and finished files
-// reach the library like real ones. See docs/fake-slskd.md.
+// Then in Viboplr: Soulseek → Settings → Test server → Use the test server.
+// It finds a fake on ports 5039–5049 by itself. Point --downloads inside one
+// of your local collections and finished files reach the library like real
+// ones. See docs/fake-slskd.md.
 
 const path = require("node:path");
 const fs = require("node:fs");
@@ -35,7 +36,7 @@ function parseArgs(argv) {
 }
 
 function usage() {
-  console.log(fs.readFileSync(__filename, "utf8").split("\n").slice(2, 15).map((l) => l.replace(/^\/\/ ?/, "")).join("\n"));
+  console.log(fs.readFileSync(__filename, "utf8").split("\n").slice(2, 16).map((l) => l.replace(/^\/\/ ?/, "")).join("\n"));
   console.log("Scenarios:");
   for (const [k, v] of Object.entries(SCENARIOS)) console.log("  " + k.padEnd(13) + v);
 }
@@ -54,7 +55,8 @@ async function main() {
   if (args.record && !args.upstream) { console.error("--record needs --upstream <your real slskd's address>"); process.exit(2); }
   if (args.record && args.replay) { console.error("--record and --replay don't combine"); process.exit(2); }
   const record = args.record === true
-    ? path.join(__dirname, "..", "recordings", new Date().toISOString().slice(0, 10))
+    // The current folder, not this script's: under npx that is a package cache.
+    ? path.join(process.cwd(), "recordings", new Date().toISOString().slice(0, 10))
     : (args.record ? path.resolve(args.record) : null);
   if (args.replay && !fs.existsSync(path.join(args.replay, "searches")) && !fs.existsSync(path.join(args.replay, "transfers.json"))) {
     console.error("--replay: " + args.replay + " doesn't look like a recording (no searches/ or transfers.json)");
@@ -110,6 +112,6 @@ async function main() {
 }
 
 main().catch((e) => {
-  console.error(e && e.code === "EADDRINUSE" ? "That port is taken — pass --port." : e);
+  console.error(e && e.code === "EADDRINUSE" ? "That port is taken — pass --port (the plugin looks on 5039–5049)." : e);
   process.exit(1);
 });

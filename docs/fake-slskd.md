@@ -5,17 +5,28 @@ reached (a work VPN or web filter) or when a failure has to happen on cue. It an
 slskd REST endpoints the plugin calls, so the plugin runs unchanged against it. It is a dev
 tool only: the release zip is `manifest.json` + `index.js`.
 
+No checkout needed. With Node.js installed:
+
 ```bash
-npm run fake-slskd                                  # generated results, port 5039
-npm run fake-slskd -- --scenario vpn-blocked        # see "Scenarios"
-npm run fake-slskd -- --downloads ~/Music/fake-slskd --speed 4
+npx github:outcast1000/viboplr-slskd                               # generated results, port 5039
+npx github:outcast1000/viboplr-slskd --scenario vpn-blocked        # see "Scenarios"
+npx github:outcast1000/viboplr-slskd --downloads ~/Music/fake-slskd --speed 4
 ```
 
-Then in Viboplr, open **Soulseek → Settings**. While a fake is running, a **Test server**
-section appears above Connection. Switch **Use the test server** on, and searches and
-downloads go to the fake. Switch it off to go back to your own slskd. The section stays
-hidden for anyone not running a fake: the plugin shows it only when something at the test
-address answers with the fake's `X-Fake-Slskd` header, or while the switch is on.
+npx asks once before fetching it. In a checkout of this repo, `npm run fake-slskd -- <options>`
+does the same. Add `--help` for every option.
+
+Then in Viboplr, open **Soulseek → Settings**:
+
+1. With no fake running, the **Test server** section sits at the bottom of the tab and shows the
+   command above. Press **Look again** after starting the fake (it's also noticed by itself
+   within about a minute).
+2. Once the fake answers, the section moves above Connection with a switch. Turn **Use the test
+   server** on, and searches and downloads go to the fake.
+3. Turn it off to go back to your own slskd.
+
+The plugin recognises the fake by the `X-Fake-Slskd` header on its answers, so a real slskd is
+never mistaken for one.
 
 - **Your real connection is kept.** The address, key and Roadie link stay as they were, and
   the switch only changes which server the plugin talks to.
@@ -23,20 +34,18 @@ address answers with the fake's `X-Fake-Slskd` header, or while the switch is on
   and the fallback log are stored separately while the switch is on. Otherwise the fake's
   transfer list, which holds none of your real downloads, would make the plugin drop them as
   vanished. Switching back brings the real ones back.
-- **Changing the port:** the address defaults to `http://127.0.0.1:5039`. If you start the
-  fake with `--port`, change **Test server address** to match.
+- **Ports:** the address defaults to `http://127.0.0.1:5039`. A fake on this computer started
+  with `--port` anywhere from 5039 to 5049 is found by itself and its address saved, including
+  when it restarts on another port while the switch is on. For another port or another
+  machine, type it into **Test server address**.
 
-**Can't see Test server?** It needs both of these:
+**No switch, only the command?** The plugin hasn't heard from the fake yet:
 
-1. **The fake is running.** Start it with `npm run fake-slskd`. The section stays hidden
-   until something answers at the test address as the fake. The plugin checks about once a
-   minute, or straight away when you press **Test connection**. To check it yourself, run
-   `curl -i http://127.0.0.1:5039/api/v0/session/enabled`; the reply should include an
-   `X-Fake-Slskd` header.
-2. **Viboplr runs a plugin build that has the switch.** Until a release includes it, load
-   this checkout: **Settings → Debug → Debug mode** on, then **Developer → Dev plugin
-   folder** set to this repo, then **Reload**. The plugin's `status` assistant tool reports
-   a `testServer` field only from builds with the switch.
+1. **Is it running?** Check with `curl -i http://127.0.0.1:5039/api/v0/session/enabled` (use
+   your port). The reply should include an `X-Fake-Slskd` header. Then press **Look again**.
+2. **No Test server section at all?** Viboplr runs a plugin build older than 0.17.0. Update
+   it from Extensions, or load this checkout: **Settings → Debug → Debug mode** on, then
+   **Developer → Dev plugin folder** set to this repo, then **Reload**.
 
 You can also point the normal Connection address at the fake. It works, but it's shared
 state, which is what the switch avoids.
@@ -87,7 +96,7 @@ npm run fake-slskd -- --record --upstream http://127.0.0.1:5030 --api-key <real 
 
 Point the plugin at the fake as usual and use the app normally. Every request goes to the
 real slskd and its answer comes back unchanged. Alongside, the fake saves into
-`recordings/<date>/` (or `--record DIR`):
+`recordings/<date>/` in the folder you ran it from (or `--record DIR`):
 
 - `application.json`: the signed-in status.
 - `searches/<query>-<hash>.json`: one file per query. It holds every poll with its time

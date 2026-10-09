@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- **Test server, easier to start.** The fake slskd now runs without a copy of
+  the repository: `npx github:outcast1000/viboplr-slskd` (needs Node.js).
+  Settings always has a **Test server** section: with no fake running it
+  shows that command, a **Look again** button and a link to how it works.
+  A fake started on another port from 5039 to 5049 is found by itself.
+
 ## 0.17.0
 
 - **State at a glance.** Rows on Upgrades and Downloads now carry a short
