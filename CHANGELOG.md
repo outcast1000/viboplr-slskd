@@ -1,5 +1,9 @@
 # Changelog
 
+
+## v0.18.1
+- Releases are now signed with the Viboplr plugin-signing key, so Viboplr allows the permissions this plugin asks for without prompting. No functional changes.
+
 ## 0.18.0
 
 - **Test server, easier to start.** The fake slskd now runs without a copy of
