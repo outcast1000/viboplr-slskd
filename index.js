@@ -1194,14 +1194,42 @@ function ledgerTotals(ledger) {
 // ---------------------------------------------------------------------------
 // Lowercase, diacritics stripped, punctuation to spaces. `normalize` is a
 // String method, so it is available in the sandbox where TextEncoder is not.
+// Letters NFD doesn't take apart, folded to what a filename typed without them
+// says: "Lágnætti" and "Lagnaetti" are the same song. Greek final sigma is its
+// letter's other form.
+var LETTER_FOLDS = { "æ": "ae", "ð": "d", "þ": "th", "ø": "o", "œ": "oe", "ß": "ss", "ł": "l", "đ": "d", "ı": "i", "ς": "σ" };
+var LETTER_FOLD_RE = new RegExp("[" + Object.keys(LETTER_FOLDS).join("") + "]", "g");
+
+// The matching form of a name: lowercase, accents gone, every script's letters
+// kept. It once kept only a–z, which turned a Greek or Cyrillic title into
+// nothing (an empty search slskd refuses) and cut "Lágnætti" to "lagn tti".
 function normalizeText(s) {
   var out = String(s == null ? "" : s);
   if (typeof out.normalize === "function") out = out.normalize("NFD");
   return out
-    .replace(/[̀-ͯ]/g, "")
+    .replace(/\p{M}/gu, "")
+    .toLowerCase()
+    .replace(LETTER_FOLD_RE, function (c) { return LETTER_FOLDS[c]; })
+    .replace(/&/g, " and ")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// The searching forms. Soulseek peers match characters literally —
+// "Sólstafir Lágnætti" and "solstafir lagnaetti" find different files, and
+// Greek filenames are often typed without accents — so a track search tries
+// its own spelling first, then the same letters without accents
+// (`searchForTrack`). Never `normalizeText`'s letter folds: "σωκρατησ" would
+// find no file named "Σωκρατης".
+function spelledText(s, unaccented) {
+  var out = String(s == null ? "" : s);
+  if (typeof out.normalize === "function") out = out.normalize(unaccented ? "NFD" : "NFC");
+  if (unaccented) out = out.replace(/\p{M}/gu, "");
+  return out
     .toLowerCase()
     .replace(/&/g, " and ")
-    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/[^\p{L}\p{M}\p{N}]+/gu, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -1218,14 +1246,19 @@ var STOP_WORDS = ["the", "a", "an", "of", "and", "feat", "ft", "featuring", "vs"
 var VARIANT_WORDS = ["live", "remix", "instrumental", "karaoke", "acoustic", "demo", "cover",
   "acapella", "rehearsal", "unplugged", "mix", "dub", "reprise", "medley", "tribute"];
 
-function wordList(s, drop) {
-  var words = normalizeText(s).split(" ");
+// `spelled`: a query's words — true keeps each word as written, "unaccented"
+// the same letters without accents (`spelledText`); absent, the folded
+// matching form. The drop list is checked on the folded form either way, so
+// "The" goes whichever way it's spelled.
+function wordList(s, drop, spelled) {
+  var words = (spelled ? spelledText(s, spelled === "unaccented") : normalizeText(s)).split(" ");
   var out = [];
   for (var i = 0; i < words.length; i++) {
     var w = words[i];
     if (!w) continue;
-    if (drop && /^\d{4}$/.test(w)) continue;
-    if (drop && drop.indexOf(w) >= 0) continue;
+    var folded = spelled ? normalizeText(w) : w;
+    if (drop && /^\d{4}$/.test(folded)) continue;
+    if (drop && drop.indexOf(folded) >= 0) continue;
     out.push(w);
   }
   return out;
@@ -1234,14 +1267,14 @@ function wordList(s, drop) {
 // The words of a title that identify the song: edition words, stop words and
 // bare years are noise, but a title that is nothing but noise keeps its words
 // rather than matching everything.
-function titleWords(title) {
-  var strict = wordList(title, EDITION_WORDS.concat(STOP_WORDS));
-  return strict.length ? strict : wordList(title, null);
+function titleWords(title, spelled) {
+  var strict = wordList(title, EDITION_WORDS.concat(STOP_WORDS), spelled);
+  return strict.length ? strict : wordList(title, null, spelled);
 }
 
-function artistWords(artist) {
-  var strict = wordList(artist, STOP_WORDS);
-  return strict.length ? strict : wordList(artist, null);
+function artistWords(artist, spelled) {
+  var strict = wordList(artist, STOP_WORDS, spelled);
+  return strict.length ? strict : wordList(artist, null, spelled);
 }
 
 // ---------------------------------------------------------------------------
@@ -1347,10 +1380,12 @@ function fallbackKey(title, artist) {
 // What to ask Soulseek for. Soulseek matches on file and folder names, and a
 // name rarely carries the edition suffix a catalogue title does — so the
 // parenthetical goes, and the artist comes first the way folders are laid out.
-function fallbackQuery(title, artist) {
+// `spelled`: true or "unaccented" for a query's own letters (see
+// `wordList`); absent, the folded matching form.
+function fallbackQuery(title, artist, spelled) {
   var t = String(title || "").replace(/\s*[\(\[][^\)\]]*[\)\]]\s*/g, " ");
-  var words = artistWords(artist).concat(titleWords(t));
-  if (!words.length) words = wordList(title, null);
+  var words = artistWords(artist, spelled).concat(titleWords(t, spelled));
+  if (!words.length) words = wordList(title, null, spelled);
   return words.join(" ");
 }
 
@@ -1370,11 +1405,20 @@ function stripParens(s) {
 // The search for a track whose artist name Soulseek won't answer: album words
 // then title words — the folder, then the file. Null without an album: the
 // title alone matches too many other songs to replace a library file with.
-function albumTitleQuery(title, album) {
-  var albumW = titleWords(stripParens(album));
+function albumTitleQuery(title, album, spelled) {
+  var albumW = titleWords(stripParens(album), spelled);
   if (!albumW.length) return null;
-  var words = albumW.concat(titleWords(stripParens(title)));
+  var words = albumW.concat(titleWords(stripParens(title), spelled));
   return words.join(" ");
+}
+
+// Distinct, non-empty queries, in order.
+function distinctQueries(list) {
+  var out = [];
+  for (var i = 0; i < list.length; i++) {
+    if (list[i] && out.indexOf(list[i]) < 0) out.push(list[i]);
+  }
+  return out;
 }
 
 // "Nothing matched", said so the user looks in the right place: a blocked
@@ -1382,7 +1426,7 @@ function albumTitleQuery(title, album) {
 function noMatchMessage(ranked, artist, what) {
   if (ranked && ranked.artistBlocked) {
     return "Soulseek returns nothing for “" + artist + "” (a blocked search phrase); " +
-      (ranked.byAlbum ? "nothing found by album and title either" : "the track has no album to search by instead");
+      (ranked.byAlbum || ranked.albumTried ? "nothing found by album and title either" : "the track has no album to search by instead");
   }
   return "Nothing on Soulseek matched " + what;
 }
@@ -1396,34 +1440,51 @@ function isBlockedArtist(artist) {
   return !!(k && blockedArtists[k]);
 }
 
-// `performSearch` for one track, with the blocked-phrase retry above. Resolves
-// the ranked list, or null when the search was abandoned (busy, past
-// `until`). The list carries `byAlbum` — the query that answered — when it
-// came from the album + title search, which is what tells the matchers to
-// accept the album as the artist's stand-in (a folder named "Meteora" never
-// says "Linkin Park"), and `artistBlocked` when the artist's search came back
-// empty, so a caller can say why instead of "nothing matched".
+// `performSearch` for one track, trying queries in order until a peer answers:
+// artist + title as spelled, then without accents, then — when those got
+// no answer at all, the blocked-phrase case above — album + title the same
+// two ways. A blocked artist starts at the album queries. Resolves the ranked
+// list of the first query anyone answered (or the last one tried), or null
+// when a search was abandoned (busy, past `until`). The list carries
+// `byAlbum` — the query that answered — when it came from an album query,
+// which is what tells the matchers to accept the album as the artist's
+// stand-in (a folder named "Meteora" never says "Linkin Park"), and
+// `artistBlocked` when every artist query came back empty, so a caller can say
+// why instead of "nothing matched".
 async function searchForTrack(t, prefs, onProgress, isStale, until) {
-  var primary = fallbackQuery(t.title, t.artist);
-  var alt = t.artist ? albumTitleQuery(t.title, t.album) : null;
-  if (alt === primary) alt = null;
-  var ranked;
-  if (alt && isBlockedArtist(t.artist)) {
-    ranked = await performSearch(alt, prefs, onProgress, isStale, until);
-    if (ranked) { ranked.byAlbum = alt; ranked.artistBlocked = true; }
-    return ranked;
+  var artistQs = distinctQueries([fallbackQuery(t.title, t.artist, true), fallbackQuery(t.title, t.artist, "unaccented")]);
+  var albumQs = t.artist
+    ? distinctQueries([albumTitleQuery(t.title, t.album, true), albumTitleQuery(t.title, t.album, "unaccented")])
+      .filter(function (q) { return artistQs.indexOf(q) < 0; })
+    : [];
+  var blocked = !!(albumQs.length && isBlockedArtist(t.artist));
+  var order = blocked ? albumQs.concat(artistQs) : artistQs.concat(albumQs);
+  var last = null;
+  var artistTried = 0;
+  for (var i = 0; i < order.length; i++) {
+    var q = order[i];
+    var byAlbum = albumQs.indexOf(q) >= 0;
+    var ranked = await performSearch(q, prefs, onProgress, isStale, until);
+    if (!ranked) return ranked;
+    if (byAlbum) ranked.byAlbum = q;
+    // Peers answered — even with nothing downloadable, that's the answer.
+    if (ranked.length || ranked.partial || ranked.responseCount) {
+      if (byAlbum) ranked.artistBlocked = true;
+      return ranked;
+    }
+    last = ranked;
+    if (!byAlbum && ++artistTried === artistQs.length && t.artist && !blocked) {
+      var key = blockedArtistKey(t.artist);
+      if (key && albumQs.length) blockedArtists[key] = true;
+      api.log("info", "search: “" + artistQs.join("” / “") + "” got no responses at all — Soulseek blocks some phrases; " +
+        (albumQs.length ? "searching “" + albumQs[0] + "” instead" : "no album to search by instead"), "slskd");
+    }
   }
-  ranked = await performSearch(primary, prefs, onProgress, isStale, until);
-  if (!ranked || ranked.length || ranked.partial || !t.artist) return ranked;
-  if (ranked.responseCount) return ranked;   // peers answered; nothing was downloadable — not a block
-  var key = blockedArtistKey(t.artist);
-  if (key) blockedArtists[key] = true;
-  api.log("info", "search: “" + primary + "” got no responses at all — Soulseek blocks some phrases; " +
-    (alt ? "searching “" + alt + "” instead" : "no album to search by instead"), "slskd");
-  if (!alt) { ranked.artistBlocked = true; return ranked; }
-  var retry = await performSearch(alt, prefs, onProgress, isStale, until);
-  if (retry) { retry.byAlbum = alt; retry.artistBlocked = true; }
-  return retry;
+  if (last && t.artist && artistTried === artistQs.length) {
+    last.artistBlocked = true;
+    last.albumTried = albumQs.length > 0;
+  }
+  return last;
 }
 
 function coverage(wanted, haystack) {

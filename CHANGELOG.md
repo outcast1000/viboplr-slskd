@@ -1,5 +1,8 @@
 # Changelog
 
+## v0.21.0
+- **Greek, Cyrillic and other non-Latin names.** Track searches used to keep only the letters a–z, so a Greek or Cyrillic title turned into an empty search that slskd refused ("SearchText can not be null or empty"), and Icelandic or Danish letters were cut out of the middle of words ("Lágnætti" became "lagn tti"). Every script's letters now survive. Soulseek peers match letters literally, so a track search tries the name as spelled, then the same letters without accents (Greek filenames are often written without them). Matching a result to the track ignores accents and folds æ/ð/þ/ø/ß/œ/ł and the Greek final ς, so "Lágnætti" matches a file named "Lagnaetti" and "Τσιγάρο ατέλειωτο" one named "Τσιγαρο ατελειωτο".
+
 ## v0.20.0
 - **Artists Soulseek won't search for.** Soulseek's server refuses searches containing some artist names (after takedown requests): "Linkin Park Numb" gets no answers at all while "Meteora Numb" gets hundreds, most of them filed under Linkin Park. When an upgrade, the playback fallback or the assistant's `search` with `upgradeFor` gets no answer from anyone for a track's artist + title, it now searches again by album + title, and a folder named for the album then counts as the artist's. The artist is remembered until the plugin restarts, so later tracks of theirs skip the dead search. Title, length (±5 s) and the live/remix/cover checks still apply. A track with no album says the artist is blocked instead of "Nothing on Soulseek matched", and the Search tab says so when nobody answered a search at all.
 
