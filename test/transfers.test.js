@@ -122,6 +122,20 @@ test("KEY_SEP is a single NUL character", () => {
   assert.equal(SEP.length, 1);
 });
 
+// --- manifest: every permission says why ------------------------------------
+// The host shows each reason as "Why: …" under the permission it explains, and
+// drops a reason for a permission the manifest doesn't request.
+
+test("permissionReasons gives exactly one plain-text reason per requested permission", () => {
+  const manifest = JSON.parse(require("node:fs").readFileSync(require("node:path").join(__dirname, "..", "manifest.json"), "utf8"));
+  assert.deepEqual(Object.keys(manifest.permissionReasons).sort(), [...manifest.permissions].sort());
+  for (const [perm, why] of Object.entries(manifest.permissionReasons)) {
+    assert.equal(typeof why, "string", perm);
+    assert.ok(why.length > 0 && why.length <= 120, perm + " reason is 1-120 chars");
+  }
+  assert.equal(manifest.apiUsage, undefined, "apiUsage is deprecated; permissionReasons replaces it");
+});
+
 // --- activation smoke test --------------------------------------------------
 // Drives activate() against a fake host: readiness lands on "ready", every
 // host surface the manifest promises is registered, and Add to library opens

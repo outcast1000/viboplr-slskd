@@ -174,7 +174,6 @@ test("activate registers the metadata resolver the manifest declares", async () 
     const manifest = JSON.parse(require("node:fs").readFileSync(require("node:path").join(__dirname, "..", "manifest.json"), "utf8"));
     assert.equal(manifest.contributes.streamResolvers[0].id, plugin._FALLBACK_ID);
     assert.equal(typeof h.resolvers["meta:" + plugin._FALLBACK_ID], "function");
-    assert.ok(manifest.apiUsage.some((u) => u.api === "playback.onStreamResolve"), "declared in apiUsage");
   } finally {
     plugin.deactivate();
   }
@@ -220,8 +219,6 @@ test("Download on a track the fallback played resolves by metadata to the kept c
   try {
     const download = h.resolvers["download-meta:" + plugin._PROVIDER_ID];
     assert.equal(typeof download, "function", "registered on the download provider");
-    const manifest = JSON.parse(require("node:fs").readFileSync(require("node:path").join(__dirname, "..", "manifest.json"), "utf8"));
-    assert.ok(manifest.apiUsage.some((u) => u.api === "downloads.onResolveByMetadata"), "declared in apiUsage");
 
     // Nothing kept yet: null, and no search on the user's behalf.
     assert.equal(await download("Karma Police", "Radiohead", null, null, "original"), null);

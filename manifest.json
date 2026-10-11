@@ -1,7 +1,7 @@
 {
   "id": "slskd",
   "name": "Soulseek",
-  "version": "0.18.1",
+  "version": "0.18.2",
   "author": "Viboplr",
   "description": "Search and download from the Soulseek network via a slskd daemon: ranked results, whole-album grabs, live transfer progress, finished files that play and reach your library, and a playback fallback that fetches a missing track from Soulseek.",
   "minAppVersion": "1.0.85",
@@ -15,6 +15,15 @@
     "library:write",
     "playback:control"
   ],
+  "permissionReasons": {
+    "network:*": "Talk to the slskd server at the address you set, which can be on any host, and find one running on this computer",
+    "exec:roadie": "Ask Roadie to install or start slskd, each step after you approve it, and read the address and key it reports",
+    "files:read": "Read title, artist and album from finished downloads instead of guessing from the file name",
+    "system:open": "Open slskd's web page, the setup guides, and the folders where Roadie keeps slskd's settings",
+    "library:read": "Check your copy's quality before an upgrade, an album's missing tracks, and whether downloads land in a collection",
+    "library:write": "Rescan a collection when a download lands in it, and swap in a better copy once you approve it",
+    "playback:control": "Play finished Soulseek downloads from the Downloads tab"
+  },
   "stability": "experimental",
   "homepage": "https://github.com/outcast1000/viboplr-slskd",
   "updateUrl": "https://github.com/outcast1000/viboplr-slskd/releases/latest/download/update.json",
@@ -26,52 +35,6 @@
     {
       "name": "roadie",
       "reason": "Optional: installs and runs slskd for you, each step after you approve it"
-    }
-  ],
-  "apiUsage": [
-    {
-      "api": "network.fetch",
-      "reason": "Talk to your slskd daemon's REST API"
-    },
-    {
-      "api": "system.getDependency",
-      "reason": "See whether Viboplr has Roadie, which can install slskd for you"
-    },
-    {
-      "api": "system.exec",
-      "reason": "Ask Roadie to install or start slskd (it asks you first), and read the address and key it gives Viboplr"
-    },
-    {
-      "api": "storage.set",
-      "reason": "Remember the slskd address, API key, preferences and which downloads this plugin started"
-    },
-    {
-      "api": "playback.onResolveStreamByUri",
-      "reason": "Play finished Soulseek downloads straight from slskd's downloads folder"
-    },
-    {
-      "api": "playback.onStreamResolve",
-      "reason": "Fetch a track from Soulseek when it has no playable source of its own (the Playback fallback in Settings → Providers)"
-    },
-    {
-      "api": "downloads.onResolveByUri",
-      "reason": "Add a finished download to a collection through Viboplr's own download modal (tags and cover art written)"
-    },
-    {
-      "api": "downloads.onResolveByMetadata",
-      "reason": "Download a track the Playback fallback played — copies the file it already fetched, never searches again"
-    },
-    {
-      "api": "system.readAudioTags",
-      "reason": "Read title, artist and album out of a finished file instead of guessing from its name"
-    },
-    {
-      "api": "collections.resync",
-      "reason": "Rescan your library when a download finishes inside one of your collections"
-    },
-    {
-      "api": "library.getTracks",
-      "reason": "Read your copy's quality before offering an upgrade, and an album's tracks to tell which ones you're missing"
     }
   ],
   "contributes": {

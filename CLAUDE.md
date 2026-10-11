@@ -45,7 +45,7 @@ call's shape.
 - `api.log(level, message, section)` lines are readable from outside the app (see *Live
   testing*); prefer it over `console.log` for anything a later debugging session will want.
 
-## Surfaces this plugin registers (manifest `contributes` + `apiUsage`)
+## Surfaces this plugin registers (manifest `contributes`)
 
 | Surface | Where | Notes |
 |---|---|---|
