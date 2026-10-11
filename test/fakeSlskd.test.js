@@ -34,6 +34,17 @@ test("the same query always gets the same results, and every word is in every pa
   assert.ok(a.some((r) => !r.hasFreeUploadSlot && r.queueLength > 0), "a busy sharer");
 });
 
+test("a pinned length (--length) is what the sharers advertise, whichever way the query is spelled", () => {
+  const { lengthKey } = require("./harness/fakeSlskd.js");
+  const lengths = { [lengthKey("Radiohead - Karma Police")]: 264 };
+  const files = responsesFor("radiohead karma police", lengths).flatMap((r) => r.files.concat(r.lockedFiles));
+  const plain = files.filter((f) => !/\(Live\)/.test(f.filename));
+  assert.ok(plain.length > 3);
+  for (const f of plain) assert.ok(Math.abs(f.length - 264) <= 4, f.filename + " is " + f.length + "s (the fallback keeps ±5 s)");
+  assert.ok(files.some((f) => /\(Live\)/.test(f.filename) && f.length > 330), "the live take is still too long, for the duration filter");
+  assert.notDeepEqual(responsesFor("radiohead karma police"), responsesFor("radiohead karma police", lengths), "without the pin the length is generated");
+});
+
 test("advertised sizes match the format's bitrate (the upgrade check divides size by duration)", () => {
   for (const r of responsesFor("anything at all")) {
     for (const f of r.files.concat(r.lockedFiles)) {

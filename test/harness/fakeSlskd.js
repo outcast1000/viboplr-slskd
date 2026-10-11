@@ -108,11 +108,26 @@ function namesFor(query) {
   return { artist: null, title: titleCase(q) };
 }
 
-/** Every response a search for `query` produces, in arrival order. Pure. */
-function responsesFor(query) {
+// A query's key in `lengths`: case, punctuation and the "Artist - Title" dash
+// don't matter, so `--length "Radiohead - Karma Police=264"` answers the
+// playback fallback's "radiohead karma police" too.
+function lengthKey(query) {
+  return String(query || "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+}
+
+/**
+ * Every response a search for `query` produces, in arrival order. Pure.
+ * `lengths` (optional, { lengthKey: seconds }) pins a song's real length. The
+ * generated one is random, and the playback fallback drops any file more than
+ * 5 s off the length the track says it has — so without a pin a fallback
+ * against the fake never finds anything.
+ */
+function responsesFor(query, lengths) {
   const rnd = seeded(hashString(String(query).toLowerCase()));
   const names = namesFor(query);
-  const baseSecs = 170 + Math.floor(rnd() * 130);
+  const generatedSecs = 170 + Math.floor(rnd() * 130);
+  const pinned = lengths && lengths[lengthKey(query)];
+  const baseSecs = pinned > 0 ? pinned : generatedSecs;
   const year = 1975 + Math.floor(rnd() * 45);
   const trackNo = 1 + Math.floor(rnd() * 11);
   const album = names.artist ? "Fake Sessions" : null;
@@ -307,7 +322,8 @@ function listing(dir, relTo) {
  * upstream (a real slskd's URL: proxy to it), upstreamKey (its API key — else
  * the plugin's own is forwarded), upstreamInsecure, record (dir: save what the
  * upstream answers), replay (dir: answer recorded queries from it), salt /
- * saltPath (the username key, see slskdRecording.js) }.
+ * saltPath (the username key, see slskdRecording.js), lengths ({ lengthKey(query):
+ * seconds } — real song lengths for generated answers, see responsesFor) }.
  * Resolves { url, port, close(), state }.
  */
 function createFakeSlskd(opts) {
@@ -483,7 +499,7 @@ function createFakeSlskd(opts) {
         if (!text) return [400, "searchText is required"];
         const recorded = recording && o.scenario !== "empty" ? recording.search(text) : null;
         const s = { id: crypto.randomUUID(), searchText: text, token: Object.keys(state.searches).length + 1, startedAt: now(), stoppedAt: null,
-          replay: recorded, all: recorded ? (recorded.responses || []) : (o.scenario === "empty" ? [] : responsesFor(text)), arrived: [] };
+          replay: recorded, all: recorded ? (recorded.responses || []) : (o.scenario === "empty" ? [] : responsesFor(text, o.lengths)), arrived: [] };
         state.searches[s.id] = s;
         log("search “" + text + "” → " + s.all.length + " responses" + (recorded ? " (recorded)" : " (generated)"));
         return [200, searchView(s, false)];
@@ -645,4 +661,4 @@ function createFakeSlskd(opts) {
   });
 }
 
-module.exports = { createFakeSlskd, responsesFor, transferAt, namesFor, SCENARIOS, PEERS, FORMATS };
+module.exports = { createFakeSlskd, responsesFor, transferAt, namesFor, lengthKey, SCENARIOS, PEERS, FORMATS };

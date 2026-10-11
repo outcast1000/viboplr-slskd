@@ -600,8 +600,11 @@ test("integration: Cancel on a queued upgrade stops it in slskd and rests it, re
     assert.equal(h.store.sharers && h.store.sharers.a && h.store.sharers.a.stalled, undefined, "the sharer isn't blamed for the user's cancel");
     const list = findNodes(lastView(h), (n) => n.type === "track-row-list" && n.items.some((i) => i.id === "t42"))[0];
     assert.ok(list.items[0].actions.includes("upgrade-retry"));
+    const toggle = findNodes(lastView(h), (n) => n.type === "button" && n.action === "upgrade-sources-toggle")[0];
+    assert.ok(toggle && /^Choose the source myself \(2\)$/.test(toggle.label), "a cancelled upgrade still offers the sources it found");
+    h.actions["upgrade-sources-toggle"](toggle.data);
     const sources = findNodes(lastView(h), (n) => n.type === "track-row-list" && n.items.some((i) => i.id === "t42#1"))[0];
-    assert.ok(sources, "a cancelled upgrade still offers the sources it found");
+    assert.ok(sources, "and lists them on request");
   } finally {
     p.deactivate();
   }
@@ -615,7 +618,12 @@ test("integration: the panel lists the sources found; Use this switches to anoth
     await h.actions["ctx:slskd-upgrade"]({ kind: "track", trackId: 42 });
     await waitFor(() => entryOf(p) && entryOf(p).state === "downloading", 8000, "the download to start");
     await p._refreshTransfers();
-    const panel = findNodes(lastView(h), (n) => n.type === "section" && n.title === "Upgrading")[0];
+    let panel = findNodes(lastView(h), (n) => n.type === "section" && n.title === "Upgrading")[0];
+    assert.equal(findNodes(panel, (n) => n.type === "track-row-list").length, 0, "folded until asked for");
+    assert.equal(findNodes(panel, (n) => n.type === "button" && n.action === "upgrade-choose").length, 0,
+      "with sources in hand, choosing yourself stays inside the upgrade");
+    h.actions["upgrade-sources-toggle"]({ itemId: "t42" });
+    panel = findNodes(lastView(h), (n) => n.type === "section" && n.title === "Upgrading")[0];
     const sources = findNodes(panel, (n) => n.type === "track-row-list")[0];
     assert.ok(sources, "the sources list");
     assert.equal(sources.items.length, 2);
@@ -702,7 +710,7 @@ test("integration: the Upgrade target is a setting, and Upgrade on a non-library
     await waitFor(() => h.store.upgradeTarget === "high", 2000, "the setting to save");
 
     await h.actions["ctx:slskd-upgrade"]({ kind: "track", title: "Unknown", artistName: "Nobody" });
-    assert.ok(h.calls.notifications.some((m) => /Upgrade works on tracks in your library/.test(m)));
+    assert.equal(findNodes(lastView(h), (n) => n.type === "text" && /Upgrade works on tracks in your library/.test(n.content || "")).length, 1);
     assert.equal(Object.keys(p._upgrades()).length, 0);
   } finally {
     p.deactivate();

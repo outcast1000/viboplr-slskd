@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.19.0
+A UX pass around three jobs — finding new files, upgrading the ones you have, and seeing what the playback fallback does — with fewer popups throughout.
+
+- **Download from the results without leaving them.** Download no longer shows a toast or switches to the Downloads tab: the row itself turns Queued (with your place in line), then Downloading with a progress bar, then Done with Play — or Failed with Retry.
+- **An upgrade picked by hand finishes on its own row**: when a file from an Upgrade search is done, its row offers *Replace in library…* (no trip to Downloads).
+- **Actions on a selection only touch the rows they fit**: Retry re-queues what failed or was cancelled, Cancel stops what is still on its way — no refusal toast per file, no cancel sent for a finished download.
+- **Look inside a folder first.** A folder card opens the folder: its tracks with sizes and lengths, the songs your library already has marked *In library*, and one button for what you don't have (or for all of it). Select rows to take only some. *Search…* on an album opens on Folders.
+- **Tabs reordered**: Search, Upgrades, Fallback, Downloads, Settings. The Downloads count shows only downloads that are moving or failed, not finished ones.
+- **Upgrades**: choosing the source yourself stays inside the upgrade — *Choose the source myself* unfolds what the search found and *Use this* switches the download. The *Upgrade to* setting moved to the foot of the tab.
+- **Fallback: a song Viboplr retries is listed once.** When a track fails, Viboplr asks again right away; those tries used to fill Recent with the same song and count as separate plays. Now they are one row ("tried 4 times") with the last try's outcome, and *played N of M* counts plays.
+- **Selection bars offer only what applies**: a fresh search offers Download alone; Cancel, Play or Retry appear once some row can use them. Same on the Upgrades list.
+- **Test server**: `--length "Artist - Title=4:24"` pins a song's real length. The fallback drops files more than 5 s off the playing track's length, so without it a fallback against the fake never found anything.
+- **Fallback**: the tab says when the fallback was last used, or warns that it never has been and where to switch it on. Recent resolves are track rows with how each ended, and one that didn't play offers *Search Soulseek for it*. While it is finding a track, the Soulseek sidebar item shows a dot.
+- When Upgrade or Fill turns into a plain search (the track isn't in your library, isn't a local file, or the album has no tracks), the reason now shows in the Search tab above the results instead of as a toast. It stays until the next search.
+
 ## v0.18.2
 - Each permission now says why the plugin needs it, shown under it when Viboplr asks. No functional changes.
 

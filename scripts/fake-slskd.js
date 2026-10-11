@@ -6,6 +6,7 @@
 //   npm run fake-slskd -- [options]                  (in this repo)
 //   options: [--scenario normal] [--port 5039] [--downloads DIR]
 //            [--api-key KEY] [--speed 1] [--source FILE] [--stub] [--quiet]
+//            [--length "Artist - Title=SECS"]... (real length, for the fallback)
 //   record (off the VPN):  --record [DIR] --upstream http://127.0.0.1:5030 [--api-key REAL_KEY]
 //   replay (on the VPN):   --replay DIR
 //
@@ -17,7 +18,21 @@
 const path = require("node:path");
 const fs = require("node:fs");
 const { spawnSync } = require("node:child_process");
-const { createFakeSlskd, SCENARIOS, PEERS } = require("../test/harness/fakeSlskd.js");
+const { createFakeSlskd, lengthKey, SCENARIOS, PEERS } = require("../test/harness/fakeSlskd.js");
+
+// "Artist - Title=264" (or "=4:24") → { lengthKey: 264 }. The last "=" splits,
+// so a title may hold one.
+function parseLengths(specs) {
+  const out = {};
+  for (const spec of specs || []) {
+    const at = spec.lastIndexOf("=");
+    const raw = at > 0 ? spec.slice(at + 1).trim() : "";
+    const secs = /^\d+:\d{1,2}$/.test(raw) ? Number(raw.split(":")[0]) * 60 + Number(raw.split(":")[1]) : Number(raw);
+    if (!(secs > 0)) throw new Error("--length wants \"Artist - Title=SECS\" (or =M:SS), got: " + spec);
+    out[lengthKey(spec.slice(0, at))] = Math.round(secs);
+  }
+  return out;
+}
 
 function parseArgs(argv) {
   const out = {};
@@ -28,9 +43,11 @@ function parseArgs(argv) {
     if (["stub", "quiet", "help", "list", "upstream-insecure"].includes(k)) { out[k] = true; continue; }
     // --record takes an optional folder.
     if (k === "record" && inline === undefined && (argv[i + 1] === undefined || argv[i + 1].startsWith("--"))) { out.record = true; continue; }
-    const v = inline !== undefined ? inline : argv[++i];
+    const v = inline !== undefined ? a.slice(3 + k.length) : argv[++i];
     if (v === undefined) throw new Error("--" + k + " needs a value");
-    out[k] = v;
+    // --length repeats, one song each.
+    if (k === "length") (out.length = out.length || []).push(v);
+    else out[k] = v;
   }
   return out;
 }
@@ -90,6 +107,7 @@ async function main() {
     upstreamInsecure: !!args["upstream-insecure"],
     record,
     replay: args.replay ? path.resolve(args.replay) : null,
+    lengths: parseLengths(args.length),
     log: args.quiet ? undefined : (line) => console.log(new Date().toISOString().slice(11, 19) + "  " + line)
   });
 

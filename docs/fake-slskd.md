@@ -69,6 +69,12 @@ the way real ones do (the plugin rescans that collection).
   sample rate and bit depth, tagged from the filename. `--source FILE` copies one file
   instead, and `--stub` writes placeholders that won't play (that's what the tests use).
 - `--speed N` runs every timeline N times faster.
+- **Lengths are made up, unless you pin them.** The generated length is random, and the
+  playback fallback drops any file more than 5 seconds off the length the playing track
+  says it has, so a fallback against the fake finds nothing. Pin the real length of each
+  song you'll test with: `--length "Radiohead - Karma Police=4:24"` (or `=264`); repeat it
+  for more songs. Case, punctuation and the dash don't matter, so the fallback's
+  `radiohead karma police` matches. The "(Live)" take stays 95 seconds longer.
 
 ## Scenarios
 

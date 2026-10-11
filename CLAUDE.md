@@ -55,7 +55,7 @@ call's shape.
 | URI scheme `slsk://` | `api.playback.onResolveStreamByUri` | plays a finished download |
 | Download provider `slskd-import` | `api.downloads.onResolveByUri` | "Add to library…" via the host modal |
 | Context menu `slskd-search` | track / album / artist | "Search…" (shown as "Soulseek: Search…") |
-| Context menu `slskd-upgrade` | track, multi-track | "Upgrade" (shown as "Soulseek: Upgrade") — **automatic**: `queueUpgrade` adds an entry to the Upgrades tab, which finds, downloads and checks a better copy (see *Automatic upgrades* below); "Choose myself…" on the row opens the old interactive search (`startUpgrade`, filtered by `isUpgradeOver`). Both stamp the download `upgrade: { trackId }`, and "Compare & replace…" / the Downloads row's "Replace in library…" hand the host modal `libraryTrackId` |
+| Context menu `slskd-upgrade` | track, multi-track | "Upgrade" (shown as "Soulseek: Upgrade") — **automatic**: `queueUpgrade` adds an entry to the Upgrades tab, which finds, downloads and checks a better copy (see *Automatic upgrades* below); "Choose the source myself (N)" (`upgrade-sources-toggle`, per-entry `sourcesOpen`) unfolds the entry's own sources; only an entry at rest with **no** sources offers "Search Soulseek myself…", the old interactive search (`startUpgrade`, filtered by `isUpgradeOver`). Both stamp the download `upgrade: { trackId }`, and "Compare & replace…" / the Downloads row's "Replace in library…" hand the host modal `libraryTrackId` |
 | Context menu `slskd-fill-album` | album | "Fill missing tracks…" (shown as "Soulseek: Fill missing tracks…") — folders compared against the album's library rows (`ownedTrackFor`); "Fill" downloads only the missing files |
 | Assistant tools | `status`, `search` (+ `upgradeFor`), `download`, `list_downloads` (+ `uri`), `upgrade`, `list_upgrades` | for the host's control API / MCP; uris are `toolUri` (percent-encoded), resolvers `decodeRef` them |
 
@@ -206,8 +206,10 @@ than by a long-running promise, because a stranger's queue can outlast a restart
   (`useUpgradeSource`) downloads exactly that file — past the 4-sharer cap, and a pick below the
   target lowers it to `best` for this upgrade, as *Take the best found* does. The rows carry
   *Details* (points the panel at that upgrade), Replace / Take the best found / Search again
-  when they apply, *Cancel* and Remove; *Try another sharer* and *Choose myself…* are on the
-  panel only (UX review, 2026-10-06 — five verbs on a row is a row nobody reads).
+  when they apply, *Cancel* and Remove; *Try another sharer* and the sources toggle are on the
+  panel only (UX review, 2026-10-06 — five verbs on a row is a row nobody reads). The sources
+  list is folded by default (UX pass, 2026-10-11): choosing a source by hand stays inside the
+  entry instead of detouring through a filtered search and the Downloads tab.
 - **Upgrade on a selection** (`multi-track` → `queueUpgrades`, 2026-10-06): one entry per
   local track, origin **`batch`**, at most `UPGRADE_BATCH_MAX` (100) per click; not-local,
   missing, and already busy **or ready** rows are skipped (a ready file is kept) and named in one
@@ -258,6 +260,51 @@ Each tab owns one job, and a setting lives next to what it controls:
   Below target), a kept file still downloading — or where a row is special in its group (an
   **Upgrade** chip on a download fetched as one). Never a "Downloading" chip under the Downloading
   group title. Bars only while bytes move (`transferRowProgress`), never a 0% bar for a queued file.
+
+### UX pass (owner-approved 2026-10-11)
+
+Priorities, in the owner's words: search for new files, upgrade existing files, transparency on
+the fallback; download history matters less. Each rule replaced a complaint:
+
+- **A download never moves the view and never toasts** (`enqueueFiles`). The row it came from
+  shows its state instead (`rowTransferStatus`: Queued · #n → Downloading n% with a bar → Done
+  with Play / Failed with Retry; a cancelled one is a result again, with Download). The row's
+  `actions` follow the state, so a queued file can't be queued twice (`notYetQueued` also filters
+  selections). Only a refusal toasts — no row will ever change for it. A just-queued file counts
+  as Queued for `JUST_QUEUED_MS` before slskd's list first carries it (`rec.queuedAt`).
+- **Review fixes (2026-10-11)**: a finished file with `rec.upgrade` offers `replace-transfer`
+  first on its search row — staying put lost the route to Replace the Downloads tab had.
+  Selections sweep in rows an action doesn't fit, so handlers filter: Retry `retryableKey`
+  (failed / cancelled, or forgotten by slskd), Cancel `cancellablePhase`, Replace finished
+  located files only. Rows expose `phase` (`rowPhase`): a **failed** file is free again
+  (`notYetQueued`). Recent row ids are `historyRowId` (time + title), never a list position.
+  `fallbackLastUsedAt` (storage) outlives Clear. A merge never follows a play that played.
+- **Transfer actions on search rows**: rows are `f:<key>` (Files) or `o:<key>` (open folder);
+  Play / Retry / Cancel read ids through `transferKeys`, which strips the prefix only when the
+  raw id isn't itself a known key (a username may begin with "f:").
+- **A folder card opens the folder** (`open-folder` → `folderView`), it never queues. Inside: the
+  tracklist (sorted by file name, no column sort), songs the library has marked *In library*
+  (Fill: from its mode; a plain search: one `libraryRowByName` per file, at most
+  `FOLDER_OWNED_LOOKUPS_MAX`, once per folder), and `folder-download` with `which: "missing"`
+  or `"all"`. `fill-folder` / `download-folder` are gone. *Search…* on an album opens on
+  Folders (`extra.folders`).
+- **Two host facts the live test turned up** (2026-10-11): the host draws *every* declared list
+  action in the selection bar (greyed until something is selected), so lists declare only what
+  some row offers (`declaredActions`) — declaring all four put Play / Retry / Cancel over a fresh
+  search. And only a **`selectable`** track-row-list draws a row's hover actions; a plain list
+  shows none, which is why Recent (fallback) is selectable.
+- **Tab order**: Search · Upgrades · Fallback · Downloads · Settings. The Downloads count is
+  `liveTransferCount` (attention + active + waiting) — counting finished files kept it lit forever.
+- **Upgrades**: Sources found is folded behind *Choose the source myself (N)*; the *Upgrade to*
+  row moved to the foot of the tab.
+- **Fallback**: the top line is `fallbackStatusNode` — the plugin can't see whether the user
+  switched it on or where it sits in the order (the host doesn't say), so it reports its own
+  history and names where the switch lives. Recent resolves are track rows (`historyRows`) with
+  an outcome chip; a miss offers *Search Soulseek for it* (`fallback-search`). While a resolve
+  runs the sidebar item carries an accent dot (`sidebarBadge`; a readiness problem wins).
+  What it can't do without the host: say anything in the **player bar**, which reads
+  "Loading..." through the whole resolve. That needs a host API (resolver status text) — not
+  built, owner's call.
 
 ## slskd facts that bit
 

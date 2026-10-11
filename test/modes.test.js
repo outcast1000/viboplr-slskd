@@ -220,12 +220,15 @@ test("Upgrade: says when nothing better exists, and falls back to a plain search
     assert.equal(findNodes(view, (n) => n.type === "text" && /Nothing better than your copy/.test(n.content || "")).length, 1);
 
     await p._startUpgrade({ kind: "track", trackId: 43 });
-    assert.ok(h.calls.notifications.some((m) => /isn't one — searching Soulseek/.test(m)), h.calls.notifications.join(" | "));
     view = lastView(h);
+    assert.equal(findNodes(view, (n) => n.type === "text" && /isn't one — searching Soulseek/.test(n.content || "")).length, 1, "the reason sits in the Search tab");
     assert.equal(findNodes(view, (n) => n.type === "text" && /Upgrading/.test(n.content || "")).length, 0, "a plain search, no mode");
 
     await p._startUpgrade({ kind: "track", title: "No Surprises", artistName: "Radiohead" });
-    assert.ok(h.calls.notifications.some((m) => /Upgrade works on tracks in your library/.test(m)));
+    view = lastView(h);
+    assert.equal(findNodes(view, (n) => n.type === "text" && /Upgrade works on tracks in your library/.test(n.content || "")).length, 1);
+    assert.equal(findNodes(view, (n) => n.type === "text" && /isn't one/.test(n.content || "")).length, 0, "a new search replaces the old note");
+    assert.equal(h.calls.notifications.length, 0, "no toasts: " + h.calls.notifications.join(" | "));
   } finally {
     p.deactivate();
   }
@@ -340,7 +343,7 @@ test("Fill: compares each folder with the album's library rows and downloads onl
     assert.equal(grid.items.length, 1);
     assert.equal(grid.items[0].title, "OK Computer");
     assert.ok(grid.items[0].subtitle.includes("3 files · 1 you don't have · 27 MB"), "the missing file's size, not the folder's: " + grid.items[0].subtitle);
-    assert.equal(grid.items[0].action, "fill-folder");
+    assert.equal(grid.items[0].action, "open-folder", "a card opens the folder; nothing is queued yet");
 
     // Everything: both folders, the complete one saying so.
     h.actions["mode-show-all"]();
@@ -349,8 +352,20 @@ test("Fill: compares each folder with the album's library rows and downloads onl
     assert.ok(grid.items[1].subtitle.includes("you have all of these"), grid.items[1].subtitle);
     h.actions["mode-show-all"]();
 
+    // The open folder: its tracklist, the owned songs marked, one button for
+    // what's missing and one for all of it.
+    h.actions["open-folder"]({ itemId: grid.items[0].id });
+    assert.equal(posts.length, 0, "opening queues nothing");
+    view = lastView(h);
+    const rows = findNodes(view, (n) => n.type === "track-row-list")[0].items;
+    assert.equal(rows.length, 3);
+    assert.equal(rows.filter((r) => r.badge && r.badge.label === "In library").length, 2);
+    const buttons = findNodes(view, (n) => n.type === "button" && n.action === "folder-download");
+    assert.deepEqual(buttons.map((b) => b.data.which), ["missing", "all"]);
+    assert.ok(/^Download the 1 you don't have · 27 MB$/.test(buttons[0].label), buttons[0].label);
+
     // Fill from the folder: one file, tagged with the library's album.
-    h.actions["fill-folder"]({ itemId: grid.items[0].id });
+    h.actions["folder-download"]({ which: "missing" });
     await waitFor(() => posts.length === 1);
     assert.equal(posts[0].username, "peer");
     assert.deepEqual(posts[0].files.map((f) => f.filename), ["m\\OK Computer\\03 - Subterranean Homesick Alien.flac"]);
@@ -361,15 +376,21 @@ test("Fill: compares each folder with the album's library rows and downloads onl
     assert.equal(rec.meta.title, "Subterranean Homesick Alien", "the file's own title stands");
     assert.equal(rec.upgrade, undefined, "a fill is not an upgrade");
 
-    // A folder with nothing missing is a no-op with a reason.
-    h.actions["fill-folder"]({ itemId: grid.items[1].id });
-    assert.ok(h.calls.notifications.some((m) => /already have every track/.test(m)));
-    assert.equal(posts.length, 1);
+    // The view stayed on the folder, and the queued row says so itself.
+    await waitFor(() => {
+      const r = findNodes(lastView(h), (n) => n.type === "track-row-list")[0];
+      return r && r.items.some((i) => i.badge && /^Queued/.test(i.badge.label));
+    });
+    assert.equal(h.calls.notifications.length, 0, "no toast: " + h.calls.notifications.join(" | "));
+    const after = findNodes(lastView(h), (n) => n.type === "button" && n.action === "folder-download");
+    assert.equal(after.length, 1, "nothing missing is left to fetch, so only “all” remains");
 
     // The Files view under the same filter shows only the missing file.
     h.actions["result-mode"]({ tabId: "files" });
     const list = findNodes(lastView(h), (n) => n.type === "track-row-list")[0];
     assert.deepEqual(list.items.map((i) => i.title), ["03 - Subterranean Homesick Alien.flac"]);
+    assert.ok(/^Queued/.test(list.items[0].badge.label), "the same file is Queued in Files too");
+    assert.deepEqual(list.items[0].actions, ["cancel-transfer"], "a queued row offers Cancel, not Download again");
     assert.equal(list.artwork, "cached", "search rows name albums by guesswork: never let them trigger an image fetch");
   } finally {
     p.deactivate();
@@ -389,7 +410,10 @@ test("Fill: an album target without an id is looked up by name, and one with no 
     assert.ok(header && header.content.includes("you have 2 tracks"), "resolved the id by title, case-insensitively");
 
     await p._startFill({ kind: "album", albumTitle: "Kid A", artistName: "Radiohead" });
-    assert.ok(h.calls.notifications.some((m) => /“Kid A” has no tracks in your library/.test(m)), h.calls.notifications.join(" | "));
+    // Said in the view over the results, not in a toast.
+    assert.ok(!h.calls.notifications.some((m) => /Kid A/.test(m)), h.calls.notifications.join(" | "));
+    const note = findNodes(lastView(h), (n) => n.type === "text" && /“Kid A” has no tracks in your library/.test(n.content || ""));
+    assert.equal(note.length, 1, "the reason sits in the Search tab");
     assert.equal(findNodes(lastView(h), (n) => n.type === "text" && /Filling/.test(n.content || "")).length, 0);
   } finally {
     p.deactivate();

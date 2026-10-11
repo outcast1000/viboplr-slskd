@@ -83,15 +83,28 @@ each with the fix.
   (CD quality)*, the default, which skips large hi-res files; *Hi-res lossless
   (24-bit)*; *Any lossless*; *MP3 320*; *MP3 320 / V0*; *256 kbps or better*;
   or *Best available* (lossless when someone has it). When nothing meets the
-  target, the row offers the best better copy it did find. *Choose myself…*
-  opens the search, filtered to better files, so you can pick one by hand.
+  target, the row offers the best better copy it did find. *Choose the source
+  myself* unfolds every better file the search found, inside the same upgrade:
+  *Use this* switches the download and the upgrade carries on to the check and
+  Replace. Only when nothing better turned up does *Search Soulseek myself…*
+  open the search, filtered to better files. The *Upgrade to* setting sits at
+  the foot of the Upgrades tab.
   Select several tracks to upgrade them all (up to 100 at a time); their
   searches run one after another, and finished ones wait at Ready until you
   choose *Replace all ready…*, which shows Viboplr's compare dialog for each.
 - **Right-click → Soulseek: Fill missing tracks…** on an album: every
-  folder found is compared with the tracks you already have, and **Fill**
-  downloads just the ones you don't. "Show everything found" lifts either filter.
-- **Downloads tab**, grouped: *Needs attention* (failures, in plain words, with
+  folder found is compared with the tracks you already have; open a folder
+  and **Download the N you don't have** fetches just those. "Show everything
+  found" lifts either filter.
+- **Results show their own downloads.** Download leaves you on the results:
+  the row itself turns *Queued*, then *Downloading 42%* with a bar, then
+  *Done* with Play (or *Failed* with Retry). Nothing pops up.
+- **A folder opens before anything is queued**: its tracklist with sizes and
+  lengths, songs your library already has marked *In library*, and one button
+  for what you lack (or for all of it). Select rows to take only some.
+  *Search…* on an album opens on Folders.
+- **Downloads tab** (after Search, Upgrades and Fallback; its count shows only
+  what is moving or failed), grouped: *Needs attention* (failures, in plain words, with
   Retry all) first, then Downloading, Waiting (your place in the other user's
   queue and how long you've waited), Finished and Cancelled. Per-row actions
   show only what applies: Cancel while it runs, Another source while it waits

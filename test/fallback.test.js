@@ -273,14 +273,18 @@ test("the Fallback tab holds the whole feature: numbers, the last resolve (trace
     const stats = fb.filter((n) => n.type === "stats-grid")[0];
     assert.ok(stats, "the numbers");
     assert.equal(stats.items[0].value, "1 of 1", "played 1 of 1");
-    assert.ok(texts.some((t) => /^✓ “Karma Police” — Radiohead {2}· {2}Played/.test(t)), "a Recent line: " + texts.join(" | "));
     assert.equal(h.store.resolveHistory.length, 1, "the history is kept across restarts");
+    assert.ok(texts.some((t) => /^Last used just now\./.test(t)), "the status line reads the history: " + texts.join(" | "));
 
-    // Kept files moved here from Downloads; the only list on the tab.
-    assert.ok(fb.some((n) => n.type === "toolbar" && n.title === "Kept files"));
+    // Recent resolves are rows (with the track menu), then the kept files.
     const lists = fb.filter((n) => n.type === "track-row-list");
-    assert.equal(lists.length, 1);
-    assert.deepEqual(lists[0].actions.map((a) => a.id), ["play-kept", "import-kept", "delete-kept"]);
+    assert.equal(lists.length, 2);
+    const recent = lists[0].items[0];
+    assert.equal(recent.title, "Karma Police");
+    assert.equal(recent.badge.label, "Played");
+    assert.deepEqual(recent.actions, [], "a song that played offers no search");
+    assert.ok(fb.some((n) => n.type === "toolbar" && n.title === "Kept files"));
+    assert.deepEqual(lists[1].actions.map((a) => a.id), ["play-kept", "import-kept", "delete-kept"]);
 
     h.actions["fallback-trace-toggle"]();
     texts = nodes(lastView()).filter((n) => n.type === "text").map((n) => n.content);

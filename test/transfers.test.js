@@ -159,7 +159,7 @@ test("activate registers every surface the manifest declares, and readiness land
     assert.equal(typeof h.resolvers["meta:" + manifest.contributes.streamResolvers[0].id], "function", "playback fallback resolver registered");
     assert.equal(typeof h.resolvers["download:" + manifest.contributes.downloadProviders[0].id], "function");
     assert.equal(typeof h.actions["host:search"], "function", "tabbed view handles the Cmd+K handover");
-    for (const id of ["play-transfer", "import-transfer", "retry-transfer", "another-source", "cancel-transfer", "remove-transfer", "download-file", "download-folder"]) {
+    for (const id of ["play-transfer", "import-transfer", "retry-transfer", "another-source", "cancel-transfer", "remove-transfer", "download-file", "open-folder", "close-folder", "folder-download", "fallback-search", "upgrade-sources-toggle"]) {
       assert.equal(typeof h.actions[id], "function", id + " handled");
     }
     const status = await h.tools.status({});
