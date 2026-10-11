@@ -830,7 +830,9 @@ test("assistant: a resting upgrade (nothing found) whose library row vanished is
   await p.activate(h.api);
   try {
     await h.tools.upgrade({ trackId: 42 });
-    await waitFor(() => entryOf(p) && entryOf(p).state === "none", 8000, "the search to come up empty");
+    // Zero responses reads as a blocked artist name, so this is two searches:
+    // the artist's, then the album + title retry (see blockedSearch.test.js).
+    await waitFor(() => entryOf(p) && entryOf(p).state === "none", 20000, "the search to come up empty");
     assert.equal((await h.tools.list_upgrades({})).upgrades[0].state, "none", "row still there");
     library.tracks.length = 0;
     assert.equal((await h.tools.list_upgrades({})).upgrades[0].state, "gone");

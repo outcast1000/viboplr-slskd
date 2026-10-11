@@ -1,5 +1,8 @@
 # Changelog
 
+## v0.20.0
+- **Artists Soulseek won't search for.** Soulseek's server refuses searches containing some artist names (after takedown requests): "Linkin Park Numb" gets no answers at all while "Meteora Numb" gets hundreds, most of them filed under Linkin Park. When an upgrade, the playback fallback or the assistant's `search` with `upgradeFor` gets no answer from anyone for a track's artist + title, it now searches again by album + title, and a folder named for the album then counts as the artist's. The artist is remembered until the plugin restarts, so later tracks of theirs skip the dead search. Title, length (±5 s) and the live/remix/cover checks still apply. A track with no album says the artist is blocked instead of "Nothing on Soulseek matched", and the Search tab says so when nobody answered a search at all.
+
 ## v0.19.0
 A UX pass around three jobs — finding new files, upgrading the ones you have, and seeing what the playback fallback does — with fewer popups throughout.
 

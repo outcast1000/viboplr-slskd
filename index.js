@@ -1354,6 +1354,78 @@ function fallbackQuery(title, artist) {
   return words.join(" ");
 }
 
+// Soulseek's server keeps a list of excluded search phrases — names it was
+// asked to take down — and a search containing one gets no responses at all.
+// "Linkin Park Numb" answers nothing while "Meteora Numb" answers hundreds of
+// files, most of them filed under "Linkin Park". So a track search that comes
+// back with nothing, when it named the artist, is retried once by album +
+// title, and the artist is remembered for the session so later searches go
+// straight there instead of spending slskd's one search slot on a dead query.
+var blockedArtists = {};
+
+function stripParens(s) {
+  return String(s || "").replace(/\s*[\(\[][^\)\]]*[\)\]]\s*/g, " ");
+}
+
+// The search for a track whose artist name Soulseek won't answer: album words
+// then title words — the folder, then the file. Null without an album: the
+// title alone matches too many other songs to replace a library file with.
+function albumTitleQuery(title, album) {
+  var albumW = titleWords(stripParens(album));
+  if (!albumW.length) return null;
+  var words = albumW.concat(titleWords(stripParens(title)));
+  return words.join(" ");
+}
+
+// "Nothing matched", said so the user looks in the right place: a blocked
+// artist name is Soulseek's doing, not a missing song.
+function noMatchMessage(ranked, artist, what) {
+  if (ranked && ranked.artistBlocked) {
+    return "Soulseek returns nothing for “" + artist + "” (a blocked search phrase); " +
+      (ranked.byAlbum ? "nothing found by album and title either" : "the track has no album to search by instead");
+  }
+  return "Nothing on Soulseek matched " + what;
+}
+
+function blockedArtistKey(artist) {
+  return artistWords(artist).join(" ");
+}
+
+function isBlockedArtist(artist) {
+  var k = blockedArtistKey(artist);
+  return !!(k && blockedArtists[k]);
+}
+
+// `performSearch` for one track, with the blocked-phrase retry above. Resolves
+// the ranked list, or null when the search was abandoned (busy, past
+// `until`). The list carries `byAlbum` — the query that answered — when it
+// came from the album + title search, which is what tells the matchers to
+// accept the album as the artist's stand-in (a folder named "Meteora" never
+// says "Linkin Park"), and `artistBlocked` when the artist's search came back
+// empty, so a caller can say why instead of "nothing matched".
+async function searchForTrack(t, prefs, onProgress, isStale, until) {
+  var primary = fallbackQuery(t.title, t.artist);
+  var alt = t.artist ? albumTitleQuery(t.title, t.album) : null;
+  if (alt === primary) alt = null;
+  var ranked;
+  if (alt && isBlockedArtist(t.artist)) {
+    ranked = await performSearch(alt, prefs, onProgress, isStale, until);
+    if (ranked) { ranked.byAlbum = alt; ranked.artistBlocked = true; }
+    return ranked;
+  }
+  ranked = await performSearch(primary, prefs, onProgress, isStale, until);
+  if (!ranked || ranked.length || ranked.partial || !t.artist) return ranked;
+  if (ranked.responseCount) return ranked;   // peers answered; nothing was downloadable — not a block
+  var key = blockedArtistKey(t.artist);
+  if (key) blockedArtists[key] = true;
+  api.log("info", "search: “" + primary + "” got no responses at all — Soulseek blocks some phrases; " +
+    (alt ? "searching “" + alt + "” instead" : "no album to search by instead"), "slskd");
+  if (!alt) { ranked.artistBlocked = true; return ranked; }
+  var retry = await performSearch(alt, prefs, onProgress, isStale, until);
+  if (retry) { retry.byAlbum = alt; retry.artistBlocked = true; }
+  return retry;
+}
+
 function coverage(wanted, haystack) {
   if (!wanted.length) return 1;
   var hit = 0;
@@ -1374,6 +1446,11 @@ function scoreFallbackCandidate(c, want) {
   var pathWords = wordList(String(c.filename || "").replace(/\\/g, " "), null);
   var titleScore = coverage(want.title, stemWords);
   var artistScore = want.artist.length ? Math.max(coverage(want.artist, pathWords), coverage(want.artist, stemWords)) : 1;
+  // Results of an album + title search (the artist's own name is a blocked
+  // phrase): a folder named for the album counts as the artist's — "Meteora"
+  // stands in for "Linkin Park". Title, duration and the variant words still
+  // have to hold, so this widens who the song is filed under, not what it is.
+  if (want.album && want.album.length) artistScore = Math.max(artistScore, coverage(want.album, pathWords));
   var penalty = 0;
   var asked = want.title.concat(want.artist);
   for (var i = 0; i < VARIANT_WORDS.length; i++) {
@@ -1423,8 +1500,10 @@ function fallbackQualityRank(c, preferred, mode) {
 // Ranked search results → the ones that are this song, best first. Every
 // candidate carries its `match` so the Fallback tab can show why it placed
 // where it did; the ones below the bar are dropped, not demoted.
-function rankFallback(candidates, title, artist, preferred, mode) {
-  var want = { title: titleWords(title), artist: artistWords(artist) };
+// `album` is passed only for the results of an album + title search
+// (`searchForTrack`'s `byAlbum`): it is then accepted in the artist's place.
+function rankFallback(candidates, title, artist, preferred, mode, album) {
+  var want = { title: titleWords(title), artist: artistWords(artist), album: album ? titleWords(stripParens(album)) : null };
   var out = [];
   var filtered = fallbackModeFilters(mode);
   for (var i = 0; i < (candidates || []).length; i++) {
@@ -1851,7 +1930,12 @@ async function performSearchNow(query, prefs, onProgress, isStale, until) {
 
     if (hasFlag(last.state, "Completed")) {
       var done = await fetchResponses(id, stale);
-      return done === null ? null : rankResults(done, prefs || {});
+      if (done === null) return null;
+      var rankedDone = rankResults(done, prefs || {});
+      // How many peers answered at all — zero is what a blocked search phrase
+      // looks like, as opposed to answers with nothing downloadable in them.
+      rankedDone.responseCount = done.length;
+      return rankedDone;
     }
   }
 
@@ -1863,6 +1947,7 @@ async function performSearchNow(query, prefs, onProgress, isStale, until) {
   if (partial.length) {
     var ranked = rankResults(partial, prefs || {});
     ranked.partial = true;
+    ranked.responseCount = partial.length;
     return ranked;
   }
   throw new Error("Search timed out after " + Math.round((Date.now() - startedAt) / 1000) + " seconds.");
@@ -1952,6 +2037,7 @@ async function runSearch(query, extra) {
     return;
   }
   if (gen !== searchGen || ranked === null) return;
+  if (ranked.responseCount != null) search.responseCount = ranked.responseCount;
   annotateForMode(ranked, mode);
   // Group from the FULL ranked list, then cap: a folder that survives the cut
   // must keep every one of its files, or "download folder" would silently grab
@@ -3035,7 +3121,8 @@ async function resolveFallback(title, artistName, albumName, durationSecs, opts)
     try {
       // A deadline, not a stale check: at it the search is stopped and what
       // slskd collected so far is ranked, rather than thrown away.
-      ranked = await performSearch(query, viewPrefs({ knownDurationSecs: durationSecs }), null, null, searchDeadline);
+      ranked = await searchForTrack({ title: title, artist: artistName, album: albumName },
+        viewPrefs({ knownDurationSecs: durationSecs }), null, null, searchDeadline);
     } catch (e) {
       settleSearch((e && e.message) || String(e), "error");
       finishResolve(rec, "failed", (e && e.message) || "search failed");
@@ -3048,22 +3135,26 @@ async function resolveFallback(title, artistName, albumName, durationSecs, opts)
     }
     var preferred = parsePreferredFormats(settings.preferredFormats);
     var mode = fallbackModeOf(settings.fallbackQuality);
-    var matches = rankFallback(ranked, title, artistName, preferred, mode);
+    var byAlbum = ranked.byAlbum ? albumName : null;
+    if (ranked.byAlbum) rec.query = ranked.byAlbum;
+    var matches = rankFallback(ranked, title, artistName, preferred, mode, byAlbum);
     rec.candidates = matches.slice(0, FALLBACK_VIEW_CANDIDATES);
-    settleSearch(ranked.length + " downloadable file" + (ranked.length === 1 ? "" : "s") + ", " + matches.length + " that match" +
+    settleSearch((ranked.byAlbum ? "“" + artistName + "” is a blocked search on Soulseek, so searched “" + ranked.byAlbum + "”: " : "") +
+      ranked.length + " downloadable file" + (ranked.length === 1 ? "" : "s") + ", " + matches.length + " that match" +
       (ranked.partial ? " (cut at " + Math.round(FALLBACK_SEARCH_MS / 1000) + "s while slskd was still searching)" : ""), matches.length ? "info" : "warn");
     if (!matches.length) {
       // Say when it was the quality setting, not the song, that came up empty —
       // "nothing matched" would send the user looking in the wrong place.
-      var unfiltered = fallbackModeFilters(mode) ? rankFallback(ranked, title, artistName, preferred, "best").length : 0;
+      var unfiltered = fallbackModeFilters(mode) ? rankFallback(ranked, title, artistName, preferred, "best", byAlbum).length : 0;
       finishResolve(rec, "no-match", unfiltered
         ? "no " + (mode === "lossless" ? "lossless" : "MP3 320 / V0") + " file — " + unfiltered + " other matching file" + (unfiltered === 1 ? "" : "s") + " skipped by the Fallback quality setting"
-        : (ranked.length ? "nothing on Soulseek matched the title and artist closely enough" : "nothing on Soulseek matched"));
+        : (ranked.artistBlocked ? noMatchMessage(ranked, artistName, "")
+          : (ranked.length ? "nothing on Soulseek matched the title and artist closely enough" : "nothing on Soulseek matched")));
       return null;
     }
 
     // 3. Fetch — hedged. See `raceSharers`.
-    var race = await raceSharers(rec, matches, { fkey: fkey, title: title, artistName: artistName, query: query, deadline: deadline });
+    var race = await raceSharers(rec, matches, { fkey: fkey, title: title, artistName: artistName, query: ranked.byAlbum || query, deadline: deadline });
     clearLive(rec);
     if (race.state === "done") {
       finishResolve(rec, "played", null, race.path);
@@ -5835,7 +5926,12 @@ function searchTab() {
   }
 
   if (!search.results.length) {
-    children.push({ type: "text", content: "No downloadable audio found for “" + search.query + "”. Try fewer or broader words.", className: "plugin-muted" });
+    // No peer answered at all — a typo, or one of the phrases Soulseek's server
+    // won't search for (artist names, after takedown requests). Say how to
+    // find the files anyway.
+    children.push({ type: "text", content: search.responseCount === 0 && !search.error
+      ? "Nobody on Soulseek answered “" + search.query + "”. Soulseek blocks searches for some artist names — if this one names an artist, try the album and song title without it."
+      : "No downloadable audio found for “" + search.query + "”. Try fewer or broader words.", className: "plugin-muted" });
     return { type: "layout", direction: "vertical", children: children };
   }
 
@@ -7447,7 +7543,7 @@ function compareKeys(a, b) {
 // out there" can still offer the 320 that is. `better` counts both.
 function rankUpgrade(ranked, entry) {
   var target = upgradeTargetOf(entry.target);
-  var matches = rankFallback(ranked, entry.title, entry.artist, null, "best");
+  var matches = rankFallback(ranked, entry.title, entry.artist, null, "best", ranked.byAlbum ? entry.album : null);
   // A variant word the title doesn't ask for (live, remix, cover…) is marked
   // down in the fallback, which only has to play something close. An upgrade
   // REPLACES the library copy, so a different recording is out entirely.
@@ -7767,20 +7863,20 @@ async function beginUpgrade(row, opts) {
 async function runUpgradeSearch(e) {
   upgradeSearchRunning = true;
   try {
-    var query = fallbackQuery(e.title, e.artist);
     var prefs = viewPrefs({ knownDurationSecs: e.durationSecs });
-    var ranked = await performSearch(query, prefs, null, null, nowMs() + UPGRADE_SEARCH_MS);
+    var ranked = await searchForTrack({ title: e.title, artist: e.artist, album: e.album }, prefs, null, null, nowMs() + UPGRADE_SEARCH_MS);
     if (upgrades[upgradeKey(e.trackId)] !== e || e.state !== "searching") return;   // removed meanwhile
     if (ranked === null) return;   // slskd was busy; the next poll tries again
     var r = rankUpgrade(ranked, e);
     e.candidates = r.picks.slice(0, UPGRADE_KEEP_CANDIDATES).map(leanCandidate);
     e.alternative = r.alternative ? leanCandidate(r.alternative) : null;
-    api.log("info", "upgrade: “" + e.title + "” — " + ranked.length + " files, " + r.matched + " match, " + r.better + " better, " + r.picks.length + " at the target", "slskd");
+    api.log("info", "upgrade: “" + e.title + "” — " + (ranked.byAlbum ? "searched “" + ranked.byAlbum + "” (artist blocked), " : "") +
+      ranked.length + " files, " + r.matched + " match, " + r.better + " better, " + r.picks.length + " at the target", "slskd");
     if (!e.candidates.length) {
       if (e.alternative) {
         setUpgradeState(e, "alternative", "No copy at " + UPGRADE_TARGETS[upgradeTargetOf(e.target)] + " found; best better copy is " + qualityLabel(e.alternative));
       } else {
-        setUpgradeState(e, "none", r.matched ? "Nothing better than your copy on Soulseek right now" : "Nothing on Soulseek matched this track");
+        setUpgradeState(e, "none", r.matched ? "Nothing better than your copy on Soulseek right now" : noMatchMessage(ranked, e.artist, "this track"));
       }
       await saveUpgrades();
       return;
@@ -8804,18 +8900,27 @@ function registerAssistantTools() {
     // the bar a result has to clear — the view's "Upgrade with Soulseek…".
     var mode = null;
     var known = args.durationSecs != null && !isNaN(Number(args.durationSecs)) ? Number(args.durationSecs) : null;
+    // The track a search is for, when the caller left the query to us: the
+    // search then gets the blocked-artist retry (`searchForTrack`).
+    var forTrack = null;
     if (args.upgradeFor != null) {
       var row = await upgradableRow(args.upgradeFor);
       mode = upgradeModeFor(row);
-      if (!q) q = searchQueryForTarget({ kind: "track", title: row.title, artistName: row.artist_name });
+      if (!q) {
+        forTrack = { title: row.title, artist: row.artist_name || null, album: row.album_title || null };
+        q = searchQueryForTarget({ kind: "track", title: row.title, artistName: row.artist_name });
+      }
       if (known == null && row.duration_secs > 0) known = row.duration_secs;
     }
     if (!q) throw new Error('"query" (string) is required, unless upgradeFor names a library track');
     if (readiness.state !== "ready") throw new Error("slskd is not ready (" + readiness.state + ") — see the status tool");
     var limit = Math.min(100, Math.max(1, parseInt(args.limit, 10) || 25));
     var prefs = viewPrefs(known != null ? { knownDurationSecs: known } : null);
-    var ranked = await performSearch(q, prefs, null, null);
+    var ranked = forTrack ? await searchForTrack(forTrack, prefs, null, null) : await performSearch(q, prefs, null, null);
     if (ranked === null) ranked = [];
+    var blocked = !!ranked.artistBlocked;
+    if (ranked.byAlbum) q = ranked.byAlbum;
+    else if (!ranked.length && !ranked.responseCount && !forTrack) blocked = true;
     annotateForMode(ranked, mode);
     toolResults = {};
     toolMode = mode;
@@ -8836,6 +8941,14 @@ function registerAssistantTools() {
       out.better = ranked.filter(function (c) { return c.better; }).length;
       out.note = (args.showAll ? "Every file found; better = beats the library copy. " : "Only files that beat the library copy (showAll=true for everything). ") +
         "download stamps the file as this track's upgrade; once finished, list_downloads gives its uri for the host's replace_track_file.";
+    }
+    // Zero responses usually means a phrase Soulseek's server won't search for
+    // (artist names, after takedown requests) — say so, or "no results" reads
+    // as "Soulseek doesn't have it".
+    if (ranked.byAlbum) {
+      out.note += " The artist's name is a blocked search on Soulseek, so this searched by album and title instead (“" + ranked.byAlbum + "”) — check each result's folder is the right album.";
+    } else if (blocked) {
+      out.note += " Nobody answered at all: Soulseek blocks searches for some artist names. Search again without the artist — album and song title.";
     }
     return out;
   });
@@ -9206,6 +9319,7 @@ function deactivate() {
   saveTimer = null;
   searchGen++;
   toolResults = {};
+  blockedArtists = {};
   knownDone = {};
   ledgerSeen = {};
   completionsSeeded = false;
@@ -9346,6 +9460,9 @@ return {
   _normalizeText: normalizeText,
   _fallbackKey: fallbackKey,
   _fallbackQuery: fallbackQuery,
+  _albumTitleQuery: albumTitleQuery,
+  _searchForTrack: searchForTrack,
+  _blockedArtists: function () { return blockedArtists; },
   _scoreFallbackCandidate: scoreFallbackCandidate,
   _rankFallback: rankFallback,
   _fallbackQualityRank: fallbackQualityRank,
