@@ -231,12 +231,16 @@ var ledgerSeen = {};
 // in flight), so every search — the view's, a context-menu one, an assistant
 // tool's — goes through this chain.
 var searchChain = Promise.resolve();
-// The last ranked list the assistant `search` tool produced, keyed by candidate
-// id, so `download` can be handed ids instead of (user, filename, size) triples.
+// What the assistant's recent `search` calls produced, keyed by candidate id,
+// so `download` can be handed ids instead of (user, filename, size) triples.
+// Each holds { c, mode, seq }: the candidate, the upgrade mode of the search it
+// came from (null for a plain one — what `download` stamps onto the tracked
+// record), and which search. The last TOOL_SEARCHES_KEPT searches stay valid:
+// keeping only the newest made an id from one search useless the moment a
+// second search ran, mid-way through picking from the first.
 var toolResults = {};
-// The upgrade mode of the assistant's last search (null for a plain one) —
-// what its `download` stamps onto the tracked record.
-var toolMode = null;
+var toolSearchSeq = 0;
+var TOOL_SEARCHES_KEPT = 5;
 
 var readinessTimer = null;
 var transferTimer = null;
@@ -1366,8 +1370,12 @@ function annotateForMode(ranked, mode) {
   if (!mode) return;
   for (var i = 0; i < ranked.length; i++) {
     var c = ranked[i];
-    if (mode.kind === "upgrade") c.better = isUpgradeOver(c, mode.current);
-    else if (mode.kind === "fill") c.owned = !!ownedTrackFor(c, mode.owned);
+    if (mode.kind === "upgrade") {
+      c.better = isUpgradeOver(c, mode.current);
+      c.source = upgradeSource(c, mode);
+    } else if (mode.kind === "fill") {
+      c.owned = !!ownedTrackFor(c, mode.owned);
+    }
   }
 }
 
@@ -2279,6 +2287,7 @@ async function refreshTransfers() {
   await readTagsForResolved();
   await reconcilePendingFallbacks();
   await enforceFallbackLimits(false);
+  await adoptManualUpgrades();
   await advanceUpgrades();
   render();
   if (justFinished.length) await handleCompletions(justFinished);
@@ -2349,6 +2358,9 @@ async function readTagsForResolved() {
         var tags = (results && results[j]) || null;
         rec.meta = mergeMeta(rec.meta, tags);
         rec.tagsRead = true;
+        // The host read the file and found no audio in it: damaged, truncated
+        // or not what its name says (a run of zero bytes once passed as FLAC).
+        rec.unreadable = !tags;
       }
       return api.storage.set(stateKey("tracked"), tracked);
     })
@@ -7607,9 +7619,17 @@ function rankUpgrade(ranked, entry) {
   var matches = rankFallback(ranked, entry.title, entry.artist, null, "best", ranked.byAlbum ? entry.album : null);
   // A variant word the title doesn't ask for (live, remix, cover…) is marked
   // down in the fallback, which only has to play something close. An upgrade
-  // REPLACES the library copy, so a different recording is out entirely.
-  var better = matches.filter(function (c) { return !c.match.penalty && isUpgradeOver(c, entry.current); });
+  // REPLACES the library copy, so a different recording is out entirely — and
+  // so is a different MIX of it (see `upgradeSource`).
+  var better = matches.filter(function (c) {
+    if (c.match.penalty || !isUpgradeOver(c, entry.current)) return false;
+    c.source = upgradeSource(c, entry);
+    return !c.source.excluded;
+  });
   var sorter = function (a, b) {
+    // The library copy's own album first: a compilation, a vinyl rip or a
+    // folder that names no album is the same song from a different master.
+    if (a.source.tier !== b.source.tier) return a.source.tier - b.source.tier;
     var sa = Math.round(a.match.score * 10), sb = Math.round(b.match.score * 10);
     if (sa !== sb) return sb - sa;
     var q = compareKeys(upgradeQualityKey(a, target), upgradeQualityKey(b, target));
@@ -7623,6 +7643,63 @@ function rankUpgrade(ranked, entry) {
   var picks = better.filter(function (c) { return meetsQualityTarget(c, target); }).sort(sorter);
   var rest = better.filter(function (c) { return !meetsQualityTarget(c, target); }).sort(sorter);
   return { picks: picks, alternative: rest[0] || null, matched: matches.length, better: better.length };
+}
+
+// Folder words that say a file is a different recording or a different mix of
+// the song — never an upgrade, unless the library copy's own album says the
+// same (an album called "Live at Leeds" is allowed its live files).
+var UPGRADE_OTHER_RECORDING_WORDS = ["live", "concert", "unplugged", "bbc", "bootleg", "sessions", "session",
+  "rehearsal", "rehearsals", "demo", "demos", "tribute", "karaoke", "acoustic", "instrumental"];
+var UPGRADE_MULTICHANNEL_WORDS = ["atmos", "surround", "multichannel", "quad", "quadraphonic", "dvda", "dts", "6ch", "5ch", "8ch"];
+// Folder words that say the same recording came from somewhere other than the
+// album: ranked after the album's own copies, not excluded.
+var UPGRADE_COMPILATION_WORDS = ["greatest", "hits", "best", "collection", "anthology", "essential", "essentials",
+  "ultimate", "definitive", "gold", "compilation", "various", "va", "nuggets", "sampler", "soundtrack",
+  "sixties", "seventies", "eighties", "nineties", "1001"];
+var UPGRADE_VINYL_WORDS = ["vinyl", "lp", "needledrop", "needle"];
+
+// Pure: what the folder a candidate sits in says about it, against the
+// library copy. `excluded` (with `why`) for another recording or a multichannel
+// mix; otherwise `tier` — 0 the album's own folder, 1 a folder that doesn't
+// name it (or no album to compare), 2 a compilation or vinyl rip.
+//
+// Multichannel is also caught by size: a FLAC bigger than stereo PCM at its own
+// rate and depth could ever need is carrying more than two channels (a 5.1
+// Blu-ray rip at 16/48 runs ~2,500 kbps against stereo's 1,536 ceiling), and
+// "5.1" survives no tokenizer as a word.
+function upgradeSource(c, entry) {
+  var path = String(c.filename || "").replace(/\\/g, " ");
+  var folderWords = wordList(dirnameRemote(c.filename).replace(/\\/g, " "), null);
+  var own = wordList([entry.album, entry.title].filter(Boolean).join(" "), null);
+  var has = function (list) {
+    for (var i = 0; i < list.length; i++) {
+      if (folderWords.indexOf(list[i]) >= 0 && own.indexOf(list[i]) < 0) return list[i];
+    }
+    return null;
+  };
+  if (/(^|[^0-9])[57]\.1([^0-9]|$)/.test(path) || has(UPGRADE_MULTICHANNEL_WORDS) || /dvd[ -]?a\b/i.test(path)) {
+    return { excluded: true, why: "a multichannel mix" };
+  }
+  if (exceedsStereo(c.extension, c.size, c.length, c.sampleRate, c.bitDepth)) {
+    return { excluded: true, why: "more data than stereo — a multichannel mix" };
+  }
+  var other = has(UPGRADE_OTHER_RECORDING_WORDS);
+  if (other) return { excluded: true, why: "another recording (“" + other + "”)" };
+  if (has(UPGRADE_COMPILATION_WORDS) || has(UPGRADE_VINYL_WORDS)) return { tier: 2 };
+  var albumW = entry.album ? titleWords(stripParens(entry.album)) : [];
+  if (albumW.length && coverage(albumW, folderWords) >= 0.5) return { tier: 0 };
+  return { tier: 1 };
+}
+
+// Pure: is a lossless file larger than two channels of PCM at its rate and
+// depth? Unknown rate/depth read as CD (44.1k/16), the floor of what's shared;
+// a little slack covers container overhead and embedded art.
+function exceedsStereo(ext, size, lengthSecs, sampleRate, bitDepth) {
+  if (["flac", "wav", "aiff", "aif", "alac", "ape", "wv"].indexOf(String(ext || "").toLowerCase()) < 0) return false;
+  if (!size || !lengthSecs) return false;
+  var kbps = size * 8 / lengthSecs / 1000;
+  var ceiling = (sampleRate || 44100) * (bitDepth || 16) * 2 / 1000;
+  return kbps > ceiling * 1.1;
 }
 
 // Pure: what a finished file really is. Lossless is taken from the container
@@ -8015,6 +8092,48 @@ async function abandonUpgradeAttempt(e, t, reason, drop) {
   await startNextUpgradeCandidate(e);
 }
 
+// A file picked by hand for an upgrade (a search with upgradeFor, then a
+// download) takes over that track's entry once it lands, and goes through the
+// same check as an automatic pick (readable, stereo, better, at the target).
+// Without this the entry kept offering whatever the automatic upgrade had
+// found — a 5.1 mix, a compilation — while the right file sat in Downloads.
+// An automatic attempt still in flight is left to finish in Downloads; it no
+// longer belongs to the entry. Each finished file is considered once.
+async function adoptManualUpgrades() {
+  var keys = Object.keys(tracked);
+  var trackedChanged = false;
+  var upgradesChanged = false;
+  for (var i = 0; i < keys.length; i++) {
+    var k = keys[i];
+    var rec = tracked[k];
+    if (!rec || !rec.upgrade || rec.upgrade.auto || rec.upgradeAdopted || !rec.resolvedPath) continue;
+    var t = transferByKey(k);
+    if (!t || transferPhase(t.state) !== "succeeded") continue;
+    rec.upgradeAdopted = true;
+    trackedChanged = true;
+    var e = upgrades[upgradeKey(rec.upgrade.trackId)];
+    if (!e || e.state === "replaced" || e.state === "gone" || (e.file && e.file.key === k)) continue;
+    var parts = splitKey(k);
+    var q = rec.quality || {};
+    var c = {
+      username: parts ? parts.username : t.username, filename: parts ? parts.filename : t.filename,
+      size: t.size || rec.size || null, length: rec.length, extension: extOf(t.filename),
+      bitRate: q.bitRate, bitDepth: q.bitDepth, sampleRate: q.sampleRate, isVariableBitRate: q.isVariableBitRate
+    };
+    if (e.active && e.active.key !== k) {
+      api.log("info", "upgrade: “" + e.title + "” — using the file picked by hand (" + c.username + ") instead of " + e.active.username + "'s", "slskd");
+    }
+    var now = nowMs();
+    e.active = Object.assign(leanCandidate(c), { key: k, startedAt: now, movedAt: now, lastBytes: c.size || 0, unseen: 0, manual: true });
+    e.file = { key: k, path: rec.resolvedPath, size: c.size };
+    e.lastRejected = null;
+    setUpgradeState(e, "checking");
+    upgradesChanged = true;
+  }
+  if (trackedChanged) await api.storage.set(stateKey("tracked"), tracked);
+  if (upgradesChanged) await saveUpgrades();
+}
+
 // One step for every entry, from the transfer poll (so `transfers` is fresh).
 async function advanceUpgrades() {
   if (readiness.state !== "ready" || upgradeAdvancing) return;
@@ -8099,7 +8218,11 @@ async function advanceUpgradeCheck(e) {
   var duration = rec && rec.meta && rec.meta.durationSecs ? rec.meta.durationSecs : null;
   var pick = e.active || {};
   var measured = duration ? measuredQuality(pick, e.file.size, duration) : null;
-  var verdict = checkUpgrade(e, pick, measured);
+  var verdict = rec && canRead && rec.unreadable
+    ? { ok: false, note: "the file can't be read — damaged or incomplete" }
+    : exceedsStereo(pick.extension || extOf(e.file.path), e.file.size, duration, pick.sampleRate, pick.bitDepth)
+      ? { ok: false, note: "more data than stereo — a multichannel mix" }
+      : checkUpgrade(e, pick, measured);
   if (!verdict.ok) {
     api.log("warn", "upgrade: “" + e.title + "” — rejected " + pick.username + "'s file: " + verdict.note, "slskd");
     // The file stays in Downloads — the plugin deletes only what the fallback
@@ -8834,7 +8957,20 @@ async function openReplace(key) {
 // belongs to whatever the user has open; `download` goes through the same core
 // as a clicked download, so an assistant-queued file is tracked, located and
 // imported identically. Guarded: older hosts have no api.assistant namespace.
+// What an upgrade search knows about where a file came from (`upgradeSource`),
+// in words an assistant can show the user.
+var SOURCE_LABELS = ["the album's own folder", "a folder that doesn't name the album", "a compilation or vinyl rip"];
+
 function toolCandidate(c) {
+  var out = toolCandidateFields(c);
+  if (c.source) {
+    if (c.source.excluded) out.notAnUpgrade = c.source.why;
+    else out.source = SOURCE_LABELS[c.source.tier];
+  }
+  return out;
+}
+
+function toolCandidateFields(c) {
   return {
     id: candidateId(c),
     user: c.username,
@@ -8850,6 +8986,57 @@ function toolCandidate(c) {
     queueLength: c.queueLength,
     uploadSpeedBytesPerSec: c.uploadSpeed
   };
+}
+
+// Remember a search's candidates for `download`, and forget searches older
+// than the last TOOL_SEARCHES_KEPT. A candidate found again by a newer search
+// takes that search's mode (the latest intent wins).
+function rememberToolResults(ranked, mode) {
+  var seq = ++toolSearchSeq;
+  for (var i = 0; i < ranked.length; i++) toolResults[candidateId(ranked[i])] = { c: ranked[i], mode: mode || null, seq: seq };
+  var ids = Object.keys(toolResults);
+  for (var j = 0; j < ids.length; j++) {
+    if (toolResults[ids[j]].seq <= seq - TOOL_SEARCHES_KEPT) delete toolResults[ids[j]];
+  }
+}
+
+var LIST_DOWNLOADS_LIMIT = 50;
+
+// Pure: the list_downloads rows a caller asked for, newest first. Every
+// transfer slskd still holds used to come back on every call — tens of
+// kilobytes to find one uri. `total` is the count before `limit`.
+function filterTransfers(rows, args) {
+  var a = args || {};
+  var phases = a.phase == null ? null : [].concat(a.phase).map(String);
+  var q = a.query ? normalizeText(a.query) : "";
+  var out = rows.filter(function (r) {
+    if (a.upgradeFor != null && r.upgradeFor !== Number(a.upgradeFor)) return false;
+    if (a.user && r.user !== String(a.user)) return false;
+    if (phases && phases.indexOf(r.phase) < 0) return false;
+    if (q && normalizeText([r.filename, r.title, r.artist, r.album].filter(Boolean).join(" ")).indexOf(q) < 0) return false;
+    return true;
+  });
+  out.sort(function (x, y) { return String(y.requestedAt || "").localeCompare(String(x.requestedAt || "")); });
+  var limit = Math.min(500, Math.max(1, parseInt(a.limit, 10) || LIST_DOWNLOADS_LIMIT));
+  var shown = out.slice(0, limit);
+  shown.total = out.length;
+  return shown;
+}
+
+// Pure: the list_upgrades entries a caller asked for. `state` narrows to one
+// or more states; replaced entries — done, and most of the list after a while
+// — are left out unless asked for. `hidden` counts what that left out.
+function filterUpgrades(entries, args) {
+  var a = args || {};
+  var states = a.state == null ? null : [].concat(a.state).map(String);
+  var hidden = 0;
+  var out = entries.filter(function (e) {
+    if (states) return states.indexOf(e.state) >= 0;
+    if (e.state === "replaced" && !a.includeReplaced) { hidden++; return false; }
+    return true;
+  });
+  out.hidden = hidden;
+  return out;
 }
 
 function toolTransfer(t) {
@@ -8872,6 +9059,7 @@ function toolTransfer(t) {
     sizeBytes: t.size || null,
     placeInQueue: t.placeInQueue != null ? t.placeInQueue : null,
     speedBytesPerSec: t.averageSpeed || null,
+    requestedAt: t.requestedAt || t.enqueuedAt || null,
     error: t.exception || null,
     attempts: t.attempts || null,
     localPath: (rec && rec.resolvedPath && tier === "local") ? rec.resolvedPath : null,
@@ -8983,10 +9171,17 @@ function registerAssistantTools() {
     if (ranked.byAlbum) q = ranked.byAlbum;
     else if (!ranked.length && !ranked.responseCount && !forTrack) blocked = true;
     annotateForMode(ranked, mode);
-    toolResults = {};
-    toolMode = mode;
-    for (var i = 0; i < ranked.length; i++) toolResults[candidateId(ranked[i])] = ranked[i];
+    rememberToolResults(ranked, mode);
     var shown = mode && !args.showAll ? ranked.filter(function (c) { return c.better; }) : ranked;
+    // An upgrade lists the album's own copies first and other mixes last — the
+    // same order the automatic upgrade picks in (`rankUpgrade`). Stable, so the
+    // quality ranking holds within each group.
+    if (mode && mode.kind === "upgrade") {
+      var group = function (c) { return c.source ? (c.source.excluded ? 3 : c.source.tier) : 1; };
+      shown = shown.map(function (c, i) { return { c: c, i: i }; })
+        .sort(function (a, b) { return (group(a.c) - group(b.c)) || (a.i - b.i); })
+        .map(function (x) { return x.c; });
+    }
     var out = {
       query: q,
       total: ranked.length,
@@ -9018,25 +9213,28 @@ function registerAssistantTools() {
     var ids = Array.isArray(args.ids) ? args.ids.map(String) : (typeof args.ids === "string" ? [args.ids] : []);
     if (!ids.length) throw new Error('"ids" (array of result ids from search) is required');
     if (readiness.state !== "ready") throw new Error("slskd is not ready (" + readiness.state + ") — see the status tool");
-    var byUser = {};
+    // One batch per sharer per search: files from different searches can carry
+    // different upgrade stamps.
+    var batches = {};
     var unknown = [];
     for (var i = 0; i < ids.length; i++) {
-      var c = toolResults[ids[i]];
-      if (!c) { unknown.push(ids[i]); continue; }
-      (byUser[c.username] = byUser[c.username] || []).push(c);
+      var hit = toolResults[ids[i]];
+      if (!hit) { unknown.push(ids[i]); continue; }
+      var bk = hit.seq + KEY_SEP + hit.c.username;
+      (batches[bk] = batches[bk] || { user: hit.c.username, mode: hit.mode, files: [] }).files.push(hit.c);
     }
-    if (unknown.length && !Object.keys(byUser).length) {
-      throw new Error("Unknown result id(s): " + unknown.join(", ") + " — ids come from the most recent search call");
+    if (unknown.length && !Object.keys(batches).length) {
+      throw new Error("Unknown result id(s): " + unknown.join(", ") + " — ids come from the last " + TOOL_SEARCHES_KEPT + " search calls");
     }
     var queued = [];
     var failures = [];
-    var users = Object.keys(byUser);
-    for (var u = 0; u < users.length; u++) {
-      var files = byUser[users[u]];
-      var label = basenameRemote(dirnameRemote(files[0].filename));
-      var out = await enqueueBatch(users[u], files, label, null, modeRecExtra(toolMode));
-      for (var q = 0; q < out.queued.length; q++) queued.push({ user: users[u], filename: basenameRemote(out.queued[q].filename) });
-      for (var f = 0; f < out.failures.length; f++) failures.push({ user: users[u], filename: basenameRemote(out.failures[f].filename), message: out.failures[f].message || "refused" });
+    var keys = Object.keys(batches);
+    for (var u = 0; u < keys.length; u++) {
+      var b = batches[keys[u]];
+      var label = basenameRemote(dirnameRemote(b.files[0].filename));
+      var out = await enqueueBatch(b.user, b.files, label, null, modeRecExtra(b.mode));
+      for (var q = 0; q < out.queued.length; q++) queued.push({ user: b.user, filename: basenameRemote(out.queued[q].filename) });
+      for (var f = 0; f < out.failures.length; f++) failures.push({ user: b.user, filename: basenameRemote(out.failures[f].filename), message: out.failures[f].message || "refused" });
     }
     if (queued.length) {
       api.ui.showNotification(queued.length === 1
@@ -9048,7 +9246,7 @@ function registerAssistantTools() {
       note: "Transfers wait in the other user's queue; watch list_downloads." };
   });
 
-  api.assistant.onTool("list_downloads", async function () {
+  api.assistant.onTool("list_downloads", async function (args) {
     if (readiness.state === "ready") {
       try {
         var fresh = await fetchTransfers();
@@ -9057,9 +9255,12 @@ function registerAssistantTools() {
         console.error("slskd: list_downloads refresh failed:", e);
       }
     }
+    var rows = filterTransfers(transfers.map(toolTransfer), args || {});
     return {
-      downloads: transfers.map(toolTransfer),
-      note: "A finished file's uri is what Viboplr's replace_track_file (upgradeFor rows) or download_plugin_track takes."
+      downloads: rows,
+      total: rows.total,
+      note: "A finished file's uri is what Viboplr's replace_track_file (upgradeFor rows) or download_plugin_track takes." +
+        (rows.total > rows.length ? " Showing the newest " + rows.length + " of " + rows.total + " — filter with upgradeFor, user, phase or query, or raise limit." : "")
     };
   });
 
@@ -9083,7 +9284,8 @@ function registerAssistantTools() {
     return { upgrade: toolUpgrade(upgrades[key]) };
   });
 
-  api.assistant.onTool("list_upgrades", async function () {
+  api.assistant.onTool("list_upgrades", async function (args) {
+    args = args || {};
     var keys = Object.keys(upgrades);
     var changed = false;
     for (var i = 0; i < keys.length; i++) {
@@ -9097,9 +9299,13 @@ function registerAssistantTools() {
       if (e.state === "ready" && !e.replaceRequested) { e.replaceRequested = true; changed = true; }
     }
     if (changed) await saveUpgrades();
+    var all = keys.map(function (k) { return upgrades[k]; }).filter(Boolean);
+    var picked = filterUpgrades(all, args);
     return {
-      upgrades: keys.map(function (k) { return upgrades[k]; }).filter(Boolean).map(toolUpgrade),
-      note: "When state is ready, show the user current vs ready.quality and pass ready.uri to Viboplr's replace_track_file (it stages, compares, and replaces only on confirm). State gone means the trackId no longer exists in the library — remove the entry (upgrade action=remove), don't stage against it."
+      upgrades: picked.map(toolUpgrade),
+      replacedHidden: picked.hidden,
+      note: "When state is ready, show the user current vs ready.quality and pass ready.uri to Viboplr's replace_track_file (it stages, compares, and replaces only on confirm). State gone means the trackId no longer exists in the library — remove the entry (upgrade action=remove), don't stage against it." +
+        (picked.hidden ? " " + picked.hidden + " replaced entr" + (picked.hidden === 1 ? "y is" : "ies are") + " hidden (includeReplaced=true lists them)." : "")
     };
   });
 }
@@ -9284,7 +9490,6 @@ async function switchServer(on) {
   search = { query: "", id: null, running: false, responseCount: 0, fileCount: 0, matchCount: 0, folderCount: 0, results: [], folders: [], error: null, sortColumn: null, sortDir: "desc", mode: null };
   transfers = [];
   toolResults = {};
-  toolMode = null;
   knownDone = {};
   ledgerSeen = {};
   completionsSeeded = false;
@@ -9561,6 +9766,12 @@ return {
   _queueUpgrade: queueUpgrade,
   _advanceUpgrades: advanceUpgrades,
   _upgrades: function () { return upgrades; },
+  _upgradeSource: upgradeSource,
+  _exceedsStereo: exceedsStereo,
+  _filterTransfers: filterTransfers,
+  _filterUpgrades: filterUpgrades,
+  _rememberToolResults: rememberToolResults,
+  _toolResults: function () { return toolResults; },
   _meetsQualityTarget: meetsQualityTarget,
   _windowsCantStore: windowsCantStore,
   _misconfiguredSlskdDir: misconfiguredSlskdDir,

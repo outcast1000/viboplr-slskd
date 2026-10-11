@@ -784,7 +784,10 @@ test("assistant: upgrade runs the automatic flow, list_upgrades gives the ready 
     library.tracks[0].path = "file:///Users/me/Music/RH/06 Karma Police.flac";
     library.tracks[0].file_size = 30e6;
     const after = await h.tools.list_upgrades({});
-    assert.equal(after.upgrades[0].state, "replaced");
+    assert.equal(after.upgrades.length, 0, "replaced entries are hidden by default");
+    assert.equal(after.replacedHidden, 1);
+    const all = await h.tools.list_upgrades({ includeReplaced: true });
+    assert.equal(all.upgrades[0].state, "replaced");
   } finally {
     p.deactivate();
   }
@@ -914,6 +917,136 @@ test("integration: a batch upgrade waits at Ready — no dialog by itself — an
     h.actions["upgrade-replace-all"]();
     await waitFor(() => asked.length === 1, 2000, "the dialog, asked by the user");
     await waitFor(() => entryOf(p).state === "replaced", 2000, "replaced");
+  } finally {
+    p.deactivate();
+  }
+});
+
+// --- Picking the right copy, and handing it over ------------------------------
+// Upgrades run against a real library kept turning up the right song from the
+// wrong source: a 5.1 Blu-ray mix, a live album, a compilation, a corrupt file.
+
+const OKC = (o) => Object.assign({ title: "Karma Police", artist: "Radiohead", album: "OK Computer" }, o || {});
+
+test("upgradeSource: multichannel and other recordings are out, the album's own folder ranks first", () => {
+  const s = (filename, extra) => plugin._upgradeSource(cand(Object.assign({ filename }, extra || {})), OKC());
+  assert.equal(s("m\\Radiohead\\OK Computer\\06 - Karma Police.flac").tier, 0);
+  assert.equal(s("m\\Radiohead\\Misc\\06 - Karma Police.flac").tier, 1, "a folder that names no album");
+  assert.equal(s("m\\Radiohead\\Greatest Hits\\06 - Karma Police.flac").tier, 2, "a compilation");
+  assert.equal(s("m\\Radiohead\\OK Computer [Vinyl]\\06 - Karma Police.flac").tier, 2, "a vinyl rip");
+  assert.equal(s("m\\Radiohead\\OK Computer {16-48 LPCM 5.1}\\06 - Karma Police.flac").excluded, true);
+  assert.equal(s("m\\Radiohead\\OK Computer (Atmos)\\06 - Karma Police.flac").excluded, true);
+  assert.equal(s("m\\Radiohead\\OK Computer (DVD-A)\\06 - Karma Police.flac").excluded, true);
+  assert.equal(s("m\\Radiohead\\Live at the BBC\\06 - Karma Police.flac").excluded, true, "another recording");
+  // 56 MB for 176 s at 16/48 is ~2,560 kbps — stereo PCM tops out at 1,536.
+  assert.equal(s("m\\Radiohead\\OK Computer\\06 - Karma Police.flac", { size: 56e6, length: 176, sampleRate: 48000 }).excluded, true);
+});
+
+test("upgradeSource: words the library copy itself carries don't count against a folder", () => {
+  const live = plugin._upgradeSource(cand({ filename: "m\\Who\\Live at Leeds\\01 - Young Man Blues.flac" }),
+    { title: "Young Man Blues", artist: "The Who", album: "Live at Leeds" });
+  assert.equal(live.excluded, undefined);
+  assert.equal(live.tier, 0);
+  const va = plugin._upgradeSource(cand({ filename: "m\\Santana\\Abraxas\\03 - Oye como va.flac" }),
+    { title: "Oye como va", artist: "Santana", album: "Abraxas" });
+  assert.equal(va.tier, 0, "'va' in the title is not 'Various Artists'");
+});
+
+test("exceedsStereo: only lossless, only past what two channels can carry", () => {
+  assert.equal(plugin._exceedsStereo("flac", 30e6, 264, 44100, 16), false);
+  assert.equal(plugin._exceedsStereo("flac", 62e6, 210, 48000, 16), true);
+  assert.equal(plugin._exceedsStereo("flac", 120e6, 176, 192000, 24), false, "hi-res stereo is fine");
+  assert.equal(plugin._exceedsStereo("mp3", 62e6, 210, null, null), false);
+  assert.equal(plugin._exceedsStereo("flac", 30e6, null, null, null), false, "no length, no verdict");
+});
+
+test("rankUpgrade: the album's copy before a better-sounding compilation; a 5.1 mix never", () => {
+  const album = cand({ username: "album", filename: "m\\Radiohead\\OK Computer\\06 - Karma Police.flac" });
+  const comp = cand({ username: "comp", filename: "m\\Radiohead\\Greatest Hits\\06 - Karma Police.flac", bitDepth: 24, sampleRate: 96000, size: 90e6 });
+  const surround = cand({ username: "bd", filename: "m\\Radiohead\\OK Computer {5.1}\\06 - Karma Police.flac" });
+  const r = plugin._rankUpgrade([comp, surround, album], OKC({ current: MP3_192, target: "best" }));
+  assert.deepEqual(r.picks.map((c) => c.username), ["album", "comp"]);
+});
+
+test("filterTransfers: by track, user, phase or name — newest first, capped", () => {
+  const rows = [
+    { user: "a", phase: "succeeded", upgradeFor: 42, filename: "06 - Karma Police.flac", requestedAt: "2026-10-11T10:00:00Z" },
+    { user: "b", phase: "failed", upgradeFor: null, filename: "01 - Airbag.flac", requestedAt: "2026-10-11T12:00:00Z" },
+    { user: "a", phase: "succeeded", upgradeFor: 7, filename: "Jóga.flac", title: "Jóga", requestedAt: "2026-10-11T11:00:00Z" }
+  ];
+  const f = plugin._filterTransfers;
+  assert.deepEqual(f(rows, {}).map((r) => r.filename), ["01 - Airbag.flac", "Jóga.flac", "06 - Karma Police.flac"]);
+  assert.deepEqual(f(rows, { upgradeFor: 42 }).map((r) => r.filename), ["06 - Karma Police.flac"]);
+  assert.equal(f(rows, { user: "a", phase: "succeeded" }).length, 2);
+  assert.deepEqual(f(rows, { query: "joga" }).map((r) => r.filename), ["Jóga.flac"], "accents ignored");
+  const capped = f(rows, { limit: 1 });
+  assert.equal(capped.length, 1);
+  assert.equal(capped.total, 3);
+});
+
+test("filterUpgrades: replaced entries hidden unless asked, a state filter shows exactly that state", () => {
+  const es = [{ state: "ready" }, { state: "replaced" }, { state: "replaced" }, { state: "failed" }];
+  const def = plugin._filterUpgrades(es, {});
+  assert.deepEqual(def.map((e) => e.state), ["ready", "failed"]);
+  assert.equal(def.hidden, 2);
+  assert.equal(plugin._filterUpgrades(es, { includeReplaced: true }).length, 4);
+  assert.deepEqual(plugin._filterUpgrades(es, { state: "replaced" }).map((e) => e.state), ["replaced", "replaced"]);
+});
+
+test("download ids stay valid for the last five searches, each with its own upgrade stamp", () => {
+  const p = loadPlugin();
+  const found = (n) => [cand({ username: "u" + n, filename: "m\\x\\" + n + ".flac" })];
+  for (let n = 1; n <= 6; n++) p._rememberToolResults(found(n), n === 2 ? { kind: "upgrade", trackId: 42 } : null);
+  const kept = Object.values(p._toolResults());
+  assert.deepEqual(kept.map((x) => x.c.username).sort(), ["u2", "u3", "u4", "u5", "u6"], "the first search aged out");
+  assert.equal(kept.find((x) => x.c.username === "u2").mode.trackId, 42);
+  assert.equal(kept.find((x) => x.c.username === "u3").mode, null);
+});
+
+test("integration: a finished file the host can't read is never offered — the next sharer is tried", async () => {
+  const p = loadPlugin();
+  const { h } = upgradeHost({ responses: [
+    { username: "broken", hasFreeUploadSlot: true, queueLength: 0, uploadSpeed: 9000, files: [
+      { filename: "m\\Radiohead\\OK Computer\\06 - Karma Police.flac", size: 30e6, length: 264, bitDepth: 16, sampleRate: 44100 }] },
+    { username: "good", hasFreeUploadSlot: true, queueLength: 0, uploadSpeed: 1000, files: [
+      { filename: "n\\Radiohead\\OK Computer\\06 Karma Police.flac", size: 30e6, length: 264, bitDepth: 16, sampleRate: 44100 }] }
+  ] });
+  h.api.system.readAudioTags = async (paths) => paths.map((path) => (/06 - Karma/.test(path) ? null : { duration_secs: 264 }));
+  await p.activate(h.api);
+  try {
+    await h.tools.upgrade({ trackId: 42 });
+    await waitFor(() => entryOf(p) && entryOf(p).state === "downloading", 8000, "the download to start");
+    await pollUntil(p, () => entryOf(p).state === "ready", "ready from the second sharer");
+    assert.equal(entryOf(p).active.username, "good");
+    assert.equal(entryOf(p).lastRejected, "the file can't be read — damaged or incomplete");
+  } finally {
+    p.deactivate();
+  }
+});
+
+test("integration: a file downloaded by hand for an upgrade takes over the entry, checked like an automatic pick", async () => {
+  const p = loadPlugin();
+  const { h, calls } = upgradeHost({ responses: [
+    { username: "auto", hasFreeUploadSlot: true, queueLength: 0, uploadSpeed: 9000, files: [
+      { filename: "m\\Radiohead\\OK Computer\\06 - Karma Police.flac", size: 30e6, length: 264, bitDepth: 16, sampleRate: 44100 }] },
+    { username: "hand", hasFreeUploadSlot: true, queueLength: 0, uploadSpeed: 10, files: [
+      { filename: "z\\Radiohead\\OK Computer (1997)\\06 Karma Police.flac", size: 31e6, length: 264, bitDepth: 16, sampleRate: 44100 }] }
+  ] });
+  await p.activate(h.api);
+  try {
+    await h.tools.upgrade({ trackId: 42 });
+    await waitFor(() => entryOf(p) && entryOf(p).state === "downloading", 8000, "the automatic download");
+    await pollUntil(p, () => entryOf(p).state === "ready", "the automatic pick ready");
+    assert.equal(entryOf(p).active.username, "auto");
+
+    const found = await h.tools.search({ upgradeFor: 42, showAll: true });
+    const mine = found.results.find((r) => r.user === "hand");
+    assert.equal(mine.source, "the album's own folder");
+    await h.tools.download({ ids: [mine.id] });
+    assert.equal(calls.batches.slice(-1)[0].username, "hand");
+    await pollUntil(p, () => entryOf(p).active.username === "hand" && entryOf(p).state === "ready", "the hand-picked file ready");
+    const listed = await h.tools.list_upgrades({ state: "ready" });
+    assert.ok(listed.upgrades[0].ready.uri.includes("hand"), listed.upgrades[0].ready.uri);
   } finally {
     p.deactivate();
   }
