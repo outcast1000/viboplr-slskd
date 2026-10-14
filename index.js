@@ -1651,11 +1651,15 @@ function resyncIfConnectionLost(res) {
   }
 }
 
+// Every request names us: the host's default User-Agent is browser-style,
+// which some filtering proxies block from a non-browser client.
+var CLIENT_USER_AGENT = "Vibo";
+
 async function slskd(method, path, body) {
   var url = baseUrl() + path;
   var init = {
     method: method,
-    headers: { "X-API-Key": conn().apiKey || "", "Accept": "application/json" }
+    headers: { "X-API-Key": conn().apiKey || "", "Accept": "application/json", "User-Agent": CLIENT_USER_AGENT }
   };
   if (body !== undefined) {
     init.headers["Content-Type"] = "application/json";
@@ -4445,7 +4449,7 @@ async function slskdAdminToken() {
 // One call to slskd's settings API with the admin token; the body is a YAML
 // document sent as a JSON string, which is what slskd's endpoints take.
 async function slskdSettingsCall(method, path, token, yamlText) {
-  var init = { method: method, headers: { "Authorization": "Bearer " + token, "Accept": "application/json" } };
+  var init = { method: method, headers: { "Authorization": "Bearer " + token, "Accept": "application/json", "User-Agent": CLIENT_USER_AGENT } };
   if (yamlText !== undefined) {
     init.headers["Content-Type"] = "application/json";
     init.body = JSON.stringify(yamlText);
@@ -4936,7 +4940,9 @@ function slskdFingerprint(status, text) {
 }
 
 async function fetchText(url, init) {
-  var res = await api.network.fetch(url, init);
+  var withUa = Object.assign({}, init || {});
+  withUa.headers = Object.assign({ "User-Agent": CLIENT_USER_AGENT }, withUa.headers || {});
+  var res = await api.network.fetch(url, withUa);
   var text = "";
   try { text = await res.text(); } catch (e) { text = ""; }
   return { status: res.status, text: text };
@@ -9412,7 +9418,7 @@ async function detectDebugServer() {
   var candidates = debugCandidates(url);
   if (!candidates.length) { debugDetected = false; return false; }
   var answers = await Promise.all(candidates.map(function (base) {
-    return api.network.fetch(base + "/api/v0/session/enabled", { method: "GET", timeoutMs: 1500, headers: { "Accept": "application/json" } })
+    return api.network.fetch(base + "/api/v0/session/enabled", { method: "GET", timeoutMs: 1500, headers: { "Accept": "application/json", "User-Agent": CLIENT_USER_AGENT } })
       .then(function (res) { return res && res.headers ? res.headers["x-fake-slskd"] || null : null; })
       .catch(function () { return null; });   // nothing listening there — the usual answer, not an error
   }));

@@ -1,5 +1,8 @@
 # Changelog
 
+## v0.22.1
+- Requests to slskd now identify themselves as `Vibo` instead of using the app's browser-style default, which some company networks (Zscaler) block from a non-browser client.
+
 ## v0.22.0
 - **Upgrades pick the album's own copy.** An automatic upgrade now prefers a file from a folder named for your copy's album, then other folders, then compilations and vinyl rips. It never takes a multichannel mix (5.1, Atmos, DVD-Audio, or a FLAC with more data than stereo can hold — a Blu-ray rip passed as an upgrade before) or another recording (a folder saying live, BBC, sessions, demo, tribute…, unless your own album says the same). Searching with `upgradeFor` lists results in that order and says where each came from.
 - **A file that can't be read is never offered.** A finished download Viboplr can't read (damaged, truncated) is rejected and the next sharer is tried — a file of zero bytes once reached Ready.

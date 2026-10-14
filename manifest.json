@@ -1,7 +1,7 @@
 {
   "id": "slskd",
   "name": "Soulseek",
-  "version": "0.22.0",
+  "version": "0.22.1",
   "author": "Viboplr",
   "description": "Search and download from the Soulseek network via a slskd daemon: ranked results, whole-album grabs, live transfer progress, finished files that play and reach your library, and a playback fallback that fetches a missing track from Soulseek.",
   "minAppVersion": "1.0.85",
@@ -99,11 +99,35 @@
           "inputSchema": {
             "type": "object",
             "properties": {
-              "upgradeFor": { "type": "number", "description": "Only downloads fetched to upgrade this library track id" },
-              "user": { "type": "string", "description": "Only this sharer's" },
-              "phase": { "type": "string", "enum": ["requested", "queued", "starting", "downloading", "succeeded", "failed", "cancelled"], "description": "Only this phase" },
-              "query": { "type": "string", "description": "Only files whose name, title, artist or album contains this (accents and case ignored)" },
-              "limit": { "type": "number", "description": "1-500, default 50" }
+              "upgradeFor": {
+                "type": "number",
+                "description": "Only downloads fetched to upgrade this library track id"
+              },
+              "user": {
+                "type": "string",
+                "description": "Only this sharer's"
+              },
+              "phase": {
+                "type": "string",
+                "enum": [
+                  "requested",
+                  "queued",
+                  "starting",
+                  "downloading",
+                  "succeeded",
+                  "failed",
+                  "cancelled"
+                ],
+                "description": "Only this phase"
+              },
+              "query": {
+                "type": "string",
+                "description": "Only files whose name, title, artist or album contains this (accents and case ignored)"
+              },
+              "limit": {
+                "type": "number",
+                "description": "1-500, default 50"
+              }
             }
           }
         },
@@ -140,8 +164,26 @@
           "inputSchema": {
             "type": "object",
             "properties": {
-              "state": { "type": "string", "enum": ["searching", "downloading", "checking", "ready", "alternative", "none", "failed", "cancelled", "replaced", "gone"], "description": "Only entries in this state" },
-              "includeReplaced": { "type": "boolean", "description": "Also list the replaced (finished) entries" }
+              "state": {
+                "type": "string",
+                "enum": [
+                  "searching",
+                  "downloading",
+                  "checking",
+                  "ready",
+                  "alternative",
+                  "none",
+                  "failed",
+                  "cancelled",
+                  "replaced",
+                  "gone"
+                ],
+                "description": "Only entries in this state"
+              },
+              "includeReplaced": {
+                "type": "boolean",
+                "description": "Also list the replaced (finished) entries"
+              }
             }
           }
         }
