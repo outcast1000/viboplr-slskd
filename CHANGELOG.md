@@ -1,5 +1,8 @@
 # Changelog
 
+## v0.23.0
+- **"Not in library" downloads no longer land on Soulseek.** Soulseek's download by name only hands over a copy it already kept from the playback fallback; it never searches. Viboplr used to pick it for the Download button on "Not in library" rows whenever Soulseek came first in your provider order, and that download then failed on almost every row. The plugin now declares `findsByName: false`, so the button goes to the next provider that can find a track by name (yt-dlp, for example). A track Soulseek itself played still downloads through Soulseek. Older Viboplr versions ignore the flag.
+
 ## v0.22.1
 - Requests to slskd now identify themselves as `Vibo` instead of using the app's browser-style default, which some company networks (Zscaler) block from a non-browser client.
 
