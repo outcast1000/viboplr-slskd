@@ -80,7 +80,7 @@ test("rowTransferStatus: a result until queued, then Queued → Downloading → 
   const d = s({ state: "InProgress", size: 100, bytesTransferred: 42 }, {}, false, now);
   assert.deepEqual([d.badge.label, d.progress, d.actions], ["Downloading 42%", 0.42, ["cancel-transfer"]]);
   const done = s({ state: "Completed, Succeeded" }, { resolvedPath: "/x" }, true, now);
-  assert.deepEqual([done.badge.label, done.actions, done.action], ["Done", ["play-transfer"], "play-transfer"]);
+  assert.deepEqual([done.badge.label, done.actions, done.action], ["Done", ["play-transfer", "import-transfer"], "play-transfer"]);
   assert.deepEqual(s({ state: "Completed, Succeeded" }, {}, false, now).actions, [], "done but not playable here (remote slskd)");
   assert.deepEqual(s({ state: "Completed, Errored" }, {}, false, now).actions, ["retry-transfer"]);
   assert.equal(s({ state: "Completed, Cancelled" }, {}, false, now), null);
@@ -159,7 +159,7 @@ test("fallbackStatusNode: never used warns where to switch it on; used says when
 test("rowTransferStatus: a finished upgrade file offers Replace on its own row, first", () => {
   const s = plugin._rowTransferStatus;
   const done = s({ state: "Completed, Succeeded" }, { resolvedPath: "/x", upgrade: { trackId: 42 } }, true, 0);
-  assert.deepEqual(done.actions, ["replace-transfer", "play-transfer"]);
+  assert.deepEqual(done.actions, ["replace-transfer", "play-transfer", "import-transfer"]);
   assert.equal(done.badge.label, "Done", "the plugin never hears whether the Replace went through");
   assert.deepEqual(s({ state: "Completed, Succeeded" }, { resolvedPath: "/x", upgrade: { trackId: 42 } }, false, 0).actions, [], "remote slskd: nothing to replace from here");
 });
@@ -267,7 +267,7 @@ test("an open folder whose downloads failed still offers Download", async () => 
     h.actions["search"]({ query: "ok computer" });
     await waitFor(() => findNodes(lastView(h), (n) => n.type === "track-row-list").length === 1);
     h.actions["result-mode"]({ tabId: "folders" });
-    const card = findNodes(lastView(h), (n) => n.type === "card-grid")[0].items.find((i) => i.title === "OK Computer");
+    const card = findNodes(lastView(h), (n) => n.type === "track-row-list" && n.sortAction === "sort-folders")[0].items.find((i) => i.title === "OK Computer");
     h.actions["open-folder"]({ itemId: card.id });
     // Every file of the folder failed in slskd.
     const rows = findNodes(lastView(h), (n) => n.type === "track-row-list")[0].items;
@@ -327,8 +327,8 @@ test("Search: Search… on an album opens on Folders; the open folder marks song
   await p.activate(h.api);
   try {
     await h.actions["ctx:slskd-search"]({ kind: "album", albumTitle: "OK Computer", artistName: "Radiohead" });
-    await waitFor(() => findNodes(lastView(h), (n) => n.type === "card-grid").length === 1);
-    const grid = findNodes(lastView(h), (n) => n.type === "card-grid")[0];
+    await waitFor(() => findNodes(lastView(h), (n) => n.type === "track-row-list" && n.sortAction === "sort-folders").length === 1);
+    const grid = findNodes(lastView(h), (n) => n.type === "track-row-list" && n.sortAction === "sort-folders")[0];
     const okc = grid.items.find((i) => i.title === "OK Computer");
     assert.equal(okc.action, "open-folder");
     h.actions["open-folder"]({ itemId: okc.id });
@@ -342,7 +342,7 @@ test("Search: Search… on an album opens on Folders; the open folder marks song
     assert.deepEqual(rows.filter((r) => r.badge).map((r) => r.title), ["01 - Airbag.flac"]);
     assert.equal(posts.length, 0, "opening a folder queues nothing");
     h.actions["close-folder"]();
-    assert.equal(findNodes(lastView(h), (n) => n.type === "card-grid").length, 1, "back to the cards");
+    assert.equal(findNodes(lastView(h), (n) => n.type === "track-row-list" && n.sortAction === "sort-folders").length, 1, "back to the folder list");
   } finally {
     p.deactivate();
   }
@@ -370,4 +370,75 @@ test("Fallback: the sidebar item shows a dot while a resolve runs, and clears wh
   } finally {
     p.deactivate();
   }
+});
+
+test("Folders: a sortable table — name opens, hover downloads the whole folder, the row shows how far it got", async () => {
+  const p = loadPlugin();
+  const { h, posts } = searchHost({ tracks: [] });
+  await p.activate(h.api);
+  try {
+    h.actions["search"]({ query: "ok computer" });
+    await waitFor(() => findNodes(lastView(h), (n) => n.type === "track-row-list").length === 1);
+    h.actions["result-mode"]({ tabId: "folders" });
+    let list = findNodes(lastView(h), (n) => n.type === "track-row-list" && n.sortAction === "sort-folders")[0];
+    assert.equal(findNodes(lastView(h), (n) => n.type === "card-grid").length, 0, "no card grid any more");
+    assert.equal(list.selectionMode, "single");
+    assert.equal(list.contextMenu, false, "a folder isn't a track");
+    assert.equal(list.openOnClick, "title");
+    assert.deepEqual(list.columns.map((c) => c.id), ["quality", "tracks", "size", "availability"]);
+    assert.deepEqual(list.items.map((i) => i.title), ["OK Computer", "OKC"], "ranked order first");
+    const okc = list.items[0];
+    assert.equal(okc.cells.quality, "FLAC 44kHz/16bit");
+    assert.equal(okc.cells.tracks, "3");
+    assert.equal(okc.subtitle, "peer");
+    assert.deepEqual(okc.actions, ["folder-row-download", "open-folder"]);
+    assert.deepEqual(list.actions.map((a) => a.label), ["Download folder", "Open folder"]);
+
+    // Sorting by Tracks ascending puts the one-file folder first; Best match undoes it.
+    h.actions["sort-folders"]({ column: "tracks", direction: "asc" });
+    list = findNodes(lastView(h), (n) => n.type === "track-row-list" && n.sortAction === "sort-folders")[0];
+    assert.deepEqual(list.items.map((i) => i.title), ["OKC", "OK Computer"]);
+    assert.equal(list.sortBy, "tracks");
+    const bar = findNodes(lastView(h), (n) => n.type === "toolbar" && (n.buttons || []).some((b) => b.action === "sort-best"))[0];
+    assert.equal(bar.status, "sorted by Tracks");
+    h.actions["sort-best"]();
+    list = findNodes(lastView(h), (n) => n.type === "track-row-list" && n.sortAction === "sort-folders")[0];
+    assert.deepEqual(list.items.map((i) => i.title), ["OK Computer", "OKC"]);
+
+    // The hover button queues every file of the folder without opening it.
+    h.actions["folder-row-download"]({ itemId: okc.id, selectedIds: [okc.id] });
+    await waitFor(() => posts.length === 1);
+    assert.equal(posts[0].username, "peer");
+    assert.equal(posts[0].files.length, 3);
+    await waitFor(() => {
+      const r = findNodes(lastView(h), (n) => n.type === "track-row-list" && n.sortAction === "sort-folders")[0].items[0];
+      return !!(r.badge && /^Queued 3 of 3$/.test(r.badge.label));
+    });
+    const row = findNodes(lastView(h), (n) => n.type === "track-row-list" && n.sortAction === "sort-folders")[0].items[0];
+    assert.deepEqual(row.actions, ["open-folder"], "nothing left to queue");
+    assert.equal(findNodes(lastView(h), (n) => n.type === "track-row-list" && n.sortAction === "sort-folders").length, 1, "still on the folder list");
+    assert.equal(h.calls.notifications.length, 0);
+  } finally {
+    p.deactivate();
+  }
+});
+
+test("Downloads: newest first by when each transfer last happened", () => {
+  const t = (name, at) => Object.assign({ filename: name }, at);
+  const sorted = plugin._sortTransfersNewestFirst([
+    t("old", { requestedAt: "2026-09-01T10:00:00Z", endedAt: "2026-09-01T10:05:00Z" }),
+    t("undated", {}),
+    t("new", { requestedAt: "2026-10-18T09:00:00Z" }),
+    t("mid", { requestedAt: "2026-10-01T09:00:00Z", endedAt: "2026-10-02T09:00:00Z" })
+  ]);
+  assert.deepEqual(sorted.map((x) => x.filename), ["new", "mid", "old", "undated"]);
+});
+
+test("folderQualityLabel / folderRowStatus", () => {
+  const flac = (i) => ({ filename: "a\\" + i + ".flac", extension: "flac", size: 30e6, qualityTier: 0, bitDepth: 24, sampleRate: 96000 });
+  const mp3 = (i) => ({ filename: "a\\" + i + ".mp3", extension: "mp3", size: 20e6, qualityTier: 2, bitRate: 320 });
+  assert.equal(plugin._folderQualityLabel([flac(1), flac(2)]), "FLAC 96kHz/24bit");
+  assert.equal(plugin._folderQualityLabel([flac(1), mp3(2), mp3(3)]), "Mixed");
+  assert.equal(plugin._folderQualityLabel([]), "");
+  assert.equal(plugin._folderRowStatus({ username: "u", files: [flac(1)] }, Date.now()), null, "nothing queued, no chip");
 });

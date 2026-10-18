@@ -197,7 +197,7 @@ var activeTab = "search";
 // `mode` is what a context-menu action asked the search to do beyond finding
 // files — see "Upgrade / fill-album modes" — and is dropped by the next plain
 // search.
-var search = { query: "", id: null, running: false, responseCount: 0, fileCount: 0, matchCount: 0, folderCount: 0, results: [], folders: [], error: null, sortColumn: null, sortDir: "desc", mode: null };
+var search = { query: "", id: null, running: false, responseCount: 0, fileCount: 0, matchCount: 0, folderCount: 0, results: [], folders: [], error: null, sortColumn: null, sortDir: "desc", folderSortColumn: null, folderSortDir: "desc", mode: null };
 var searchGen = 0;
 
 var transfers = [];       // raw slskd transfer records (downloads)
@@ -517,6 +517,7 @@ function groupByFolder(candidates) {
         hasFreeUploadSlot: c.hasFreeUploadSlot,
         queueLength: c.queueLength,
         uploadSpeed: c.uploadSpeed,
+        availabilityTier: c.availabilityTier,
         bestQualityTier: c.qualityTier
       };
       order.push(map[key]);
@@ -1098,13 +1099,14 @@ function fileTile(c) {
   return formatTile(tileLabel(c), tileDetail(c), tileTier(c));
 }
 
-// A folder's tile: its main container by bytes, described by that
-// container's best-ranked file (`files` arrive ranked). A folder that is a
-// real mix — lossless and lossy each a fifth or more of it — says MIX, since
-// one format on the card would misdescribe what "download folder" fetches.
-function folderTile(files) {
+// A folder's main container by bytes, described by that container's
+// best-ranked file (`files` arrive ranked). A folder that is a real mix —
+// lossless and lossy each a fifth or more of it — has no main file, since one
+// format would misdescribe what "download folder" fetches. Returns
+// { file, label } with `file` null for a mix (label "MIX") or an empty folder.
+function folderMain(files) {
   var list = files || [];
-  if (!list.length) return formatTile("?", "", "unknown");
+  if (!list.length) return { file: null, label: "?" };
   var bytes = {}, order = [], lossless = 0, lossy = 0, total = 0;
   for (var i = 0; i < list.length; i++) {
     var f = list[i], label = tileLabel(f), size = f.size || 0;
@@ -1114,11 +1116,25 @@ function folderTile(files) {
     if ((f.qualityTier != null ? f.qualityTier : qualityTier(f)) === T_LOSSLESS) lossless += size;
     else lossy += size;
   }
-  if (total && lossless / total >= 0.2 && lossy / total >= 0.2) return formatTile("MIX", "", "unknown");
+  if (total && lossless / total >= 0.2 && lossy / total >= 0.2) return { file: null, label: "MIX" };
   var main = order[0];
   for (var j = 1; j < order.length; j++) if (bytes[order[j]] > bytes[main]) main = order[j];
-  for (var k = 0; k < list.length; k++) if (tileLabel(list[k]) === main) return fileTile(list[k]);
-  return formatTile(main, "", "unknown");
+  for (var k = 0; k < list.length; k++) if (tileLabel(list[k]) === main) return { file: list[k], label: main };
+  return { file: null, label: main };
+}
+
+// A folder's tile: its main container (folderMain), MIX for a real mix.
+function folderTile(files) {
+  var m = folderMain(files);
+  return m.file ? fileTile(m.file) : formatTile(m.label, "", "unknown");
+}
+
+// Pure: the Quality cell of a folder row — the main file's label, "Mixed"
+// for a lossless/lossy mix, or "" when nothing says.
+function folderQualityLabel(files) {
+  var m = folderMain(files);
+  if (m.file) { var q = qualityLabel(m.file); return q === "unknown" ? "" : q; }
+  return m.label === "MIX" ? "Mixed" : "";
 }
 
 // Pure: the advertised quality fields a tile needs, or null when the file
@@ -2084,7 +2100,7 @@ async function runSearch(query, extra) {
   if (!query || readiness.state !== "ready") return;
   var gen = ++searchGen;
   var mode = (extra && extra.mode) || null;
-  search = { query: query, id: null, running: true, responseCount: 0, fileCount: 0, matchCount: 0, folderCount: 0, results: [], folders: [], error: null, sortColumn: null, sortDir: "desc", mode: mode, note: (extra && extra.note) || null };
+  search = { query: query, id: null, running: true, responseCount: 0, fileCount: 0, matchCount: 0, folderCount: 0, results: [], folders: [], error: null, sortColumn: null, sortDir: "desc", folderSortColumn: null, folderSortDir: "desc", mode: mode, note: (extra && extra.note) || null };
   // Filling an album is a folder job — Soulseek users share whole albums — so
   // that mode opens on the Folders view, as does a search handed over from an
   // album (`extra.folders`); everything else opens on Files.
@@ -2248,7 +2264,20 @@ async function fetchTransfers() {
       }
     }
   }
-  return flat;
+  // slskd groups by sharer and folder; the Downloads tab reads newest first.
+  return sortTransfersNewestFirst(flat);
+}
+
+// Pure: when a transfer last happened — finished, else started, else asked
+// for — as epoch ms, or 0 when slskd sent no date.
+function transferTime(t) {
+  var s = t && (t.endedAt || t.startedAt || t.enqueuedAt || t.requestedAt);
+  var ms = s ? Date.parse(s) : NaN;
+  return isNaN(ms) ? 0 : ms;
+}
+
+function sortTransfersNewestFirst(list) {
+  return list.slice().sort(function (a, b) { return transferTime(b) - transferTime(a); });
 }
 
 async function refreshTransfers() {
@@ -5555,7 +5584,9 @@ function rowTransferStatus(t, rec, playable, now) {
     // where Replace waited; staying put, Play alone read as "finished" while
     // the library still held the old copy. The chip stays "Done" — whether
     // the host's Replace dialog went through, the plugin never hears.
-    var ids = !playable ? [] : rec && rec.upgrade ? ["replace-transfer", "play-transfer"] : ["play-transfer"];
+    // Add to library sits on the row too: a file found by search ends here,
+    // and the Downloads tab shouldn't be the only way into a collection.
+    var ids = !playable ? [] : rec && rec.upgrade ? ["replace-transfer", "play-transfer", "import-transfer"] : ["play-transfer", "import-transfer"];
     return { phase: "done", badge: { label: "Done", variant: "success" }, progress: null,
       actions: ids, action: playable ? "play-transfer" : undefined };
   }
@@ -5611,8 +5642,12 @@ function resultRow(c, prefix, owned) {
     // the host renders that as an em dash, which reads as "unknown" rather
     // than as zero.
     cells: resultCells(c),
-    // The format, not a guessed cover: see formatTile.
-    imageUrl: fileTile(c),
+    // The format, not a guessed cover: see formatTile. Not on Files rows: the
+    // Quality column already says it, and at ~600 bytes a tile, 1,000 rows
+    // made each re-render a ~1 MB payload — most of what made a big result
+    // list lag. A cover the library already has still shows (`artwork:
+    // "cached"`). An open folder is a few dozen rows and keeps its tiles.
+    imageUrl: prefix === "f:" ? undefined : fileTile(c),
     durationSecs: c.length != null ? c.length : null,
     action: "download-file",
     actions: ["download-file"],
@@ -5649,6 +5684,10 @@ function declaredActions(all, rows, keep) {
   return all.filter(function (a) { return used[a.id]; });
 }
 
+// Copy a finished download into a collection. Shared by Downloads and the
+// search lists, so the action looks the same wherever a finished file shows.
+var IMPORT_ACTION = { id: "import-transfer", label: "Add to library…", icon: "♫" };
+
 // The actions a file list declares; which one a row shows is resultRow's call.
 // A fresh search shows Download alone; Cancel joins once something is on its way.
 function fileRowActions(upgrading, rows) {
@@ -5656,6 +5695,7 @@ function fileRowActions(upgrading, rows) {
     { id: "download-file", label: upgrading ? "Upgrade" : "Download", icon: "⬇" },
     { id: "replace-transfer", label: "Replace in library…", icon: "⇪" },
     { id: "play-transfer", label: "Play", icon: "▶" },
+    IMPORT_ACTION,
     { id: "retry-transfer", label: "Retry", icon: "↻" },
     { id: "cancel-transfer", label: "Cancel", icon: "■" }
   ], rows, ["download-file"]);
@@ -5695,34 +5735,105 @@ function transferRows() {
   });
 }
 
-function folderCards() {
+// ---- the folder list ----------------------------------------------------------
+// Folders are a table like Files, not a grid of cards: a card is built around a
+// cover, and a folder has none — its tile was the format, drawn big, while the
+// facts you choose a folder by (format, tracks, size, a free slot, the sharer)
+// were squeezed into one truncated line and couldn't be sorted. The name opens
+// the folder; the hover button downloads it, so the common case is one click
+// and a stray click on the row still fetches nothing.
+var FOLDER_LIST_COLUMNS = [
+  { id: "quality", label: "Quality", width: 130, sortable: true },
+  { id: "tracks", label: "Tracks", width: 70, align: "right", sortable: true },
+  { id: "size", label: "Size", width: 80, align: "right", sortable: true },
+  { id: "availability", label: "Availability", width: 110, sortable: true }
+];
+
+// Same convention as RESULT_SORTS: `desc` is best-first on every column.
+var FOLDER_SORTS = {
+  quality: function (g) { return [-g.bestQualityTier, g.totalSize || 0]; },
+  tracks: function (g) { return [g.files.length]; },
+  size: function (g) { return [g.totalSize || 0]; },
+  availability: function (g) { return [-(g.availabilityTier != null ? g.availabilityTier : 9), -(g.queueLength || 0), g.uploadSpeed || 0]; }
+};
+
+function sortedFolders() {
+  var list = visibleFolders();
+  var keyOf = FOLDER_SORTS[search.folderSortColumn];
+  if (!keyOf) return list;
+  var sign = search.folderSortDir === "asc" ? -1 : 1;
+  return list.slice().sort(function (a, b) {
+    var ka = keyOf(a), kb = keyOf(b);
+    for (var i = 0; i < ka.length; i++) if (ka[i] !== kb[i]) return (kb[i] - ka[i]) * sign;
+    return 0;
+  });
+}
+
+// Pure-ish: a folder row's chip once some of its files were queued — how far
+// the folder got — or null while none were. Failed files count as free (see
+// notYetQueued), so a folder whose downloads all failed is a result again.
+function folderRowStatus(g, now) {
+  var n = g.files.length, done = 0, active = 0, moving = 0;
+  for (var i = 0; i < n; i++) {
+    var ph = rowPhase(g.username + KEY_SEP + g.files[i].filename, now);
+    if (ph === "done") done++;
+    else if (ph === "moving" || ph === "waiting") { active++; if (ph === "moving") moving++; }
+  }
+  if (!done && !active) return null;
+  if (done === n) return { label: "Done", variant: "success" };
+  if (!active) return { label: done + " of " + n + " done", variant: "muted" };
+  return moving
+    ? { label: "Downloading " + done + " of " + n, variant: "accent" }
+    : { label: "Queued " + (done + active) + " of " + n, variant: "warning" };
+}
+
+// The files a folder row's Download fetches: in Fill, the ones the album
+// lacks; otherwise all of them — minus anything already on its way.
+function folderRowFiles(g) {
+  var m = search.mode;
+  var files = m && m.kind === "fill" ? missingFiles(g.files, m.owned) : g.files;
+  return notYetQueued(files);
+}
+
+function folderRows() {
   var m = search.mode;
   var fill = m && m.kind === "fill" ? m : null;
-  return visibleFolders().map(function (g) {
+  var now = nowMs();
+  return sortedFolders().map(function (g) {
+    var rep = sharerLabel(sharers[g.username]);
+    var cells = { tracks: String(g.files.length), size: formatBytes(g.totalSize), availability: availabilityLabel(g) + (rep ? " · " + rep : "") };
+    var quality = folderQualityLabel(g.files);
+    if (quality) cells.quality = quality;
+    var subtitle = g.username;
     if (fill) {
-      // What the card offers is the folder's contribution to THIS album, not
+      // What the row offers is the folder's contribution to THIS album, not
       // the folder: how many of its files you lack and what they weigh.
       var missing = missingFiles(g.files, fill.owned);
-      var bytes = 0;
-      for (var i = 0; i < missing.length; i++) bytes += missing[i].size || 0;
-      return {
-        id: "d:" + g.key,
-        title: g.name,
-        subtitle: g.username + " · " + g.files.length + " files · " + (missing.length
-          ? missing.length + " you don't have · " + formatBytes(bytes)
-          : "you have all of these"),
-        imageUrl: folderTile(g.files),
-        action: "open-folder"
-      };
+      subtitle += " · " + (missing.length
+        ? missing.length + " you don't have · " + formatBytes(sumSizes(missing))
+        : "you have all of these");
     }
-    return {
+    var row = {
       id: "d:" + g.key,
       title: g.name,
-      subtitle: folderSubtitle(g),
+      subtitle: subtitle,
+      cells: cells,
       imageUrl: folderTile(g.files),
-      action: "open-folder"
+      action: "open-folder",
+      actions: folderRowFiles(g).length ? ["folder-row-download", "open-folder"] : ["open-folder"]
     };
+    var badge = folderRowStatus(g, now);
+    if (badge) row.badge = badge;
+    return row;
   });
+}
+
+function folderRowActions(rows) {
+  var fill = search.mode && search.mode.kind === "fill";
+  return declaredActions([
+    { id: "folder-row-download", label: fill ? "Download the ones you don't have" : "Download folder", icon: "⬇" },
+    { id: "open-folder", label: "Open folder", icon: "›" }
+  ], rows, ["open-folder"]);
 }
 
 // ---- the open folder ---------------------------------------------------------
@@ -5869,9 +5980,10 @@ function resultsToolbar(fileCount, folderCount, upgrading) {
     buttons.push({ label: "Folders", action: "result-mode", variant: folders ? "accent" : "secondary", data: { tabId: "folders" } });
   }
   var status = search.responseCount ? "from " + formatCount(search.responseCount) + (search.responseCount === 1 ? " sharer" : " sharers") : undefined;
-  if (!folders && search.sortColumn) {
-    var col = RESULT_COLUMNS.filter(function (c) { return c.id === search.sortColumn; })[0];
-    status = "sorted by " + (col ? col.label : search.sortColumn);
+  var sortCol = folders ? (openFolder ? null : search.folderSortColumn) : search.sortColumn;
+  if (sortCol) {
+    var col = (folders ? FOLDER_LIST_COLUMNS : RESULT_COLUMNS).filter(function (c) { return c.id === sortCol; })[0];
+    status = "sorted by " + (col ? col.label : sortCol);
     buttons.push({ label: "Best match", action: "sort-best", variant: "secondary", icon: "↺" });
   }
   return { type: "toolbar", title: title, buttons: buttons, status: status };
@@ -6038,7 +6150,25 @@ function searchTab() {
   if (opened) {
     children = children.concat(folderView(opened));
   } else if (activeTab === "folders") {
-    children.push({ type: "card-grid", items: folderCards() });
+    var folderList = folderRows();
+    children.push({
+      type: "track-row-list",
+      items: folderList,
+      artwork: "cached",
+      showHeader: true,
+      // Columns and hover buttons render only on a selectable list; single
+      // keeps the bulk toolbar away — every action here is the row's own.
+      selectable: true,
+      selectionMode: "single",
+      openOnClick: "title",
+      // A folder isn't a track: Play / Enqueue on it would mean nothing.
+      contextMenu: false,
+      actions: folderRowActions(folderList),
+      columns: FOLDER_LIST_COLUMNS,
+      sortBy: search.folderSortColumn || undefined,
+      sortDir: search.folderSortColumn ? search.folderSortDir : undefined,
+      sortAction: "sort-folders"
+    });
   } else {
     // `selectable` is what makes `columns` render at all: the host's list has
     // two bodies, and only the selectable one swaps the fixed Album / Duration
@@ -6174,7 +6304,8 @@ function transferList(rows, actionIds) {
   var all = {
     "play-transfer": { id: "play-transfer", label: "Play", icon: "▶" },
     "replace-transfer": { id: "replace-transfer", label: "Replace in library…", icon: "⇪" },
-    "import-transfer": { id: "import-transfer", label: "Add to library…", icon: "＋" },
+    // Not "＋": that is the host's Enqueue glyph.
+    "import-transfer": IMPORT_ACTION,
     "retry-transfer": { id: "retry-transfer", label: "Retry", icon: "↻" },
     "another-source": { id: "another-source", label: "Another source", icon: "⇄" },
     "cancel-transfer": { id: "cancel-transfer", label: "Cancel", icon: "■" },
@@ -6230,6 +6361,12 @@ function transfersTab() {
     if (!mine.length) continue;
     var buttons = [];
     if (id === "attention") buttons.push({ label: "Retry all", action: "retry-transfer", icon: "↻", data: { selectedIds: mine.map(function (r) { return r.id; }) } });
+    if (id === "finished") {
+      // Every finished file in one go — the per-row button and a selection do
+      // the same, but this is the one nobody has to discover.
+      var importable = mine.filter(function (r) { return importTrackFor(r.id); }).map(function (r) { return r.id; });
+      if (importable.length > 1) buttons.push({ label: "Add all " + importable.length + " to library…", action: "import-transfer", icon: IMPORT_ACTION.icon, data: { selectedIds: importable } });
+    }
     if (id === "finished" || id === "cancelled") buttons.push({ label: "Clear", action: "remove-transfer", icon: "✕", data: { selectedIds: mine.map(function (r) { return r.id; }) } });
     var shown = mine;
     if (id === "finished" && mine.length > FINISHED_SHOWN) {
@@ -6767,7 +6904,10 @@ function openImport(keys) {
       : "slskd runs on another machine, so its files can't be copied from here. Add its downloads folder as a collection instead.");
     return;
   }
-  api.ui.requestAction("download-tracks", { providerId: PROVIDER_KEY, providerName: PROVIDER_NAME, tracks: tracks });
+  // `purpose: "import"`: the files are already on this computer, so hosts that
+  // know it word the modal as "Add to library" instead of "Download". Older
+  // hosts ignore the field and keep saying Download.
+  api.ui.requestAction("download-tracks", { providerId: PROVIDER_KEY, providerName: PROVIDER_NAME, tracks: tracks, purpose: "import" });
 }
 
 function playTransfer(key) {
@@ -6910,9 +7050,23 @@ function registerActions() {
     render();
   });
 
+  api.ui.onAction("sort-folders", function (data) {
+    var col = data && data.column;
+    if (!FOLDER_SORTS[col]) return;
+    search.folderSortColumn = col;
+    search.folderSortDir = (data && data.direction) === "asc" ? "asc" : "desc";
+    render();
+  });
+
+  // Back to the ranked order — of whichever list the toolbar sits over.
   api.ui.onAction("sort-best", function () {
-    search.sortColumn = null;
-    search.sortDir = "desc";
+    if (activeTab === "folders") {
+      search.folderSortColumn = null;
+      search.folderSortDir = "desc";
+    } else {
+      search.sortColumn = null;
+      search.sortDir = "desc";
+    }
     render();
   });
 
@@ -6934,9 +7088,11 @@ function registerActions() {
       .catch(function (e) { console.error("slskd enqueue failed:", e); });
   });
 
-  // A folder card opens the folder (see folderView); nothing is queued yet.
+  // A folder row's name opens the folder (see folderView); nothing is queued
+  // yet. Hosts before single-select lists draw the row actions in a bulk
+  // toolbar, which sends `selectedIds` and no `itemId` — the first one opens.
   api.ui.onAction("open-folder", function (data) {
-    var g = folderByRef(data && data.itemId);
+    var g = folderByRef((data && data.itemId) || (data && data.selectedIds && data.selectedIds[0]));
     if (!g) return;
     openFolder = g.key;
     activeTab = "folders";
@@ -6949,6 +7105,21 @@ function registerActions() {
   api.ui.onAction("close-folder", function () {
     openFolder = null;
     render();
+  });
+
+  // A folder row's hover button: the folder without opening it — in Fill the
+  // files the album lacks, otherwise all of them (folderRowFiles). An older
+  // host's bulk toolbar sends a selection instead; each selected folder goes.
+  api.ui.onAction("folder-row-download", function (data) {
+    var refs = (data && data.selectedIds && data.selectedIds.length) ? data.selectedIds : [data && data.itemId];
+    refs.forEach(function (ref) {
+      var g = folderByRef(ref);
+      if (!g) return;
+      var files = folderRowFiles(g);
+      if (!files.length) return;
+      enqueueFiles(g.username, files, g.name, modeRecExtra())
+        .catch(function (e) { console.error("slskd folder enqueue failed:", e); });
+    });
   });
 
   // The open folder's button: everything not yet queued, or — `which:
@@ -7114,8 +7285,11 @@ function registerActions() {
     api.playback.playTracks(tracks, 0, { name: "Soulseek downloads", source: "playlist" });
   });
 
+  // One row, a selection, or the Finished group's "Add all" — from Downloads
+  // (plain keys) or a search list (`f:` / `o:` ids, which transferKeys strips).
+  // openImport skips whatever hasn't finished, so a mixed selection is fine.
   api.ui.onAction("import-transfer", function (data) {
-    openImport(rowIds(data));
+    openImport(transferKeys(data));
   });
 
   // Re-queue with the same user. slskd retries a failed transfer on its own
@@ -9493,7 +9667,7 @@ async function switchServer(on) {
     console.error("slskd: couldn't save debugServer:", e);
   }
   searchGen++;
-  search = { query: "", id: null, running: false, responseCount: 0, fileCount: 0, matchCount: 0, folderCount: 0, results: [], folders: [], error: null, sortColumn: null, sortDir: "desc", mode: null };
+  search = { query: "", id: null, running: false, responseCount: 0, fileCount: 0, matchCount: 0, folderCount: 0, results: [], folders: [], error: null, sortColumn: null, sortDir: "desc", folderSortColumn: null, folderSortDir: "desc", mode: null };
   transfers = [];
   toolResults = {};
   knownDone = {};
@@ -9624,6 +9798,9 @@ return {
   _waitedFor: waitedFor,
   _withRecentSearch: withRecentSearch,
   _folderSubtitle: folderSubtitle,
+  _folderQualityLabel: folderQualityLabel,
+  _folderRowStatus: folderRowStatus,
+  _sortTransfersNewestFirst: sortTransfersNewestFirst,
   _resolveStats: resolveStats,
   _withResolve: withResolve,
   _historyEntry: historyEntry,

@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.24.0
+- **Folders is a table now, like Files.** Each folder is a row with sortable Quality, Tracks, Size and Availability columns (it used to be a grid of cards whose picture was only the format, with everything else squeezed into one cut-off line). Click the folder's name to open it. Hover the row for **Download folder** (in *Fill missing tracks*: **Download the ones you don't have**) to fetch it without opening it. Once its files are on their way, the row says how far it got (Queued 3 of 12 · Downloading 5 of 12 · Done). Right-click no longer offers track actions on a folder.
+- **Downloads are listed newest first** within each group, by when each file last moved (finished, started, or asked for).
+- **Add to library everywhere a finished file shows.** A search row that says Done now offers it next to Play, a selection in search or Downloads adds every finished file in it at once, and the Finished group has **Add all N to library…**. Its icon is now ♫ — the old ＋ looked like Enqueue.
+- **The Add to library dialog says what it does.** On Viboplr versions that support it, the dialog reads "Add to library" and "Added to library" instead of "Download", since the file is already on this computer and is only copied into a collection. Older Viboplr versions still say Download.
+- **Big result lists lag less.** Rows in Files no longer carry the format picture, since the Quality column already shows the format. With 1,000 results that picture made up about 60% of what the plugin sent to Viboplr on every refresh. A cover Viboplr already has still shows.
+
 ## v0.23.0
 - **"Not in library" downloads no longer land on Soulseek.** Soulseek's download by name only hands over a copy it already kept from the playback fallback; it never searches. Viboplr used to pick it for the Download button on "Not in library" rows whenever Soulseek came first in your provider order, and that download then failed on almost every row. The plugin now declares `findsByName: false`, so the button goes to the next provider that can find a track by name (yt-dlp, for example). A track Soulseek itself played still downloads through Soulseek. Older Viboplr versions ignore the flag.
 

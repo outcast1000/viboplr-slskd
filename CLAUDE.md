@@ -233,9 +233,28 @@ Each tab owns one job, and a setting lives next to what it controls:
   `tabs` node right under the main tabs; the owner had never noticed Folders existed. Don't
   bring the second tab bar back.
 - **Format tiles** (`formatTile`, v0.15.0) are the thumbnail wherever the cover would be a
-  guess: search rows, folder cards, upgrade sources, downloads not yet finished. Real covers
-  stay on finished downloads, kept files and the Upgrades list. Folder cards carry who / tracks
-  / size / slot-or-queue / sharer record (`folderSubtitle`); the format is on the tile.
+  guess: folder rows, an open folder's files, upgrade sources, downloads not yet finished. Real
+  covers stay on finished downloads, kept files and the Upgrades list. **Not on Files rows**
+  (owner, 2026-10-18): the Quality column says the same, and 1,000 tiles at ~620 bytes made
+  every re-render a ~1 MB worker→host payload, the main cause of lag on a big result list.
+- **Folders is a table, not a card grid** (owner, 2026-10-18): a card is built around a cover a
+  folder doesn't have, its facts were one truncated line, and nothing could be sorted. It's a
+  `track-row-list` (`folderRows`) with `FOLDER_LIST_COLUMNS` (Quality via `folderQualityLabel` ·
+  Tracks · Size · Availability), its own sort (`search.folderSortColumn`, `sort-folders`,
+  `FOLDER_SORTS`; *Best match* resets whichever list is showing), `selectionMode: "single"`
+  (columns and hover buttons need `selectable`; single drops the bulk toolbar),
+  `openOnClick: "title"` and `contextMenu: false` (a folder isn't a track). Subtitle = sharer
+  (in Fill: what the album lacks). Hover actions: `folder-row-download` (`folderRowFiles` — all,
+  or in Fill the missing ones, minus anything queued) then `open-folder`. The row chip
+  (`folderRowStatus`) says how far the folder got. `folderSubtitle` is now only the open
+  folder's toolbar line.
+- **Add to library** (owner, 2026-10-18): one action, `IMPORT_ACTION` (♫ — never ＋, the host's
+  Enqueue glyph), on finished Downloads rows, Done search / open-folder rows (`rowTransferStatus`)
+  and the Finished toolbar's *Add all N to library…*. The handler reads `transferKeys`, so `f:` /
+  `o:` ids and mixed selections work; `openImport` skips anything not finished. It sends
+  `purpose: "import"` with `download-tracks` so the host modal says Add, not Download (hosts
+  before that ignore it). `fetchTransfers` sorts newest first (`transferTime`: ended → started
+  → enqueued → requested), so every group reads that way.
 - **Downloads** — grouped by `transferGroup`: Needs attention (failed, with *Retry all*) ·
   Downloading · Waiting · Finished (*Clear*, folded past 10) · Cancelled. Failures read in
   plain words (`plainTransferError`, raw text kept for anything unrecognised); waiting rows say
@@ -282,7 +301,8 @@ the fallback; download history matters less. Each rule replaced a complaint:
 - **Transfer actions on search rows**: rows are `f:<key>` (Files) or `o:<key>` (open folder);
   Play / Retry / Cancel read ids through `transferKeys`, which strips the prefix only when the
   raw id isn't itself a known key (a username may begin with "f:").
-- **A folder card opens the folder** (`open-folder` → `folderView`), it never queues. Inside: the
+- **A folder row's name opens the folder** (`open-folder` → `folderView`); a click never queues —
+  only the row's labelled *Download folder* hover button does. Inside: the
   tracklist (sorted by file name, no column sort), songs the library has marked *In library*
   (Fill: from its mode; a plain search: one `libraryRowByName` per file, at most
   `FOLDER_OWNED_LOOKUPS_MAX`, once per folder), and `folder-download` with `which: "missing"`

@@ -338,16 +338,19 @@ test("Fill: compares each folder with the album's library rows and downloads onl
     // Opens on Folders; the folder that has nothing new is hidden.
     const bar = findNodes(view, (n) => n.type === "toolbar" && (n.buttons || []).some((b) => b.action === "result-mode"))[0];
     assert.equal(bar.buttons.filter((b) => b.variant === "accent")[0].label, "Folders");
-    let grid = findNodes(view, (n) => n.type === "card-grid")[0];
-    assert.ok(grid, "folder cards");
+    let grid = findNodes(view, (n) => n.type === "track-row-list" && n.sortAction === "sort-folders")[0];
+    assert.ok(grid, "folder list");
     assert.equal(grid.items.length, 1);
     assert.equal(grid.items[0].title, "OK Computer");
-    assert.ok(grid.items[0].subtitle.includes("3 files · 1 you don't have · 27 MB"), "the missing file's size, not the folder's: " + grid.items[0].subtitle);
-    assert.equal(grid.items[0].action, "open-folder", "a card opens the folder; nothing is queued yet");
+    assert.equal(grid.items[0].cells.tracks, "3");
+    assert.ok(grid.items[0].subtitle.includes("1 you don't have · 27 MB"), "the missing file's size, not the folder's: " + grid.items[0].subtitle);
+    assert.equal(grid.items[0].action, "open-folder", "a click opens the folder; nothing is queued yet");
+    assert.deepEqual(grid.items[0].actions, ["folder-row-download", "open-folder"]);
+    assert.equal(grid.actions[0].label, "Download the ones you don't have");
 
     // Everything: both folders, the complete one saying so.
     h.actions["mode-show-all"]();
-    grid = findNodes(lastView(h), (n) => n.type === "card-grid")[0];
+    grid = findNodes(lastView(h), (n) => n.type === "track-row-list" && n.sortAction === "sort-folders")[0];
     assert.equal(grid.items.length, 2);
     assert.ok(grid.items[1].subtitle.includes("you have all of these"), grid.items[1].subtitle);
     h.actions["mode-show-all"]();
