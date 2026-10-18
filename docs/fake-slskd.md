@@ -28,7 +28,7 @@ Then in Viboplr, open **Soulseek → Settings**:
 The plugin recognises the fake by the `X-Fake-Slskd` header on its answers, so a real slskd is
 never mistaken for one.
 
-- **Your real connection is kept.** The address, key and Roadie link stay as they were, and
+- **Your real connection is kept.** The address and key (and whether this plugin installed that slskd) stay as they were, and
   the switch only changes which server the plugin talks to.
 - **The fake gets its own state.** Downloads, kept fallback files, sharer history, upgrades
   and the fallback log are stored separately while the switch is on. Otherwise the fake's

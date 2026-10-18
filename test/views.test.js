@@ -129,8 +129,8 @@ test("statusChecklist: connected, sharing, reaching the library — the fix on t
   assert.equal(r[2].label, "✓ Downloads reach your library");
   assert.match(r[2].description, /“Music”/);
 
-  r = rows(rd, "local", null, "roadie");
-  assert.ok(!r[1].control, "Roadie's card below carries Share…");
+  r = rows(rd, "local", null, "managed");
+  assert.ok(!r[1].control, "the installed slskd's card below carries Share…");
   assert.match(r[1].description, /card below/);
 
   assert.equal(rows(Object.assign({}, rd, { shareCount: 3 }), "remote", null, "slskd")[2].label, "⚠ slskd is on another computer");

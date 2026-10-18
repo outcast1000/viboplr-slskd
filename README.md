@@ -33,24 +33,28 @@ You need:
    Docker image.
 2. A **Soulseek account**, entered in `slskd.yml` as the guide shows.
 
-slskd stays yours: its config, its process, its updates. Nothing in Viboplr
-downloads, writes or launches it. If you already run slskd somewhere (Docker, a
-NAS), skip the guide and paste its address and API key into the Connection
-section.
+If you already run slskd somewhere (Docker, a NAS, another computer), skip the
+guide and paste its address and API key into the Connection section. A slskd
+already running on this computer is found by itself.
 
-**Shortcut: Roadie.** [Roadie](https://github.com/outcast1000/roadie) is a
-tool manager that installs, configures, runs and updates slskd for you. Viboplr
-carries its command-line release as a dependency (Settings → Dependencies):
-**Set up slskd for me** installs Roadie, and then **Install slskd with Roadie**
-(Soulseek account optional) asks Roadie to fetch slskd. Roadie asks you in its
-own dialog before installing, runs slskd on this computer only, and in the
-same approval gives Viboplr its own API key, so the plugin connects by itself.
-Roadie owns the process from then on: the plugin follows its port, shows
-*slskd is stopped* with a **Start slskd** button when it isn't running, and
-forgets the connection if slskd is removed. Typing an address by hand takes it
-back. The view tells you which of four things is wrong until it isn't: not
-set up, slskd not reachable, key rejected, or slskd not signed in to Soulseek —
-each with the fix.
+**Shortcut: install it here.** On Viboplr versions that can run programs for a
+plugin, **Install automatically** does the whole thing: you give your Soulseek
+account and a downloads folder, Viboplr asks you to allow it (the plugin's
+optional `programs:run` permission — never asked if you don't use this, and
+asked again with a warning for an unsigned copy of the plugin) and then
+confirms the download itself. The plugin fetches slskd from slskd's own GitHub
+release, keeps it only if it matches the checksum pinned in the plugin, writes
+`slskd.yml` (web page on 127.0.0.1 only, a random web sign-in, an API key
+limited to this computer, your downloads folder and collections shared), and
+starts it in the background. slskd keeps running when Viboplr quits, and the
+plugin starts it again whenever Viboplr opens, unless you turn either off.
+Viboplr doesn't add slskd to your login items; to have it run without Viboplr,
+add it there yourself. The Settings tab's *slskd on this
+computer* card has Start / Restart, the update to a newer pinned slskd (asked
+again before it downloads), sharing more folders, where its files are, and
+Remove. Typing an address by hand stops using it. The view tells you which of
+four things is wrong until it isn't: not set up, slskd not reachable, key
+rejected, or slskd not signed in to Soulseek — each with the fix.
 
 ## Features
 

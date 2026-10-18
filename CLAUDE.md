@@ -111,7 +111,7 @@ Owner decisions that must hold:
   ("slskd isn't running…") annoying and asked for the yt-dlp / TIDAL pattern: once slskd has been
   set up, a state that isn't ready keeps the tabbed view and puts a `ds-banner` row on top
   (`readinessBanner`) with the one click that fixes it (*Start slskd* / *Restart slskd* through
-  Roadie, *Try again*) plus *Fix…*, which opens the Settings tab where `fixNodes` puts the full
+  the plugin, *Try again*) plus *Fix…*, which opens the Settings tab where `fixNodes` puts the full
   explanation above the Connection card. The first run (`unconfigured`) and the hub's own pages
   stay full-page (`wantsSetupScreen`). The sidebar dot (`badgeFor`) is the only signal outside the
   view. Do not bring back a readiness `showNotification`, at launch or on a state change.
@@ -121,45 +121,52 @@ Owner decisions that must hold:
   feature-detected (older hosts have no header), so it needs no `minAppVersion` bump; the manifest's
   `viewHeader.subtitle` is the fallback before the first render. Keep the header to state + where
   slskd is + *Open slskd*; a fix button belongs in `readinessBanner`, not in the header.
-- **Find slskd first; Roadie is only for installing it** (owner, 2026-09-29). The first run
-  looks for a slskd already running here (`discoverSlskd`: `GET /api/v0/session/enabled` on
-  127.0.0.1:5030–5040 and https:5031, which slskd answers without a key with `true`/`false`)
-  before any Roadie call. `refreshReadiness` doesn't reach Roadie while `discovery.state` isn't
-  `none`. Found: the plugin's own key is tried, then the user is asked for one of slskd's keys
-  (`discoveryNodes`). "Get the key from Roadie" is a second way, shown only when Roadie runs that
-  very slskd. The whole setup must work with no Roadie at all. Roadie's role is installing slskd
-  when none is found and the user chooses the automatic install.
-- **The user owns slskd; Roadie runs it for them, never Viboplr.** The host never installs,
-  launches, supervises or configures a third-party daemon itself (a host-managed slskd sidecar
-  was built and rejected). The two ways to get slskd are the guided setup (the GitHub Pages
-  guide in `docs/`) and **Roadie**, the separate tool manager whose CLI release the host carries
-  as a managed dependency (`roadie` in `dependencies.rs`, with Viboplr's own `--data-dir`). The
-  plugin drives it with `api.system.exec` (`tool status` / `install --consumer viboplr` /
-  `connection` / `start` / `uninstall [--keep-data]`, always `--as Viboplr`). Removal is offered
-  only for a slskd Roadie manages (Connection section), goes through Roadie's dialog like an
-  install, and on success forgets the managed connection straight away.
-  The same section lists slskd's files from `tool status` (`configFiles`, `installDir`, `dataDir`,
-  `logsDir` — Roadie 0.5.0+, rows absent before) with `api.system.openPath` / `revealPath`; the
-  config file is only ever *revealed*, since it holds the Soulseek password.
-  Those rows show whenever Roadie has slskd (`roadieManagedRows`), not only when the connection is
-  Roadie's; start-at-login and Remove still need `managedBy === "roadie"`. `roadieOwnsAddress`
-  treats any loopback host on Roadie's port as Roadie's slskd (`localhost:5030` = `127.0.0.1:5030`).
-  "Key rejected" + an approved Roadie slskd offers *Use Roadie's slskd* (`roadie-connect`) — never
-  auto-adopt over a typed address. "Signed out" on Roadie's slskd reads the reason from
-  `tool logs` (1000 lines; a refused key logs a warning a minute) and offers `tool restart`: a
-  **kick** ("another client logged in using the same username") is final until slskd restarts.
-  For Roadie's slskd the Connection section is the **"slskd from Roadie" card**
-  (`roadieConnectionSection`): address + Test, start at login, **Sharing**, files (folded), connection
-  details (folded; the address/key form, since typing into it ends Roadie's management), Remove last.
-  **Sharing:** every local collection is shared by default — the install sends them, and an older
-  install or a collection added later shows up as a gap (`shareGap`) on the card with *Share…*,
-  which re-runs `tool install slskd --set shares.directories=[current ∪ gap]` (adds only). Roadie's
-  dialog lists the folders, so the plugin never raises it unprompted; after approval the plugin
-  `PUT /api/v0/shares` once slskd is signed in again (`rescanPending`), because slskd can restore
-  an empty share cache from backup instead of scanning. Every install is a click here plus an
-  approval in Roadie's dialog, and `tool connection` runs automatically only once Viboplr is
-  already approved (`roadieAutoConfigAction`), because an unapproved one opens that dialog.
-  Everything is feature-detected: `getDependency("roadie")` is null on hosts without it.
+- **Find slskd first; installing is only for when none is found** (owner, 2026-09-29). The
+  first run looks for a slskd already running here (`discoverSlskd`: `GET /api/v0/session/enabled`
+  on 127.0.0.1:5030–5040 and https:5031, which slskd answers without a key with `true`/`false`)
+  before offering anything else. Found: the plugin's own key is tried, then the user is asked for
+  one of slskd's keys (`discoveryNodes`). The whole setup must work without installing anything.
+- **Installing slskd is ONE option, never required** (owner, 2026-10-19 — Roadie removed from
+  Viboplr). The user can install slskd themselves (the GitHub Pages guide in `docs/`) or run it
+  anywhere and just configure the plugin. *Install automatically* is the plugin installing slskd
+  through the host's generic **`api.system.programs`** ("Installing slskd on this computer" in
+  `index.js`). The host knows nothing about slskd; everything slskd-specific lives here:
+  `SLSKD_RELEASE` pins the version and the **sha256 of each platform's zip** (slskd publishes no
+  checksums; the plugin's signature covers the pins — a new slskd ships as a plugin release),
+  `renderSlskdYml` writes the config once (web on 127.0.0.1, a **random** web sign-in kept in the
+  `managedSlskd` storage record, the plugin's API key with a loopback CIDR, `remote_configuration`
+  and `remote_file_management` on, partial downloads inside the plugin's store so no outside folder
+  has to be created), and `stopManagedProcess` stops it gracefully (JWT from that web login →
+  `DELETE /api/v0/application`) before the host's signal.
+  - **Permission:** `programs:run` is in the manifest's **`optionalPermissions`**, so a user who runs
+    their own slskd is never asked. The host asks the first time the install needs it (and warns for
+    an unsigned copy), then **confirms every download** in its own dialog — the plugin passes
+    `label: "slskd <version>"`. A declined dialog rejects with `"Install declined"` (or a
+    `PermissionError`); `managedFailure` turns both into "back to the form", not an error.
+  - **Lifetime:** slskd keeps running after Viboplr quits (`outliveApp`, off only via the card's
+    *Keep slskd running when Viboplr quits* → `settings.stopWithViboplr`, applied at the next start)
+    and the plugin starts it on activation when the host knows it (`registered`) and it isn't
+    running (`shouldStartWithViboplr`, `settings.startWithViboplr`, on by default, the install
+    form's and the card's switch). The host has **no login items** (removed 2026-10-19 — every
+    start happens inside Viboplr, under its approval check); a user who wants slskd without
+    Viboplr adds it to the OS themselves. Uninstalling the plugin makes the host stop it.
+  - `managedBy: "plugin"` + the `managedSlskd` record mark the connection as this plugin's slskd;
+    `usesManaged` is the one test. A typed address/key clears it. A stored `"roadie"` from older
+    versions is cleared at load (the address stays, it is just a slskd now).
+  - The **"slskd on this computer" card** (`managedConnectionSection`): address + Test, Update
+    (`managedUpdateRows`, when the pin is newer than the record), start with Viboplr, keep running,
+    **Sharing**, files (folded; the settings file is only revealed — it holds the Soulseek password),
+    connection details (folded), Remove last (stop → `programs.remove` → delete `slskd/` and `logs/`;
+    downloads and shares untouched).
+  - **Sharing** more folders goes through slskd's own settings API (`shareThroughSlskd`: admin JWT,
+    `yamlWithShares`, slskd validates, then `PUT /api/v0/shares`), after a confirm on the card,
+    because the folders become public. The gap is measured against what slskd reports (`shareGap`).
+  - Sign-in reasons come from slskd's `GET /api/v0/logs`, falling back to the output the host
+    captured (`logs/slskd.log` in the plugin's store, `managedLogLines`). A **kick** ("another client
+    logged in using the same username") is final until slskd restarts — the card and banner offer
+    *Restart slskd*.
+  - Everything is feature-detected (`managedCapable`: `api.system.programs`, `api.system.platform`,
+    `api.ui.pickFolder`); an older Viboplr just doesn't offer the install, so `minAppVersion` stays.
 - **No metadata-based download provider.** A download the user asks for by hand gets a
   file they picked, not the fallback's best guess. The one deliberate exception is
   **Upgrade** (owner's decision, 2026-09-27): it picks the file itself, but the *replace*
@@ -270,7 +277,7 @@ Each tab owns one job, and a setting lives next to what it controls:
   `confirm` node), and the fallback's settings.
 - **Settings** — `fixNodes` when not ready; when ready a **Status** checklist
   (`statusChecklist`: connected · sharing · downloads reach the library, each fix on its row),
-  then the Connection card (unchanged, Roadie's card order still holds), slskd's web page,
+  then the Connection card (the installed slskd's card when it is this plugin's), slskd's web page,
   Downloads. The old Library and Sharing sections became checklist rows.
 
 - **Row chips and bars** (host `track-row-list` `badge` / `progress`, hosts after 1.0.90; older

@@ -128,7 +128,9 @@ test("KEY_SEP is a single NUL character", () => {
 
 test("permissionReasons gives exactly one plain-text reason per requested permission", () => {
   const manifest = JSON.parse(require("node:fs").readFileSync(require("node:path").join(__dirname, "..", "manifest.json"), "utf8"));
-  assert.deepEqual(Object.keys(manifest.permissionReasons).sort(), [...manifest.permissions].sort());
+  // One reason per permission, required and optional (programs:run is asked only when installing slskd).
+  assert.deepEqual(Object.keys(manifest.permissionReasons).sort(), [...manifest.permissions, ...(manifest.optionalPermissions || [])].sort());
+  assert.deepEqual(manifest.optionalPermissions, ["programs:run"], "running your own slskd never asks for it");
   for (const [perm, why] of Object.entries(manifest.permissionReasons)) {
     assert.equal(typeof why, "string", perm);
     assert.ok(why.length > 0 && why.length <= 120, perm + " reason is 1-120 chars");

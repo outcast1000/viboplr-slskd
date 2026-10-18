@@ -14,7 +14,59 @@ function fakeHost(opts) {
   const actions = {};
   const tools = {};
   const resolvers = {};
-  const calls = { requestAction: [], notifications: [], notices: [], navigated: [], badges: [], resync: [], played: [], fetched: [], views: [], exec: [], opened: [], headers: [] };
+  const calls = { requestAction: [], notifications: [], notices: [], navigated: [], badges: [], resync: [], played: [], fetched: [], views: [], exec: [], opened: [], headers: [], programs: [] };
+  // The plugin's own file store (api.storage.files), as path → text. Folders
+  // exist implicitly; `getPath` answers for anything at or under a written path.
+  const files = Object.assign({}, o.files || {});
+  const FILES_ROOT = "/store";
+  const joined = (segs) => segs.join("/");
+  const filesApi = {
+    writeText: async (segs, text) => { files[joined(segs)] = String(text); return FILES_ROOT + "/" + joined(segs); },
+    readText: async (segs) => (joined(segs) in files ? files[joined(segs)] : null),
+    getPath: async (segs) => {
+      const k = joined(segs);
+      const exists = k in files || Object.keys(files).some((f) => f.startsWith(k + "/"));
+      return exists ? FILES_ROOT + "/" + k : null;
+    },
+    exists: async (segs) => joined(segs) in files,
+    remove: async (segs) => {
+      const k = joined(segs);
+      for (const f of Object.keys(files)) if (f === k || f.startsWith(k + "/")) delete files[f];
+      calls.programs.push({ op: "files.remove", path: k });
+    }
+  };
+  // api.system.programs: `o.programs` overrides any method; the defaults
+  // succeed. Every call is logged in `calls.programs` as { op, ... }.
+  // `o.progState` seeds it — e.g. { registered: true } for a slskd the host
+  // started before, now stopped.
+  const progState = Object.assign({ running: false, registered: false, spec: null }, o.progState || {});
+  const programsDefaults = {
+    download: async (path, url, opts) => {
+      if (opts && opts.onProgress) { opts.onProgress(10, 100); opts.onProgress(100, 100); }
+      files[joined(path)] = "zip";
+      return { path: FILES_ROOT + "/" + joined(path), sha256: (opts && opts.sha256) || "0".repeat(64), size: 100 };
+    },
+    extract: async (archive, dest) => { files[joined(dest) + "/slskd"] = "bin"; return 3; },
+    run: async () => ({ exitCode: 0, stdout: "0.26.1\n", stderr: "" }),
+    start: async (name, spec) => { progState.running = true; progState.registered = true; progState.spec = spec; return status(name); },
+    status: async (name) => status(name),
+    list: async () => (progState.registered ? [status("slskd")] : []),
+    stop: async (name) => { progState.running = false; return status(name); },
+    remove: async () => { progState.running = false; progState.registered = false; }
+  };
+  function status(name) {
+    return { name, registered: progState.registered, running: progState.running, pid: progState.running ? 4242 : null,
+      startedAt: progState.running ? 1 : null, outliveApp: progState.spec ? progState.spec.outliveApp !== false : true,
+      logPath: FILES_ROOT + "/logs/" + name + ".log" };
+  }
+  const programs = {};
+  for (const op of Object.keys(programsDefaults)) {
+    programs[op] = async (...args) => {
+      calls.programs.push({ op, args });
+      const impl = (o.programs && o.programs[op]) || programsDefaults[op];
+      return impl(...args);
+    };
+  }
   const responses = Object.assign({
     "/api/v0/application": {
       server: { state: "Connected, LoggedIn", isLoggedIn: true, isTransitioning: false, username: "me" },
@@ -30,7 +82,8 @@ function fakeHost(opts) {
     storage: {
       get: async (k) => store[k],
       set: async (k, v) => { store[k] = v; },
-      delete: async (k) => { delete store[k]; }
+      delete: async (k) => { delete store[k]; },
+      files: filesApi
     },
     network: {
       // `o.fetch(fullUrl, init)` sees the URL *with* its query string and may
@@ -60,7 +113,9 @@ function fakeHost(opts) {
       requestAction: (a, p) => calls.requestAction.push({ action: a, payload: p }),
       setBadge: (v, b) => calls.badges.push(b),
       // Absent when a test asks for an older host (`noViewHeader: true`).
-      setViewHeader: o.noViewHeader ? undefined : (v, h) => calls.headers.push({ viewId: v, header: h })
+      setViewHeader: o.noViewHeader ? undefined : (v, h) => calls.headers.push({ viewId: v, header: h }),
+      // Absent on a host that can't install programs (`o.noPrograms`).
+      pickFolder: o.noPrograms ? undefined : async () => (o.pickFolder !== undefined ? o.pickFolder : "/Users/me/Music/Soulseek")
     },
     playback: {
       onResolveStreamByUri: (scheme, fn) => { resolvers["stream:" + scheme] = fn; },
@@ -103,11 +158,17 @@ function fakeHost(opts) {
           calls.exec.push({ program, args });
           return o.exec(program, args, execOpts);
         }
-      } : {}
+      } : {},
+      // A host that can install programs for a plugin (`o.noPrograms` turns
+      // it into an older one). `o.platform` defaults to an Apple-silicon Mac.
+      o.noPrograms ? {} : {
+        platform: async () => o.platform || { os: "macos", arch: "arm64" },
+        programs
+      }
     ),
     assistant: { onTool: (name, fn) => { tools[name] = fn; } }
   };
-  return { api, actions, tools, resolvers, calls, store };
+  return { api, actions, tools, resolvers, calls, store, files, progState };
 }
 
 module.exports = { fakeHost };

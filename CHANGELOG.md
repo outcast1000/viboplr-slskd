@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.25.0
+- **Install slskd without Roadie.** Viboplr no longer ships Roadie. On Viboplr versions that can run programs for a plugin, *Install automatically* installs slskd itself: your Soulseek account and a downloads folder, then Viboplr asks you to allow it and confirms the download. slskd comes from its official GitHub release and is kept only if it matches the checksum pinned in this plugin. It runs in the background on this computer only, keeps running when Viboplr quits, and is started again whenever Viboplr opens — both switches are on the *slskd on this computer* card in Settings. Viboplr doesn't add it to your login items; do that yourself to run it without Viboplr, with Start / Restart, Update, sharing more folders, slskd's files and Remove.
+- **Running your own slskd needs no extra permission.** The permission to run programs is optional: it is asked only when you choose the install, so connecting to a slskd you run (here, in Docker, on a NAS) works exactly as before.
+- **A slskd that Roadie installed** keeps its address: the plugin now treats it as a slskd you run. Viboplr removes Roadie and the slskd it installed when it updates, so install again from the Settings tab if that was yours — your Soulseek username and password are asked again; your downloads are untouched.
+
 ## v0.24.0
 - **Folders is a table now, like Files.** Each folder is a row with sortable Quality, Tracks, Size and Availability columns (it used to be a grid of cards whose picture was only the format, with everything else squeezed into one cut-off line). Click the folder's name to open it. Hover the row for **Download folder** (in *Fill missing tracks*: **Download the ones you don't have**) to fetch it without opening it. Once its files are on their way, the row says how far it got (Queued 3 of 12 · Downloading 5 of 12 · Done). Right-click no longer offers track actions on a folder.
 - **Downloads are listed newest first** within each group, by when each file last moved (finished, started, or asked for).

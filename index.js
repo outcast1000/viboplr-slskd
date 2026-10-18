@@ -136,7 +136,9 @@ var settings = {
   fallbackMaxAgeDays: 0,    // automatic cleanup: delete fallback files not played for this many days (0 = off)
   upgradeTarget: "flac16", // a UPGRADE_TARGETS key — what an automatic upgrade looks for
   batchSeq: 0,
-  managedBy: null,        // null | "roadie" — the address/key came from Roadie and follow it
+  managedBy: null,        // null | "plugin" — this plugin installed the slskd it talks to (see "Installing slskd")
+  stopWithViboplr: false, // the installed slskd stops when Viboplr quits (default: it keeps running)
+  startWithViboplr: true, // the plugin starts the installed slskd when it activates, if it isn't running
   debugServer: false,     // talk to the fake slskd (FAKE_SLSKD_COMMAND) instead — see "Test server"
   debugUrl: "http://127.0.0.1:5039"
 };
@@ -391,7 +393,7 @@ function isWindowsPathBug(exception) {
 // Pure: is this a Windows absolute path with a forward slash in it? slskd
 // builds every partial download under directories.incomplete and demands the
 // result already be normalized, so a configured folder like
-// `C:\Users\x\Music\Soulseek/.incomplete` (what Roadie's slskd recipe wrote before it normalized paths)
+// `C:\Users\x\Music\Soulseek/.incomplete` (what an older slskd setup wrote before it normalized paths)
 // fails EVERY download with the same "Only absolute paths" error as
 // `windowsCantStore` — no source is at fault and none will work.
 function windowsPathNotNormalized(p) {
@@ -407,7 +409,7 @@ function misconfiguredSlskdDir(downloads, incomplete) {
 }
 
 var MISCONFIGURED_DIR_TEXT = "slskd's download folder mixes / and \\, so slskd on Windows rejects every download. " +
-  "Update Roadie and restart slskd, or fix directories in slskd.yml";
+  "Fix directories in slskd.yml (or slskd's settings page) and restart slskd";
 
 // responses: slskd Search.responses[]. Availability lives on the response,
 // quality on the file, so the unit of ranking is a flattened (response, file).
@@ -1781,20 +1783,20 @@ function badgeFor(state) {
 // Pure: the notice across the top of the view while slskd is set up but not
 // ready, or null. One line saying what's wrong, the one click that fixes it
 // when there is one, and "Fix…" to the Settings tab, where the full
-// explanation sits above the Connection card. A slskd Roadie installed and
-// still has is only stopped, so the notice starts it. `why` is the sign-in
+// explanation sits above the Connection card. A slskd this plugin installed
+// is only stopped, so the notice starts it. `why` is the sign-in
 // reason read from slskd's log; `onSettings` drops "Fix…" on the Settings
 // tab, where the explanation is already right below — there the button
 // had nowhere to go and looked dead.
-function readinessBanner(st, cfg, r, why, onSettings) {
-  var tool = r && r.installed ? r.tool : null;
-  var busy = !!(r && r.job);
+function readinessBanner(st, cfg, m, why, onSettings) {
+  var ours = usesManaged(cfg, m);
+  var busy = !!(m && m.job);
   var fix = onSettings ? [] : [actionButton("Fix…", "slskd-show-fix")];
   var text, variant, buttons;
-  if (st === "unreachable" && cfg.managedBy === "roadie" && tool && tool.installed) {
+  if (st === "unreachable" && ours) {
     text = "slskd isn't running. Search, downloads and the playback fallback need it.";
     variant = "warning";
-    buttons = [actionButton("Start slskd", "roadie-start", "accent", { disabled: busy })];
+    buttons = [actionButton("Start slskd", "managed-start", "accent", { disabled: busy })];
   } else if (st === "unreachable") {
     text = "Can't reach slskd at " + (cfg.url || "the saved address") + ". It may be stopped.";
     variant = "error";
@@ -1810,8 +1812,8 @@ function readinessBanner(st, cfg, r, why, onSettings) {
   } else if (st === "disconnected") {
     text = "slskd is running but isn't signed in to Soulseek.";
     variant = "warning";
-    buttons = roadieOwnsAddress(cfg.url, tool) && !signinNeedsNetwork(why)
-      ? [actionButton("Restart slskd", "roadie-restart", "accent", { disabled: busy })].concat(fix)
+    buttons = ours && managedOwnsAddress(cfg.url, m.record) && !signinNeedsNetwork(why)
+      ? [actionButton("Restart slskd", "managed-restart", "accent", { disabled: busy })].concat(fix)
       : [checkButton("Check again")].concat(fix);
   } else if (st === "connecting") {
     text = "slskd is connecting to Soulseek…";
@@ -1827,26 +1829,26 @@ function readinessBanner(st, cfg, r, why, onSettings) {
 // Pure: the host-drawn header over the view (api.ui.setViewHeader). It says
 // whether slskd works, in one word, plus where it is; the fix for a problem
 // stays in `readinessBanner`, which is larger and carries the button.
-// `rd` is `readiness`; `setup` is `roadie.setup` (the install checklist).
-function viewHeaderFor(rd, cfg, r, tierNow, setup) {
+// `rd` is `readiness`; `setup` is `managed.setup` (the install checklist).
+function viewHeaderFor(rd, cfg, m, tierNow, setup) {
   var st = rd.state;
   var url = cfg.url || "";
-  var roadieSlskd = cfg.managedBy === "roadie";
+  var ours = usesManaged(cfg, m);
   var open = url ? [{ label: "Open slskd", action: "open-slskd" }] : [];
   if (setup) {
-    return { subtitle: "Setting up slskd with Roadie", status: { variant: "muted", label: "Setting up" }, actions: [] };
+    return { subtitle: "Setting up slskd on this computer", status: { variant: "muted", label: "Setting up" }, actions: [] };
   }
   if (st === "unconfigured") {
     return { subtitle: "Search and download from the Soulseek network", status: { variant: "muted", label: "Not set up" }, actions: [] };
   }
-  var where = (cfg.debug ? "Test server · " : (roadieSlskd ? "slskd from Roadie · " : "")) + url;
+  var where = (cfg.debug ? "Test server · " : (ours ? "slskd installed here · " : "")) + url;
   if (st === "ready") {
     var sub = (cfg.debug ? "Test server · " : "") + "Connected as " + (rd.username || "?") + (rd.version ? " · slskd " + rd.version : "");
     if (tierNow !== "local") sub += " · on another computer";
     return { subtitle: sub, status: { variant: "success", label: "Ready" }, actions: open };
   }
   if (st === "unreachable") {
-    return roadieSlskd
+    return ours
       ? { subtitle: where, status: { variant: "warning", label: "Not running" }, actions: [] }
       : { subtitle: where, status: { variant: "error", label: "Unreachable" }, actions: [] };
   }
@@ -1860,7 +1862,7 @@ function viewHeaderFor(rd, cfg, r, tierNow, setup) {
 var lastViewHeader = null;
 function pushViewHeader() {
   if (!api || !api.ui || typeof api.ui.setViewHeader !== "function") return; // older hosts
-  var header = viewHeaderFor(readiness, conn(), roadie, tier, roadie.setup);
+  var header = viewHeaderFor(readiness, conn(), managed, tier, managed.setup);
   var key = JSON.stringify(header);
   if (key === lastViewHeader) return;
   lastViewHeader = key;
@@ -1881,21 +1883,12 @@ async function refreshReadiness() {
   // A fake restarted on another port: follow it rather than report it gone.
   if (settings.debugServer && p.kind !== "ok" && await detectDebugServer()) p = await probe();
   lastServerState = p.kind === "ok" ? p.serverState : null;
-  // Not ready → look for Roadie. It may hold the connection we lack, or say
-  // that a managed slskd was removed. A changed connection is re-probed once.
-  // A Roadie-managed slskd is asked even when ready (cached, one short exec
-  // a minute at most): its port can move, and Settings shows its login-item
-  // choice.
-  // The first run looks for slskd by itself first; Roadie comes in only once
-  // nothing was found (it is then one way to install slskd).
-  var firstRunLooking = p.kind === "unconfigured" && discovery.state !== "none";
-  if (!settings.debugServer && !firstRunLooking && (p.kind !== "ok" || settings.managedBy === "roadie" || p.isLoggedIn === false)) {
-    try {
-      await probeRoadie();
-      if (await reconcileRoadie(p.kind)) p = await probe();
-    } catch (e) {
-      console.error("slskd: Roadie probe failed:", e);
-    }
+  // What the host says about the slskd this plugin installed (running?
+  // started before?). A cheap host call, no process spawned.
+  try {
+    await probeManaged();
+  } catch (e) {
+    console.error("slskd: couldn't read the installed slskd's status:", e);
   }
   var next = nextReadiness(p, readiness);
   readiness = {
@@ -1918,7 +1911,7 @@ async function refreshReadiness() {
   }
 
   if (next.state === "ready" && !downloadsDir) await loadDownloadsDir();
-  if (next.state === "ready" || conn().managedBy === "roadie") await loadCollections();
+  if (next.state === "ready" || usesManaged(conn(), managed)) await loadCollections();
   await rescanSharesIfPending();
   await loadSlskdShared();
 
@@ -1927,9 +1920,9 @@ async function refreshReadiness() {
   if (next.state === "ready" && readiness.shareCount === 0 && !sharesWarned) {
     sharesWarned = true;
     await api.storage.set(stateKey("sharesWarned"), true);
-    var canShare = conn().managedBy === "roadie" && shareGap(localCollections, roadie.tool).length > 0;
+    var canShare = usesManaged(conn(), managed) && shareGap(localCollections, slskdShared).length > 0;
     api.ui.showNotification("slskd isn't sharing any folders. Soulseek prioritises users who share, so downloads may be slow or queue for a long time.",
-      canShare ? { action: { label: "Share collections", id: "roadie-share-collections" } } : undefined);
+      canShare ? { action: { label: "Share collections", id: "share-collections" } } : undefined);
   }
 
   render();
@@ -3518,284 +3511,343 @@ function whatIsThisUrl(apiKey, collections) {
 
 
 // ---------------------------------------------------------------------------
-// Roadie (https://github.com/outcast1000/roadie) installs, runs and updates
-// slskd for the user, and asks them in its own dialog before each install
-// and before handing this plugin a key. Viboplr carries Roadie's command-line
-// release as a managed dependency (Settings → Dependencies; the host passes
-// Viboplr's own --data-dir on every call), and the plugin drives it through
-// api.system.exec:
-//
-//   roadie tool status slskd                        installed? running? approved?
-//   roadie tool install slskd --consumer viboplr    one approval installs + grants our key
-//   roadie tool connection slskd --consumer viboplr { url, apiKey } once granted
-//   roadie tool start slskd
-//
-// Nothing here runs an install without the user's click, and Roadie's dialog
-// is the consent on top of that. A host without Roadie in its dependency
-// registry answers getDependency("roadie") with null, and then none of this
-// shows: the setup guide stays the way to get slskd.
+// Installing slskd on this computer (api.system.programs)
 // ---------------------------------------------------------------------------
+// One of three ways to get slskd (the others: the manual guide, and connecting
+// to one the user runs). Viboplr knows nothing about slskd: it offers generic
+// primitives — download into the plugin's own folder, unpack, run, start and
+// stop in the background — and asks the user before each install. It never
+// starts a program by itself: the plugin starts slskd when Viboplr opens
+// (settings.startWithViboplr) or when the user asks. Everything
+// slskd-specific is here: which build, its pinned checksum, slskd.yml, how to
+// stop it gracefully.
+//
+// Where things live (the plugin's own storage folder, `api.storage.files`):
+//
+//   slskd/<version>/            the unpacked release (slskd + wwwroot/ …)
+//   slskd/data/slskd.yml        written once at install; slskd owns it after
+//   slskd/data/app/             slskd's app directory (database, its own logs)
+//   slskd/data/extract/         .NET's single-file extraction folder
+//   slskd/data/incomplete/      partial downloads (here, so no folder outside
+//                               the store has to be created for slskd)
+//   slskd/download/<zip>        the release while it is unpacked
+//   logs/slskd.log              slskd's output (the host writes it)
+//
+// The permission it needs (`programs:run` + the release hosts) is an OPTIONAL
+// one in the manifest: a user who runs their own slskd is never asked for it.
+// The host asks the first time the install needs it, then confirms each
+// download. Nothing here runs without the user's click.
 
-var ROADIE_DEP = "roadie";
-var ROADIE_CONSUMER = "viboplr";
-var ROADIE_AS = "Viboplr";
-var ROADIE_STATUS_TTL_MS = 30000;
+// The slskd build this plugin installs, checksummed when it was pinned. A new
+// slskd reaches users with a plugin release; the plugin's signature covers
+// these hashes.
+var SLSKD_RELEASE = {
+  version: "0.26.1",
+  url: "https://github.com/slskd/slskd/releases/download/0.26.1/slskd-0.26.1-{asset}.zip",
+  sha256: {
+    "osx-arm64": "5cf79a4d41ad40906aababc6bd05585899f102e7c544e38157df747f01cb6f4b",
+    "osx-x64": "ccc278d659a658787a575cc40a0be9a19511e0578ba457a4c0675db987e4e8e7",
+    "win-x64": "14928215e6931f291dbc489cbeeccffba6d1aa0d5b94d4262705a596407d50d3",
+    "win-arm64": "bf0c4fcbfab58350a6684925c0e744c940aa4b6a0a282ddbefb8a2b619ff09ed"
+  }
+};
+var MANAGED_NAME = "slskd";          // the program's name in api.system.programs
+var MANAGED_RECORD_KEY = "managedSlskd";
+var MANAGED_DIR = "slskd";
+var MANAGED_LISTEN_PORT = 50300;     // Soulseek's incoming connections (slskd's default)
+var MANAGED_WEB_PORTS = [5030, 5031, 5032, 5033, 5034, 5035, 5036, 5037, 5038, 5039];
+var MANAGED_STOP_GRACE_SECS = 15;
+var INSTALL_DECLINED = "Install declined";
 
-// supported: the host can provide Roadie; installed: the binary is present;
-// tool: the last `tool status slskd` answer; job: an install/start the user
-// started ({ kind, line, percent, cancel }); error: the last failure, shown
-// until the next attempt.
-var roadie = { supported: false, installed: false, tool: null, checkedAt: 0, job: null, error: null, setup: null, other: null };
-// What slskd itself shares, read from slskd when it owns its settings (Roadie
-// 0.6+ setup); null when not read (then Roadie's record is used).
+// supported: this host can install programs for a plugin; record: what the
+// install left (storage `managedSlskd`: { version, asset, port, webUsername,
+// webPassword, downloadsDir, installedAt }); status: the host's last
+// api.system.programs.status; job: a start / stop / update / share the user
+// started ({ kind, line, percent }); error: the last failure, shown until the
+// next attempt; setup: the install checklist while it runs.
+var managed = { supported: false, platform: null, record: null, status: null, job: null, error: null, setup: null };
+// What slskd itself shares (GET /api/v0/shares), read once slskd is ready;
+// null when not read.
 var slskdShared = null;
-// Typed into the install form; memory only, dropped once the install ends.
-// `autostart` is the user's answer to "start slskd at login" — off unless
-// they turn it on, because on means a login item (and macOS says so).
+// The install form; memory only, dropped once the install ends. The account
+// goes into slskd.yml and nowhere else. `autostart` (saved as
+// settings.startWithViboplr once the install succeeds) defaults on: slskd is
+// meant to be running whenever Viboplr is; the user can turn that off here or
+// later.
 // `shareCollections`: share the user's Viboplr collections on Soulseek — on
-// unless they turn it off. Soulseek queues people who share nothing behind
-// everyone else, and a music library is the obvious thing to share.
-var roadieCreds = { username: "", password: "", autostart: false, shareCollections: true };
+// unless they turn it off, because Soulseek queues people who share nothing
+// behind everyone else.
+var installForm = { username: "", password: "", downloadsDir: "", autostart: true, shareCollections: true };
 
-// Pure: the CLI prints one JSON document on stdout, whatever the exit code.
-function parseRoadieJson(stdout) {
-  try { return JSON.parse(String(stdout || "").trim()); } catch (e) { return null; }
+// Pure: the release asset for the platform Vibo reports, or null (no build,
+// e.g. Linux on this plugin's release list).
+function slskdAssetFor(platform) {
+  if (!platform) return null;
+  var os = platform.os === "macos" ? "osx" : (platform.os === "windows" ? "win" : null);
+  var arch = platform.arch === "arm64" ? "arm64" : (platform.arch === "x64" ? "x64" : null);
+  if (!os || !arch) return null;
+  var asset = os + "-" + arch;
+  return SLSKD_RELEASE.sha256[asset] ? asset : null;
 }
 
-// Pure: a `roadie: …` progress line on stderr → what the view shows.
-function roadieProgress(line) {
-  var s = String(line || "").trim().replace(/^roadie:\s*/, "");
-  if (!s) return null;
-  if (/asking the user/i.test(s)) return { text: "Waiting for you to approve it in Roadie's dialog…", percent: null };
-  var m = /^downloading (\d+)%/.exec(s);
-  if (m) return { text: "Downloading slskd…", percent: Number(m[1]) };
-  return { text: s.charAt(0).toUpperCase() + s.slice(1) + "…", percent: null };
+function slskdBinaryName(asset) {
+  return /^win-/.test(String(asset || "")) ? "slskd.exe" : "slskd";
 }
 
-// Pure: the arguments of the install, account values included when typed.
-// "Start at login" is always sent, so the recipe's own default (on) never
-// decides it for the user.
-// `shareDirs`: extra folders slskd shares, sent as a JSON array under slskd's
-// own setting name (the recipe's `configuration` entry `shares.directories`,
-// added to the downloads folder); null or empty sends nothing.
-var SHARES_ENTRY = "shares.directories";
-
-function roadieInstallArgs(creds, shareDirs) {
-  var args = ["tool", "install", "slskd", "--consumer", ROADIE_CONSUMER];
-  var user = creds && String(creds.username || "").trim();
-  var pass = creds && String(creds.password || "");
-  if (user) args.push("--set", "soulseekUsername=" + user);
-  if (pass) args.push("--set", "soulseekPassword=" + pass);
-  args.push("--set", "autostart=" + (creds && creds.autostart ? "true" : "false"));
-  if (shareDirs && shareDirs.length) args.push("--set", SHARES_ENTRY + "=" + JSON.stringify(shareDirs));
-  return args;
+// Pure: { url, sha256, file } for an asset.
+function slskdDownloadFor(asset) {
+  var url = SLSKD_RELEASE.url.replace("{asset}", asset);
+  return { url: url, sha256: SLSKD_RELEASE.sha256[asset], file: url.slice(url.lastIndexOf("/") + 1) };
 }
 
-// Pure: this Roadie's slskd recipe opens `shares.directories`. Older ones
-// (before Roadie 0.3.0) reject an unknown key and would fail the install, so
-// the folders go only where the entry shows up in `tool status`.
-function roadieCanShareDirs(tool) {
-  return !!(tool && tool.config && Array.isArray(tool.config[SHARES_ENTRY]));
-}
-
-// Pure: what the install sends as shared folders.
-function installShareDirs(creds, tool, collections) {
-  if (!creds || !creds.shareCollections || !roadieCanShareDirs(tool)) return null;
-  var paths = collectionPaths(collections);
-  return paths.length ? paths : null;
-}
-
-// Pure: the message for a CLI run that did not succeed.
-function roadieFailure(code, json, stderr) {
-  if (code === 2) return "You declined it in Roadie's dialog.";
-  var msg = json && (json.error || json.note || (json.result && json.result.error));
-  if (!msg) {
-    var lines = String(stderr || "").trim().split("\n");
-    msg = lines[lines.length - 1].replace(/^roadie:\s*/, "");
+// Pure: "0.26.1" < "0.27.0" — what the update row compares.
+function versionLess(a, b) {
+  var pa = String(a || "").split(".").map(Number), pb = String(b || "").split(".").map(Number);
+  for (var i = 0; i < Math.max(pa.length, pb.length); i++) {
+    var x = pa[i] || 0, y = pb[i] || 0;
+    if (x !== y) return x < y;
   }
-  // Roadie 0.6+ gets slskd's recipe from its online catalog; without one
-  // cached (first run, offline) it doesn't know slskd yet.
-  if (/^unknown (tool|recipe):?\s*slskd\b/i.test(String(msg || ""))) {
-    return "Roadie couldn't load slskd's setup from its online catalog. Check your internet connection, then try again.";
-  }
-  return msg || "Roadie exited with code " + code + ".";
-}
-
-async function roadieExec(args, opts) {
-  var res = await api.system.exec(ROADIE_DEP, ["--as", ROADIE_AS].concat(args), opts);
-  return { code: res.exitCode, json: parseRoadieJson(res.stdout), stderr: res.stderr };
-}
-
-// What the host has of Roadie, then (cached for a while) what Roadie says
-// about slskd. Runs on every not-ready readiness pass and when the view asks.
-async function probeRoadie(force) {
-  if (!api.system || typeof api.system.getDependency !== "function") {
-    roadie.supported = false;
-    return roadie;
-  }
-  var dep = null;
-  try { dep = await api.system.getDependency(ROADIE_DEP); } catch (e) { dep = null; }
-  roadie.supported = !!dep;
-  roadie.installed = !!(dep && dep.installed);
-  if (!roadie.installed) {
-    roadie.tool = null;
-    return roadie;
-  }
-  if (!force && roadie.tool && Date.now() - roadie.checkedAt < ROADIE_STATUS_TTL_MS) return roadie;
-  var r = await roadieExec(["tool", "status", "slskd"]);
-  roadie.tool = r.code === 0 ? r.json : null;
-  roadie.checkedAt = Date.now();
-  if (roadie.tool && !roadie.tool.installed) await probeOtherInstance();
-  else roadie.other = null;
-  return roadie;
-}
-
-// Before an install: does another slskd already run here? Roadie 0.6+ says
-// so in `tool options`; an older Roadie has no such command and says nothing.
-async function probeOtherInstance() {
-  try {
-    var r = await roadieExec(["tool", "options", "slskd"]);
-    roadie.other = r.code === 0 && r.json ? r.json.otherInstance || null : null;
-  } catch (e) {
-    console.error("slskd: Roadie options failed:", e);
-    roadie.other = null;
-  }
-}
-
-// Pure: what to do with Roadie's answer about slskd.
-//   "connect" — fetch the address + key from Roadie and use them
-//   "release" — Roadie says slskd is gone; forget the managed connection
-//   null      — leave the user's settings alone
-// A user-typed address (managedBy null with a url) is never overwritten, and
-// Roadie saying nothing (status null) never releases anything. "connect" is
-// only answered once Viboplr is approved, so the automatic path never makes
-// Roadie open a dialog the user didn't ask for.
-//   "rekey"   — slskd rejects the managed key: Roadie's slskd changed it (its
-//               recipe moved to one shared key); read the connection again
-// `probeKind` is the last probe's kind ("unauthorized" when slskd said 401).
-function roadieAutoConfigAction(cfg, status, probeKind) {
-  if (!status) return null;
-  var managed = cfg.managedBy === "roadie";
-  if (managed && status.installed === false) return "release";
-  if (!status.installed) return null;
-  var approved = Array.isArray(status.approvedConsumers) && status.approvedConsumers.indexOf(ROADIE_CONSUMER) >= 0;
-  if (!approved) return null;
-  if (managed && status.url && cfg.url !== status.url) return "connect";
-  if (managed) return probeKind === "unauthorized" ? "rekey" : null;
-  if (!cfg.url) return "connect";
-  return null;
-}
-
-// { url, apiKey } for Viboplr. When Viboplr isn't approved yet Roadie asks
-// the user first, so call this only from a click or once approved.
-async function fetchRoadieConnection() {
-  var r = await roadieExec(["tool", "connection", "slskd", "--consumer", ROADIE_CONSUMER]);
-  if (r.code !== 0 || !r.json || !r.json.url) return { ok: false, code: r.code, reason: roadieFailure(r.code, r.json, r.stderr) };
-  return { ok: true, url: r.json.url, apiKey: r.json.apiKey || "" };
-}
-
-async function adoptRoadieConnection(reason) {
-  var c = await fetchRoadieConnection();
-  if (!c.ok) {
-    console.error("slskd: Roadie connection failed:", c.reason);
-    roadie.error = c.reason;
-    return false;
-  }
-  settings.url = c.url;
-  settings.apiKey = c.apiKey;
-  settings.insecure = false;
-  settings.managedBy = "roadie";
-  await Promise.all([
-    api.storage.set("url", settings.url),
-    api.storage.set("apiKey", settings.apiKey),
-    api.storage.set("insecure", false),
-    api.storage.set("managedBy", "roadie")
-  ]).catch(function (e) { console.error("slskd: couldn't save Roadie connection:", e); });
-  api.log("info", "connected to slskd through Roadie (" + reason + ") at " + c.url, "slskd");
-  downloadsDir = null;
-  incompleteDir = null;
-  roadie.error = null;
-  return true;
-}
-
-async function releaseRoadieConnection() {
-  settings.url = "";
-  settings.apiKey = "";
-  settings.managedBy = null;
-  await Promise.all([
-    api.storage.set("url", ""),
-    api.storage.set("apiKey", ""),
-    api.storage.set("managedBy", null)
-  ]).catch(function (e) { console.error("slskd: couldn't clear Roadie connection:", e); });
-  api.log("info", "Roadie reports slskd removed — connection forgotten", "slskd");
-}
-
-// The key a "rekey" last fetched and slskd still refused: asked once per key,
-// so a key that really is wrong ends in the "Key rejected" screen, not a loop.
-var rekeyTried = null;
-
-// Apply `roadieAutoConfigAction` to the live state. Returns true when the
-// settings changed (the caller re-probes slskd).
-async function reconcileRoadie(probeKind) {
-  var action = roadieAutoConfigAction(settings, roadie.tool, probeKind);
-  if (action === "connect") return adoptRoadieConnection("auto");
-  if (action === "rekey") {
-    if (rekeyTried === settings.apiKey) return false;
-    rekeyTried = settings.apiKey;
-    var before = settings.apiKey;
-    var ok = await adoptRoadieConnection("slskd's key changed");
-    return ok && settings.apiKey !== before;
-  }
-  if (action === "release") { await releaseRoadieConnection(); return true; }
   return false;
 }
 
-// Run one Roadie command the user asked for, with a Cancel. `onLine` gets
-// each progress line on stderr; without one the line lands in `roadie.job`
-// for the view. Resolves with the CLI's { code, json, stderr }, or null when
-// cancelled or when another one is already running.
-async function runRoadieJob(kind, args, firstLine, onLine) {
-  if (roadie.job) return null;
-  roadie.error = null;
-  roadie.job = { kind: kind, line: firstLine, percent: null, cancel: null };
-  render();
+// 24 random alphanumerics for slskd's web sign-in. Math.random is all the
+// sandbox offers (no crypto); the page listens on 127.0.0.1 only.
+function randomPassword() {
+  var chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
+  var out = "";
+  for (var i = 0; i < 24; i++) out += chars.charAt(Math.floor(Math.random() * chars.length));
+  return out;
+}
+
+// Pure: slskd.yml for a fresh install. Every string is written as a JSON
+// string, which is a valid YAML double-quoted scalar (a Windows path's
+// backslashes included), so no value can break the file's structure. The
+// shape is the one Roadie's slskd setup used (revision 6), with two changes:
+// the web sign-in is a random one rather than slskd's guessable default, and
+// partial downloads go inside the plugin's own folder.
+//   remote_configuration: lets the plugin add shared folders later through
+//     slskd's own settings API (validated by slskd);
+//   remote_file_management: lets the plugin delete the fallback's files;
+//   web on 127.0.0.1 only, the API key limited to this computer.
+function renderSlskdYml(c) {
+  var q = function (s) { return JSON.stringify(String(s)); };
+  var shares = (c.shares || []).map(function (d) { return "    - " + q(d); });
+  return [
+    "# Written by Viboplr's Soulseek plugin when it installed slskd. slskd owns",
+    "# this file from here on: change settings in slskd's web page.",
+    "headless: false",
+    "remote_configuration: true",
+    "remote_file_management: true",
+    "flags:",
+    "  no_logo: true",
+    "  no_version_check: true",
+    "directories:",
+    "  downloads: " + q(c.downloadsDir),
+    "  incomplete: " + q(c.incompleteDir),
+    "shares:",
+    shares.length ? "  directories:\n" + shares.join("\n") : "  directories: []",
+    "web:",
+    "  port: " + Number(c.port),
+    "  ip_address: \"127.0.0.1\"",
+    "  https:",
+    "    disabled: true",
+    "  authentication:",
+    "    disabled: false",
+    "    username: " + q(c.webUsername),
+    "    password: " + q(c.webPassword),
+    "    api_keys:",
+    "      viboplr:",
+    "        key: " + q(c.apiKey),
+    "        role: readwrite",
+    "        cidr: \"127.0.0.1/32,::1/128\"",
+    "soulseek:",
+    "  username: " + q(c.soulseekUsername),
+    "  password: " + q(c.soulseekPassword),
+    "  listen_port: " + Number(c.listenPort || MANAGED_LISTEN_PORT),
+    ""
+  ].join("\n");
+}
+
+// Pure: the folders the install shares — the downloads folder, then the
+// collections (when the user leaves that on), each once.
+function installShares(form, collections) {
+  var out = [];
+  var add = function (p) { if (p && out.indexOf(p) < 0) out.push(p); };
+  add(trimDir(form.downloadsDir));
+  if (form.shareCollections) collectionPaths(collections).forEach(function (p) { add(trimDir(p)); });
+  return out;
+}
+
+// Pure: the install can go ahead.
+function installFormComplete(form) {
+  return !!(form && String(form.username || "").trim() && String(form.password || "") && String(form.downloadsDir || "").trim());
+}
+
+// Pure: what a failed program call means to the user. The host rejects an
+// install the user turned down with "Install declined", and a permission they
+// refused with a PermissionError naming it.
+function managedFailure(e) {
+  var msg = String((e && e.message) || e || "");
+  if (msg === INSTALL_DECLINED) return { declined: true, message: "You cancelled the install." };
+  if (/^Permission denied/.test(msg)) return { declined: true, message: "Viboplr wasn't allowed to install programs for this plugin, so nothing was installed." };
+  if (/already running/i.test(msg)) return { declined: false, message: "Another copy of slskd is already running on this computer. Quit it (or connect Viboplr to it instead), then try again." };
+  return { declined: false, message: msg || "Something went wrong." };
+}
+
+// Pure: the host can install programs for this plugin.
+function managedCapable(a) {
+  return !!(a && a.system && a.system.programs && typeof a.system.programs.start === "function" &&
+    typeof a.system.platform === "function" && a.ui && typeof a.ui.pickFolder === "function");
+}
+
+// Pure: the address the plugin talks to is the slskd it installed: a loopback
+// host on the port it chose. "localhost:5030" and "127.0.0.1:5030" are the
+// same slskd.
+function isLoopbackHost(h) {
+  return h === "localhost" || h === "127.0.0.1" || h === "::1" || h === "[::1]";
+}
+function hostPort(u) {
+  var m = /^\s*(https?):\/\/(\[[^\]]+\]|[^:\/]+)(?::(\d+))?/i.exec(String(u || ""));
+  if (!m) return null;
+  return { host: m[2].toLowerCase(), port: m[3] ? Number(m[3]) : (m[1].toLowerCase() === "https" ? 443 : 80) };
+}
+function managedOwnsAddress(url, record) {
+  if (!record || !record.port) return false;
+  var a = hostPort(url);
+  return !!(a && a.port === Number(record.port) && isLoopbackHost(a.host));
+}
+
+// Pure: the plugin installed slskd and uses it.
+function usesManaged(cfg, m) {
+  return !!(cfg && cfg.managedBy === "plugin" && m && m.record);
+}
+
+async function loadManagedRecord() {
   try {
-    return await roadieExec(args, {
-      onStart: function (handle) {
-        if (roadie.job) roadie.job.cancel = handle && handle.cancel;
-        render();
-      },
-      onOutput: function (line, stream) {
-        if (stream !== "stderr" || !roadie.job) return;
-        if (onLine) { onLine(line); render(); return; }
-        var p = roadieProgress(line);
-        if (!p) return;
-        roadie.job.line = p.text;
-        roadie.job.percent = p.percent;
-        render();
-      }
-    });
+    var r = await api.storage.get(MANAGED_RECORD_KEY);
+    managed.record = r && typeof r === "object" && r.version ? r : null;
   } catch (e) {
-    if (String(e && e.message || e) === "Cancelled") return null;
-    throw e;
-  } finally {
-    roadie.job = null;
-    render();
+    console.error("slskd: couldn't read the install record:", e);
+    managed.record = null;
   }
 }
 
-// ---- Setting slskd up with Roadie: one screen, one checklist -------------
+async function saveManagedRecord(r) {
+  managed.record = r;
+  try {
+    if (r) await api.storage.set(MANAGED_RECORD_KEY, r);
+    else await api.storage.delete(MANAGED_RECORD_KEY);
+  } catch (e) {
+    console.error("slskd: couldn't save the install record:", e);
+  }
+}
+
+// What the host says about the slskd this plugin started. Cheap (no
+// process is spawned), so it runs on every readiness pass while installed.
+async function probeManaged() {
+  managed.supported = managedCapable(api);
+  if (!managed.supported) { managed.status = null; return; }
+  if (!managed.platform) {
+    try { managed.platform = await api.system.platform(); } catch (e) { console.error("slskd: platform unknown:", e); }
+  }
+  if (!managed.record) { managed.status = null; return; }
+  try {
+    managed.status = await api.system.programs.status(MANAGED_NAME);
+  } catch (e) {
+    // Not allowed (the optional permission was revoked): treat as not running.
+    console.error("slskd: couldn't read slskd's status:", e);
+    managed.status = null;
+  }
+}
+
+// Absolute path of something in the store, made to exist first when it is a
+// folder slskd needs.
+async function storePath(segments, ensureDir) {
+  if (ensureDir) await api.storage.files.writeText(segments.concat([".keep"]), "");
+  var p = await api.storage.files.getPath(segments);
+  if (!p) throw new Error("couldn't locate " + segments.join("/") + " in the plugin's folder");
+  return trimDir(p);
+}
+
+// Pure: what api.system.programs.start gets, from paths already resolved.
+function managedStartSpec(record, paths, outliveApp) {
+  return {
+    path: [MANAGED_DIR, record.version, slskdBinaryName(record.asset)],
+    args: ["--app-dir", paths.app, "--config", paths.config, "--no-logo"],
+    env: {
+      // .NET unpacks a single-file app on first run; keep that inside the
+      // plugin's folder so a removal is complete.
+      DOTNET_BUNDLE_EXTRACT_BASE_DIR: paths.extract,
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1",
+      DOTNET_NOLOGO: "1"
+    },
+    outliveApp: outliveApp !== false
+  };
+}
+
+async function managedPaths() {
+  return {
+    app: await storePath([MANAGED_DIR, "data", "app"], true),
+    extract: await storePath([MANAGED_DIR, "data", "extract"], true),
+    config: await storePath([MANAGED_DIR, "data", "slskd.yml"], false)
+  };
+}
+
+// Pure: a fetch error that means nothing listens on the port. Only a refused
+// connection says so ("Connection refused (os error 61)", Windows' "actively
+// refused it"); a timeout or anything else may be a program that is slow to
+// answer, and binding next to it would fail.
+function portLooksFree(error) {
+  return /refused/i.test(String((error && error.message) || error || ""));
+}
+
+// The first web port nothing listens on. A refused connection answers at
+// once, so this costs little; anything that answers (even an error page) or
+// hangs is in use.
+async function pickFreePort() {
+  for (var i = 0; i < MANAGED_WEB_PORTS.length; i++) {
+    var port = MANAGED_WEB_PORTS[i];
+    try {
+      await api.network.fetch("http://127.0.0.1:" + port + "/", { method: "GET", timeoutMs: 800, headers: { "User-Agent": CLIENT_USER_AGENT } });
+    } catch (e) {
+      if (portLooksFree(e)) return port;
+    }
+  }
+  return null;
+}
+
+// Download, verify and unpack one release into slskd/<version>/, and check
+// the binary runs. `onProgress(received, total)` follows the download.
+async function fetchRelease(asset, onProgress) {
+  var d = slskdDownloadFor(asset);
+  var zip = [MANAGED_DIR, "download", d.file];
+  // A download that failed or was turned down earlier may have left its file.
+  try { await api.storage.files.remove([MANAGED_DIR, "download"]); } catch (e) { console.error("slskd: couldn't clear old downloads:", e); }
+  await api.system.programs.download(zip, d.url, { sha256: d.sha256, label: "slskd " + SLSKD_RELEASE.version, onProgress: onProgress });
+  var dest = [MANAGED_DIR, SLSKD_RELEASE.version];
+  await api.system.programs.extract(zip, dest);
+  try { await api.storage.files.remove([MANAGED_DIR, "download"]); } catch (e) { console.error("slskd: couldn't remove the downloaded zip:", e); }
+  var extract = await storePath([MANAGED_DIR, "data", "extract"], true);
+  var probe = await api.system.programs.run(dest.concat([slskdBinaryName(asset)]), ["--version"], {
+    env: { DOTNET_BUNDLE_EXTRACT_BASE_DIR: extract, DOTNET_CLI_TELEMETRY_OPTOUT: "1", DOTNET_NOLOGO: "1" },
+    timeoutSecs: 120
+  });
+  var out = String(probe.stdout || "") + String(probe.stderr || "");
+  if (probe.exitCode !== 0 || out.indexOf(SLSKD_RELEASE.version) < 0) {
+    throw new Error("slskd didn't run on this computer: " + (out.trim().split("\n").pop() || "exit code " + probe.exitCode));
+  }
+}
+
+// ---- The install: one screen, one checklist ------------------------------
 //
-// While `roadie.setup` is set the view shows nothing but this (render()), so
-// the address/key fields and the guide stay out of the way until it ends.
-// Each step moves on only on a signal we really have: Roadie's stderr
-// ("asking the user…", "downloading N%", "extracting" / "verifying"), its
-// exit code, its status of slskd, our own connection, and slskd's server
-// state. Starting slskd is the one inferred step: Roadie reports nothing
-// between verifying and exiting.
+// While `managed.setup` is set the view shows nothing but this (render()).
+// Each step moves on only on a signal we really have: the first progress
+// report (the user said yes to Viboplr's dialogs), the download's bytes, the
+// unpack and version check, the host starting slskd, our own connection, and
+// slskd's server state.
 
 var SETUP_STEPS = [
-  { id: "approve", label: "Approve in Roadie's dialog" },
+  { id: "approve", label: "Allow it in Viboplr's dialogs" },
   { id: "download", label: "Download slskd" },
   { id: "unpack", label: "Unpack and check it" },
   { id: "start", label: "Start slskd" },
@@ -3831,16 +3883,6 @@ function failSetup(s, message) {
   return s;
 }
 
-// Pure: which step a Roadie progress line means, and the percent if any.
-function setupStepForLine(line) {
-  var s = String(line || "").replace(/^roadie:\s*/, "").trim().toLowerCase();
-  if (/^asking the user/.test(s)) return { step: "approve" };
-  var m = /^downloading(?: (\d+)%)?/.exec(s);
-  if (m) return { step: "download", percent: m[1] != null ? Number(m[1]) : null };
-  if (/^(extracting|verifying)/.test(s)) return { step: "unpack" };
-  return null;
-}
-
 // Pure: the checklist rows — { id, label, state: done|active|failed|pending, detail }.
 function setupChecklist(s) {
   return SETUP_STEPS.map(function (step, i) {
@@ -3849,7 +3891,7 @@ function setupChecklist(s) {
     if (step.id === "signin" && s.username) label = "Sign in to Soulseek as " + s.username;
     var detail = null;
     if (state === "failed") detail = s.failed.message;
-    else if (state === "active" && step.id === "approve") detail = "Roadie is showing a dialog. It may be behind this window.";
+    else if (state === "active" && step.id === "approve") detail = "Viboplr asks before it installs a program for a plugin.";
     else if (state === "active" && step.id === "download" && s.percent != null) detail = s.percent + "%";
     else if (state === "active" && step.id === "signin" && s.progress) detail = s.progress;
     return { id: step.id, label: label, state: state, detail: detail };
@@ -3914,66 +3956,107 @@ function signinReasonFromLog(lines, username) {
   return null;
 }
 
-// 1000 lines: a slskd whose key is being refused writes a warning a minute,
-// which buries the sign-in lines that say what went wrong.
-async function slskdLogLines() {
+// slskd's output as the host captured it (logs/slskd.log in the plugin's
+// folder), last 1000 lines: a slskd whose key is refused writes a warning a
+// minute, which buries the sign-in lines that say what went wrong.
+async function managedLogLines() {
+  if (!managed.record) return [];
   try {
-    var r = await roadieExec(["tool", "logs", "slskd", "--lines", "1000"]);
-    return r.code === 0 && r.json && Array.isArray(r.json.lines) ? r.json.lines : [];
+    var text = await api.storage.files.readText(["logs", MANAGED_NAME + ".log"]);
+    var lines = String(text || "").split(/\r?\n/);
+    return lines.slice(Math.max(0, lines.length - 1000));
   } catch (e) {
-    console.error("slskd: couldn't read slskd's log through Roadie:", e);
+    console.error("slskd: couldn't read slskd's log:", e);
     return [];
   }
 }
 
-async function installSlskdWithRoadie() {
-  // The button is disabled without an account; Enter in the password field
-  // is the other way here.
-  if (!roadieCredsComplete(roadieCreds) || roadie.setup) return;
-  var s = newSetup(roadieCreds.username);
-  roadie.setup = s;
-  var r;
+async function installSlskd() {
+  // The button is disabled without a complete form; Enter in the password
+  // field is the other way here.
+  if (!installFormComplete(installForm) || managed.setup) return;
+  var form = Object.assign({}, installForm);
+  var s = newSetup(form.username);
+  managed.setup = s;
+  render();
   try {
-    r = await runRoadieJob("install", roadieInstallArgs(roadieCreds, installShareDirs(roadieCreds, roadie.tool, localCollections)), "", function (line) {
-      var hit = setupStepForLine(line);
-      if (!hit) return;
-      advanceSetup(s, hit.step);
-      if (hit.percent != null && s.at === setupIndex("download")) s.percent = hit.percent;
-    });
+    await installSteps(s, form);
   } catch (e) {
-    console.error("slskd: Roadie install failed:", e);
-    failSetup(s, String(e && e.message || e));
+    if (managed.setup !== s) return;
+    var f = managedFailure(e);
+    console.error("slskd: install failed:", e);
+    if (f.declined) {
+      // Back to the form, with what the user typed still in it.
+      managed.setup = null;
+      managed.error = f.message;
+    } else {
+      failSetup(s, f.message);
+      api.log("warn", "slskd install: " + f.message, "slskd");
+    }
     render();
-    return;
   }
-  if (roadie.setup !== s) return;
-  if (!r) {
-    // Cancelled: back to the form, with what the user typed still in it.
-    roadie.setup = null;
-    render();
-    return;
-  }
-  if (r.code !== 0) {
-    failSetup(s, roadieFailure(r.code, r.json, r.stderr));
-    api.log("warn", "Roadie install of slskd: " + s.failed.message, "slskd");
-    render();
-    return;
-  }
-  roadieCreds = { username: "", password: "", autostart: false, shareCollections: true };
-  api.log("info", "slskd installed through Roadie", "slskd");
-  await continueSetup(s, "start");
 }
 
-// The steps after Roadie's install ends; also what Try again re-runs from
-// the failed step. Anything that throws fails the step it happened on, so
-// the checklist can never be left spinning.
+async function installSteps(s, form) {
+  var asset = slskdAssetFor(managed.platform);
+  if (!asset) throw new Error("There's no slskd build for this computer in this plugin. Use the manual guide instead.");
+  managed.error = null;
+  await fetchRelease(asset, function (received, total) {
+    if (managed.setup !== s) return;
+    advanceSetup(s, "download");
+    if (s.at === setupIndex("download") && total) s.percent = Math.min(99, Math.round(received / total * 100));
+    render();
+  });
+  if (managed.setup !== s) return;
+  advanceSetup(s, "unpack");
+  render();
+
+  var port = await pickFreePort();
+  if (!port) throw new Error("Ports " + MANAGED_WEB_PORTS[0] + "–" + MANAGED_WEB_PORTS[MANAGED_WEB_PORTS.length - 1] + " are all taken on this computer, so slskd has no port for its web page.");
+  ensureSetupKey();
+  await loadCollections();
+  var record = {
+    version: SLSKD_RELEASE.version,
+    asset: asset,
+    port: port,
+    webUsername: "viboplr",
+    webPassword: randomPassword(),
+    downloadsDir: trimDir(form.downloadsDir),
+    installedAt: Date.now()
+  };
+  var incomplete = await storePath([MANAGED_DIR, "data", "incomplete"], true);
+  await api.storage.files.writeText([MANAGED_DIR, "data", "slskd.yml"], renderSlskdYml({
+    downloadsDir: record.downloadsDir,
+    incompleteDir: incomplete,
+    shares: installShares(form, localCollections),
+    port: port,
+    webUsername: record.webUsername,
+    webPassword: record.webPassword,
+    apiKey: settings.apiKey,
+    soulseekUsername: String(form.username).trim(),
+    soulseekPassword: String(form.password)
+  }));
+  await saveManagedRecord(record);
+  api.log("info", "slskd " + record.version + " installed (" + asset + ", port " + port + ")", "slskd");
+
+  advanceSetup(s, "start");
+  render();
+  await startManagedProcess();
+  await setStartWithViboplr(!!form.autostart);
+  await probeManaged();
+  await continueSetup(s, "connect");
+}
+
+// The steps after slskd started; also what Try again re-runs from the failed
+// step. Anything that throws fails the step it happened on, so the checklist
+// can never be left spinning.
 async function continueSetup(s, from) {
   try {
     await continueSetupSteps(s, from);
   } catch (e) {
-    console.error("slskd: Roadie setup step failed:", e);
-    if (roadie.setup !== s) return;
-    failSetup(s, "Something went wrong: " + String(e && e.message || e));
+    console.error("slskd: setup step failed:", e);
+    if (managed.setup !== s) return;
+    failSetup(s, managedFailure(e).message);
     render();
   }
 }
@@ -3984,26 +4067,13 @@ async function continueSetupSteps(s, from) {
   advanceSetup(s, from);
   if (s.at === setupIndex("start")) {
     render();
-    await probeRoadie(true);
-    if (roadie.setup !== s) return;
-    var t = roadie.tool;
-    if (!t || !t.running) {
-      failSetup(s, (t && t.conflictDetail) || "slskd didn't start. Roadie's log for it has the reason.");
-      render();
-      return;
-    }
+    await startManagedProcess();
+    await probeManaged();
     advanceSetup(s, "connect");
   }
   if (s.at === setupIndex("connect")) {
     render();
-    // The one approval also granted Viboplr its key, so this asks nothing.
-    var ok = await adoptRoadieConnection("install");
-    if (roadie.setup !== s) return;
-    if (!ok) {
-      failSetup(s, roadie.error || "Roadie didn't hand over the connection.");
-      render();
-      return;
-    }
+    await useManagedConnection();
     advanceSetup(s, "signin");
   }
   render();
@@ -4011,10 +4081,12 @@ async function continueSetupSteps(s, from) {
   var until = started + SIGNIN_WAIT_MS;
   for (var polls = 1; ; polls++) {
     await refreshReadiness();
-    if (roadie.setup !== s) return;
+    if (managed.setup !== s) return;
     if (readiness.state === "ready") {
-      api.log("info", "slskd set up through Roadie and signed in as " + (readiness.username || "?"), "slskd");
-      roadie.setup = null;
+      api.log("info", "slskd set up and signed in as " + (readiness.username || "?"), "slskd");
+      // Only now: until it works, Back returns to the form as the user filled it.
+      installForm = { username: "", password: "", downloadsDir: "", autostart: true, shareCollections: true };
+      managed.setup = null;
       render();
       renderSettings();
       return;
@@ -4023,8 +4095,8 @@ async function continueSetupSteps(s, from) {
     // A refused sign-in won't fix itself by waiting: look for one every few
     // polls and stop at once.
     if (polls % 5 === 0) {
-      var early = signinReasonFromLog(await slskdLogLines(), s.username);
-      if (roadie.setup !== s) return;
+      var early = signinReasonFromLog(await managedLogLines(), s.username);
+      if (managed.setup !== s) return;
       if (early && early.kind === "rejected") {
         failSetup(s, early.message);
         render();
@@ -4034,40 +4106,63 @@ async function continueSetupSteps(s, from) {
     render();
     if (Date.now() >= until) break;
     await sleep(SIGNIN_POLL_MS);
-    if (roadie.setup !== s) return;
+    if (managed.setup !== s) return;
   }
-  var reason = signinReasonFromLog(await slskdLogLines(), s.username);
-  if (roadie.setup !== s) return;
+  var reason = signinReasonFromLog(await managedLogLines(), s.username);
+  if (managed.setup !== s) return;
   failSetup(s, reason ? reason.message : signinFailure(readiness.state, s.username));
   render();
 }
 
-// The whole view while a setup runs.
+// Point the plugin at the slskd it installed.
+async function useManagedConnection() {
+  var r = managed.record;
+  settings.url = "http://127.0.0.1:" + r.port;
+  settings.insecure = false;
+  settings.managedBy = "plugin";
+  await Promise.all([
+    api.storage.set("url", settings.url),
+    api.storage.set("apiKey", settings.apiKey),
+    api.storage.set("insecure", false),
+    api.storage.set("managedBy", "plugin")
+  ]).catch(function (e) { console.error("slskd: couldn't save the connection:", e); });
+  downloadsDir = null;
+  incompleteDir = null;
+}
+
+async function releaseManagedConnection() {
+  settings.url = "";
+  settings.managedBy = null;
+  await Promise.all([
+    api.storage.set("url", ""),
+    api.storage.set("managedBy", null)
+  ]).catch(function (e) { console.error("slskd: couldn't clear the connection:", e); });
+}
+
+// The whole view while an install runs.
 function setupProgressView() {
-  var s = roadie.setup;
+  var s = managed.setup;
   var glyph = { done: "✓", active: "●", failed: "✗", pending: "○" };
-  var children = [{ type: "text", content: "Setting up slskd with Roadie", className: "plugin-heading" }];
+  var children = [headingText("Setting up slskd")];
   var rows = setupChecklist(s);
   for (var i = 0; i < rows.length; i++) {
     var row = rows[i];
-    children.push({ type: "text", content: glyph[row.state] + "  " + row.label, className: row.state === "pending" ? "plugin-muted" : undefined });
+    children.push({ type: "text", content: glyph[row.state] + "  " + row.label, className: row.state === "pending" ? MUTED : undefined });
     if (row.id === "download" && row.state === "active" && s.percent != null) {
       children.push({ type: "progress-bar", value: s.percent, max: 100 });
     } else if (row.detail) {
-      children.push({ type: "text", content: row.detail, className: "plugin-muted" });
+      children.push(mutedText(row.detail));
     }
   }
   var buttons = [];
   if (s.failed) {
     var step = s.failed.step;
     if (step === "approve" || step === "download" || step === "unpack") {
-      buttons.push({ label: "Back", action: "roadie-setup-close", variant: "accent" });
+      buttons.push({ label: "Back", action: "install-close", variant: "accent" });
     } else {
-      buttons.push({ label: step === "signin" ? "Check again" : "Try again", action: "roadie-setup-retry", variant: "accent" });
-      buttons.push({ label: "Close", action: "roadie-setup-close", variant: "secondary" });
+      buttons.push({ label: step === "signin" ? "Check again" : "Try again", action: "install-retry", variant: "accent" });
+      buttons.push({ label: "Close", action: "install-close", variant: "secondary" });
     }
-  } else if (roadie.job && roadie.job.cancel) {
-    buttons.push({ label: "Cancel", action: "roadie-cancel", variant: "secondary" });
   }
   if (buttons.length) {
     children.push({ type: "spacer" });
@@ -4076,27 +4171,89 @@ function setupProgressView() {
   return { type: "layout", direction: "vertical", children: children };
 }
 
-// Started from the view (the banner or the Settings tab), so the progress and
-// any failure show there, under the banner. Success is the banner clearing.
-async function startSlskdWithRoadie() {
-  var r;
+// ---- Running it ---------------------------------------------------------
+
+// Start the installed slskd (a running one is left alone by the host). Keeps
+// running after Viboplr quits unless the user said otherwise.
+async function startManagedProcess() {
+  var paths = await managedPaths();
+  return api.system.programs.start(MANAGED_NAME, managedStartSpec(managed.record, paths, !settings.stopWithViboplr));
+}
+
+// slskd's own shutdown first — it finishes writing its database — then the
+// host's signal and, past the grace, a kill.
+async function stopManagedProcess() {
   try {
-    r = await runRoadieJob("start", ["tool", "start", "slskd"], "Starting slskd…");
+    var token = await slskdAdminToken();
+    await slskdSettingsCall("DELETE", "/api/v0/application", token);
   } catch (e) {
-    console.error("slskd: Roadie start failed:", e);
-    roadie.error = String(e && e.message || e);
-    render();
-    return;
+    console.error("slskd: graceful stop unavailable, signalling instead:", e);
   }
-  if (!r) return;
-  if (r.code !== 0) {
-    roadie.error = roadieFailure(r.code, r.json, r.stderr);
+  return api.system.programs.stop(MANAGED_NAME, { graceSecs: MANAGED_STOP_GRACE_SECS });
+}
+
+// Run one start / restart / update the user asked for, shown in the view and
+// with its failure kept until the next attempt.
+async function runManagedJob(kind, line, fn) {
+  if (managed.job) return;
+  managed.error = null;
+  managed.job = { kind: kind, line: line, percent: null };
+  render();
+  try {
+    await fn(managed.job);
+  } catch (e) {
+    console.error("slskd: " + kind + " failed:", e);
+    managed.error = managedFailure(e).message;
+  } finally {
+    managed.job = null;
+    await probeManaged();
     render();
-    return;
+    renderSettings();
   }
-  roadie.tool = r.json;
-  roadie.checkedAt = Date.now();
-  await awaitSlskdUp("start");
+}
+
+function startManaged() {
+  return runManagedJob("start", "Starting slskd…", async function () {
+    await startManagedProcess();
+    await awaitSlskdUp();
+  });
+}
+
+// A kicked slskd stays signed out until it restarts. Quiet on success: the
+// readiness pass that follows is the answer.
+function restartManaged() {
+  return runManagedJob("restart", "Restarting slskd…", async function () {
+    await stopManagedProcess();
+    signinWhy = null;
+    await startManagedProcess();
+    await awaitSlskdUp();
+  });
+}
+
+// A newer slskd pinned in this plugin: download it (Viboplr asks first),
+// check it runs, then swap it in for the running one. The settings file is
+// slskd's and stays as it is.
+function updateManaged() {
+  return runManagedJob("update", "Waiting for you to allow the download…", async function (job) {
+    var asset = managed.record.asset;
+    var old = managed.record.version;
+    await fetchRelease(asset, function (received, total) {
+      job.line = "Downloading slskd " + SLSKD_RELEASE.version + "…";
+      job.percent = total ? Math.min(99, Math.round(received / total * 100)) : null;
+      render();
+    });
+    job.line = "Restarting slskd on the new version…";
+    job.percent = null;
+    render();
+    await stopManagedProcess();
+    await saveManagedRecord(Object.assign({}, managed.record, { version: SLSKD_RELEASE.version }));
+    await startManagedProcess();
+    if (old && old !== SLSKD_RELEASE.version) {
+      try { await api.storage.files.remove([MANAGED_DIR, old]); } catch (e) { console.error("slskd: couldn't remove the old version:", e); }
+    }
+    api.log("info", "slskd updated " + old + " → " + SLSKD_RELEASE.version, "slskd");
+    await awaitSlskdUp();
+  });
 }
 
 // How long slskd may say "Disconnected" after it first answers before the
@@ -4104,22 +4261,17 @@ async function startSlskdWithRoadie() {
 // moment before it begins to connect.
 var START_SETTLE_MS = 10000;
 
-// `roadie tool start` / `restart` exits as soon as slskd's process is up, but
-// slskd opens its web port a few seconds later and signs in to Soulseek after
-// that. A single readiness pass right after the exit found nothing, so the
-// view said "not running" until the next minute's poll — and a second Start
-// (a no-op on a running slskd) then looked like the fix. Keep the job showing
-// and look again every couple of seconds until slskd answers and settles, or
-// the wait runs out (the minute's poll carries on from there).
+// The host's start returns once the process is up, but slskd opens its web
+// port a few seconds later and signs in to Soulseek after that. A single
+// readiness pass right after found nothing, so the view said "not running"
+// until the next minute's poll. Look again every couple of seconds until slskd
+// answers and settles, or the wait runs out (the minute's poll carries on).
 // The wait in progress; deactivate() drops it so the loop ends.
 var startWait = null;
 
-async function awaitSlskdUp(kind) {
-  var job = { kind: kind, line: "Waiting for slskd to answer…", percent: null, cancel: null };
+async function awaitSlskdUp() {
   var token = {};
   startWait = token;
-  roadie.job = job;
-  render();
   try {
     var until = Date.now() + SIGNIN_WAIT_MS;
     var answeredAt = 0;
@@ -4131,73 +4283,100 @@ async function awaitSlskdUp(kind) {
       var settled = st === "ready" || st === "unauthorized" || st === "unconfigured" ||
         (st === "disconnected" && Date.now() - answeredAt >= START_SETTLE_MS);
       if (settled || Date.now() >= until) return;
-      job.line = st === "unreachable" ? "Waiting for slskd to answer…" : "Waiting for slskd to sign in to Soulseek…";
+      if (managed.job) managed.job.line = st === "unreachable" ? "Waiting for slskd to answer…" : "Waiting for slskd to sign in to Soulseek…";
       render();
       await sleep(SIGNIN_POLL_MS);
       if (startWait !== token) return;
     }
   } finally {
     if (startWait === token) startWait = null;
-    if (roadie.job === job) {
-      roadie.job = null;
-      render();
-    }
   }
 }
 
-// Pure: what the "Install automatically" page can offer, given what we know
-// about Roadie.
-//   "unsupported" — this host can't provide Roadie; only the manual guide works
-//   "get-roadie"  — Roadie itself isn't installed yet; the host's modal gets it
-//   "busy"        — a Roadie command the user started is running
-//   "adopt"       — Roadie already has slskd; connecting is all that's left
-//   "form"        — the account form that installs slskd
-function autoInstallStage(r) {
-  if (!r || !r.supported) return "unsupported";
-  if (!r.installed) return "get-roadie";
-  if (r.job) return "busy";
-  if (r.tool && r.tool.installed) return "adopt";
-  return "form";
+// Saved at once, not through saveSetting's debounce: it is read on the next
+// activation, which may be a restart away.
+async function setStartWithViboplr(on) {
+  settings.startWithViboplr = !!on;
+  try {
+    await api.storage.set("startWithViboplr", settings.startWithViboplr);
+  } catch (e) {
+    console.error("slskd: couldn't save startWithViboplr:", e);
+  }
 }
 
-// Pure: Roadie has an slskd this plugin isn't connected to — the quickest way
-// forward from any not-found screen, so it's offered first.
-function roadieHasUnusedSlskd(cfg, r) {
-  return !!(r && r.supported && r.installed && r.tool && r.tool.installed && cfg.managedBy !== "roadie");
+// Pure: start the installed slskd now, on activation? Only one the plugin
+// installed and has started before (the host knows it), that isn't running,
+// with the setting on and no install in progress. Viboplr itself never starts
+// a program at login; this is the "start it with Viboplr" half.
+function shouldStartWithViboplr(cfg, m) {
+  return !!(cfg && cfg.startWithViboplr && m && m.supported && !m.setup && !m.job &&
+    usesManaged(cfg, m) && m.status && m.status.registered && !m.status.running);
 }
 
-// Pure: slskd can't sign in, and so can't search, without both.
-function roadieCredsComplete(creds) {
-  return !!(creds && String(creds.username || "").trim() && String(creds.password || ""));
-}
-
-function roadieInstallSection() {
-  return {
-    type: "section",
-    title: "Your Soulseek setup",
-    children: [
-      mutedText("Your account goes into slskd's own settings file; the plugin doesn't keep it."),
-      { type: "settings-row", label: "Soulseek username",
-        control: { type: "text-input", placeholder: "username", action: "roadie-set-user", value: roadieCreds.username } },
-      { type: "settings-row", label: "Soulseek password",
-        control: { type: "text-input", placeholder: "password", action: "roadie-set-pass", password: true, value: roadieCreds.password } },
-      mutedText("No account yet? Soulseek has no sign-up page: choose a username nobody else uses and a password, and the account is created the first time slskd signs in. Keep the password somewhere safe; Soulseek can't reset it."),
-      autostartRow("roadie-set-autostart", roadieCreds.autostart)
-    ].concat(shareCollectionsRows(), [
-      { type: "button", label: "Install slskd", action: "roadie-install", variant: "accent", disabled: !roadieCredsComplete(roadieCreds) }
-    ])
-  };
-}
-
-// ---- Sharing the user's collections through Roadie ----------------------
+// ---- Removing it ---------------------------------------------------------
 //
-// New installs share every local collection (the install form's switch, on
-// by default). An slskd installed before Roadie opened `shares.directories`
-// (0.3.0), or a collection added since, is left out; the card says which and
-// offers one click. The click is an install request for the same slskd with
-// the new folder list, so Roadie's dialog shows the folders before anything
-// is shared: nothing becomes public without that approval, and the plugin
-// never raises the dialog on its own.
+// Stops slskd and deletes everything this plugin put in
+// its own folder for it: the program, slskd.yml (the Soulseek login) and
+// slskd's database. Folders slskd wrote to — downloads, shares — are never
+// touched.
+var managedRemove = { asking: false, error: null };
+
+function managedRemoveRows(rm, job) {
+  if (job && job.kind === "remove") return [mutedText(job.line)];
+  if (rm.asking) {
+    return [
+      { type: "settings-row", label: "Remove slskd?",
+        description: "slskd stops and is deleted from this computer, with its settings and Soulseek login. Your downloads and shared folders stay where they are." },
+      buttonRow([
+        actionButton("Remove slskd", "managed-remove", "accent"),
+        actionButton("Cancel", "managed-remove-cancel")
+      ])
+    ];
+  }
+  var rows = [optionRow("Remove slskd", "Uninstall the slskd this plugin installed.",
+    actionButton("Remove…", "managed-remove-ask", "secondary", { disabled: !!job }))];
+  if (rm.error) rows.push(mutedText(rm.error));
+  return rows;
+}
+
+// Success says nothing: the view falls back to the setup hub, which is the
+// answer. A failure stays under the button.
+async function removeManaged() {
+  managedRemove = { asking: false, error: null };
+  managed.job = { kind: "remove", line: "Removing slskd…", percent: null };
+  render();
+  try {
+    await stopManagedProcess();
+    await api.system.programs.remove(MANAGED_NAME);
+    await api.storage.files.remove([MANAGED_DIR]);
+    try { await api.storage.files.remove(["logs"]); } catch (e) { console.error("slskd: couldn't remove slskd's logs:", e); }
+  } catch (e) {
+    console.error("slskd: removing slskd failed:", e);
+    managedRemove.error = String(e && e.message || e);
+    managed.job = null;
+    render();
+    return;
+  }
+  managed.job = null;
+  api.log("info", "slskd removed", "slskd");
+  webLogin = null;
+  downloadsDir = null;
+  incompleteDir = null;
+  slskdShared = null;
+  await saveManagedRecord(null);
+  if (settings.managedBy === "plugin") await releaseManagedConnection();
+  await probeManaged();
+  await refreshReadiness();
+  render();
+}
+
+// ---- Sharing more folders, through slskd ---------------------------------
+//
+// The install shares the downloads folder and (by default) every local
+// collection. A collection added later shows up as a gap on the card with
+// Share…, which asks here first — the folders become public — and then adds
+// them to slskd's own settings through slskd's settings API (validated by
+// slskd), and asks slskd to rescan.
 
 // Pure: a path with its trailing separators dropped, for comparing folders.
 function trimDir(p) {
@@ -4213,125 +4392,48 @@ function isUnder(path, dir) {
   return a === b || a.indexOf(b + "/") === 0 || a.indexOf(b + "\\") === 0;
 }
 
-// Pure: the collection folders slskd doesn't share yet, given what Roadie
-// shares (its `shares.directories`) and, when shared, the downloads folder.
-// `sharedNow`: what slskd itself shares, when it owns its settings.
-function shareGap(collections, tool, sharedNow) {
-  if (!tool || !roadieCanShareDirs(tool)) return [];
-  var shared;
-  if (slskdOwnsSettings(tool)) {
-    if (!Array.isArray(sharedNow)) return []; // not read yet: claim no gap
-    shared = sharedNow.slice();
-  } else {
-    shared = (tool.config["shares.directories"] || []).slice();
-    if (tool.config.shareDownloads && tool.config.downloadsDir) shared.push(tool.config.downloadsDir);
-  }
+// Pure: the collection folders slskd doesn't share yet. `sharedNow` is what
+// slskd reports; unread (null), nothing is claimed missing.
+function shareGap(collections, sharedNow) {
+  if (!Array.isArray(sharedNow)) return [];
   return collectionPaths(collections).filter(function (p) {
-    return !shared.some(function (d) { return isUnder(p, d); });
+    return !sharedNow.some(function (d) { return isUnder(p, d); });
   });
 }
 
-// Pure: the list sent to Roadie: what it shares now plus the gap. Adding
-// only: a folder the user shared some other way is never dropped.
-function sharedDirsWith(tool, gap) {
-  var current = (tool && tool.config && tool.config["shares.directories"]) || [];
-  var out = current.slice();
-  for (var i = 0; i < gap.length; i++) if (out.indexOf(gap[i]) < 0) out.push(gap[i]);
-  return out;
-}
-
-// { error } of the last attempt, shown on the row until the next one.
-var roadieShare = { error: null };
-// A rescan owed to slskd once it answers again: Roadie restarts it with the
-// new folders, and it may restore its share list from a backup instead of
-// scanning them.
+// { error, manual, confirm } of the share change, shown on the row.
+var shareChange = { error: null };
+// A rescan owed to slskd once it answers again.
 var rescanPending = false;
 
-// Pure: the Sharing row(s) on the card. `sharedNow`: slskd's own list, when
-// it owns its settings. `share.confirm`: the folders the user is about to
-// make public, waiting for their yes (slskd-owned settings: no Roadie dialog
-// asks, so this does).
-function sharingRows(tool, collections, job, share, sharedNow) {
-  if (!tool || !roadieCanShareDirs(tool)) return [];
-  if (job && job.kind === "share") {
-    var running = [mutedText(job.line)];
-    if (job.cancel) running.push(buttonRow([actionButton("Cancel", "roadie-cancel")]));
-    return running;
-  }
+// Pure: the Sharing row(s) on the card. `share.confirm`: the folders the user
+// is about to make public, waiting for their yes.
+function sharingRows(collections, job, share, sharedNow) {
+  if (job && job.kind === "share") return [mutedText(job.line)];
   if (share && share.confirm && share.confirm.length) {
     return [{ type: "settings-row", label: "Share these folders?", description: describeFolders(share.confirm) + ". Everyone on Soulseek can browse and download what you share. slskd saves this in its own settings; you can stop sharing a folder there later." },
-      buttonRow([actionButton("Share", "roadie-share-confirm", "accent"), actionButton("Cancel", "roadie-share-cancel")])];
+      buttonRow([actionButton("Share", "share-confirm", "accent"), actionButton("Cancel", "share-cancel")])];
   }
-  var owned = slskdOwnsSettings(tool);
-  var gap = shareGap(collections, tool, sharedNow);
-  var rows;
-  if (owned && gap.length === 0 && Array.isArray(sharedNow)) {
-    rows = [{ type: "settings-row", label: "Sharing", description: sharedNow.length ? "Shared: " + describeFolders(sharedNow) + "." : "Nothing is shared." }];
-  } else if (owned && !Array.isArray(sharedNow)) {
-    rows = [];
-  } else if (gap.length) {
-    rows = [optionRow("Sharing", "Not shared yet: " + describeFolders(gap) + ". Everyone on Soulseek can browse and download what you share, and Soulseek serves people who share first.",
-      actionButton("Share…", "roadie-share-collections", "accent", { disabled: !!job }))];
-  } else {
-    var dirs = sharedDirsWith(tool, []);
-    if (tool.config.shareDownloads && tool.config.downloadsDir) dirs = [tool.config.downloadsDir].concat(dirs);
-    rows = [{ type: "settings-row", label: "Sharing", description: dirs.length ? "Shared: " + describeFolders(dirs) + "." : "Nothing is shared." }];
-  }
+  if (!Array.isArray(sharedNow)) return [];
+  var gap = shareGap(collections, sharedNow);
+  var rows = gap.length
+    ? [optionRow("Sharing", "Not shared yet: " + describeFolders(gap) + ". Everyone on Soulseek can browse and download what you share, and Soulseek serves people who share first.",
+      actionButton("Share…", "share-collections", "accent", { disabled: !!job }))]
+    : [{ type: "settings-row", label: "Sharing", description: sharedNow.length ? "Shared: " + describeFolders(sharedNow) + "." : "Nothing is shared." }];
   if (share && share.error) {
-    rows.push(mutedText((owned ? "" : "Roadie: ") + share.error));
+    rows.push(mutedText(share.error));
     if (share.manual) rows.push(buttonRow([actionButton("Open slskd's settings", "open-slskd")]));
   }
   return rows;
 }
 
-async function shareCollectionsWithRoadie() {
+async function shareCollections() {
   await loadCollections();
-  var tool = roadie.tool;
-  var gap = shareGap(localCollections, tool, slskdShared);
+  var gap = shareGap(localCollections, slskdShared);
   if (!gap.length) { render(); return; }
-  if (slskdOwnsSettings(tool)) {
-    // No Roadie dialog lists the folders on this path, so the card asks.
-    roadieShare = { error: null, confirm: gap };
-    render();
-    return;
-  }
-  roadieShare = { error: null };
-  var args = ["tool", "install", "slskd", "--set", SHARES_ENTRY + "=" + JSON.stringify(sharedDirsWith(tool, gap))];
-  var r;
-  try {
-    r = await runRoadieJob("share", args, "Waiting for you to approve it in Roadie's dialog…");
-  } catch (e) {
-    console.error("slskd: Roadie share change failed:", e);
-    roadieShare.error = String(e && e.message || e);
-    render();
-    return;
-  }
-  if (!r) return;
-  if (r.code !== 0) {
-    roadieShare.error = roadieFailure(r.code, r.json, r.stderr);
-    api.log("warn", "Roadie share change: " + roadieShare.error, "slskd");
-    render();
-    return;
-  }
-  api.log("info", "sharing " + gap.length + " more folder(s) through Roadie", "slskd");
-  rescanPending = true;
-  await probeRoadie(true);
-  await refreshReadiness();
-}
-
-// ---- When slskd owns its settings (Roadie 0.6+) -------------------------
-//
-// From slskd's revision-6 setup on, Roadie writes slskd's settings file once,
-// at install, and then leaves it to slskd: `tool status` says
-// `configurable: false`, and Roadie refuses to change the file again. Sharing
-// more folders then goes through slskd's own settings API (its settings file,
-// edited with slskd's validation) after the user confirms the folders here,
-// and what slskd shares is read from slskd, not from Roadie's install-time
-// record.
-
-// Pure: Roadie hands slskd's settings to slskd after install.
-function slskdOwnsSettings(tool) {
-  return !!(tool && tool.installed && tool.configurable === false);
+  // The folders become public: the card asks before anything changes.
+  shareChange = { error: null, confirm: gap };
+  render();
 }
 
 // Pure: the folders slskd shares, from GET /api/v0/shares
@@ -4424,32 +4526,11 @@ function yamlWithShares(yaml, dirs) {
   return lines.slice(0, sharesAt + 1).concat([childInd + "directories:"], fresh2.map(function (d) { return item(childInd + "  ", d); }), lines.slice(sharesAt + 1)).join(nl);
 }
 
-// Pure: a newer setup of slskd waiting for the user's review in Roadie
-// (`tool status` → `recipeUpdate`, Roadie 0.6+): { from, to } or null.
-function recipeUpdateInfo(tool) {
-  var u = tool && tool.installed && tool.recipeUpdate;
-  if (!u || !u.revision) return null;
-  return { from: tool.revision || null, to: u.revision };
-}
 
-// Pure: Roadie found another slskd already running here (`tool options` →
-// `otherInstance`, Roadie 0.6+): what the install page says about it.
-function otherInstanceNodes(oi) {
-  if (!oi || !oi.message) return [];
-  var why = oi.blocksStart
-    ? "slskd runs one copy per computer, so the one Roadie installs won't start while this one runs."
-    : "The copy Roadie installs can't use the same port while this one runs.";
-  return [{ type: "section", title: "slskd is already running here", children: [
-    mutedText("Something answers as slskd on " + oi.url + ". " + why),
-    mutedText("If it's your own slskd, connect Viboplr to it instead (you'll need its API key). Otherwise quit it, then install."),
-    buttonRow([actionButton("Connect to it instead…", "roadie-use-other", "accent"), actionButton("Check again", "roadie-recheck-other")])
-  ] }];
-}
-
-// What slskd shares, from slskd (its settings are its own). Quiet on failure:
-// the Sharing row then just waits for the next pass.
+// What slskd shares, from slskd. Quiet on failure: the Sharing row then just
+// waits for the next pass.
 async function loadSlskdShared() {
-  if (!slskdOwnsSettings(roadie.tool) || readiness.state !== "ready") return;
+  if (!usesManaged(settings, managed) || readiness.state !== "ready") return;
   try {
     var res = await slskd("GET", "/api/v0/shares");
     if (res.status === 200) slskdShared = sharedFromSlskd(res.json);
@@ -4458,18 +4539,12 @@ async function loadSlskdShared() {
   }
 }
 
-// slskd's settings API wants its web sign-in (an administrator), not the API
-// key. A slskd Roadie installed hands that login to Viboplr with the
-// connection; slskd's default is the fallback.
+// slskd's settings API and its shutdown want its web sign-in (an
+// administrator), not the API key. The slskd this plugin installed has the
+// random login the install wrote; any other has slskd's default.
 async function slskdAdminToken() {
-  var login = null;
-  try {
-    var r = await roadieExec(["tool", "connection", "slskd", "--consumer", ROADIE_CONSUMER]);
-    if (r.code === 0) login = webLoginFromRoadie(r.json);
-  } catch (e) {
-    console.error("slskd: reading the login from Roadie failed:", e);
-  }
-  login = login || SLSKD_DEFAULT_LOGIN;
+  var r = managed.record;
+  var login = usesManaged(settings, managed) && r.webUsername ? { username: r.webUsername, password: r.webPassword } : SLSKD_DEFAULT_LOGIN;
   var res = await slskd("POST", "/api/v0/session", { username: login.username, password: login.password });
   if (res.status !== 200 || !res.json || !res.json.token) throw new Error("slskd didn't accept its web login (HTTP " + res.status + ")");
   return res.json.token;
@@ -4495,9 +4570,9 @@ async function slskdSettingsCall(method, path, token, yamlText) {
 // The user said yes to the folders: add them to slskd's own settings file
 // through slskd (validated by slskd first), then rescan.
 async function shareThroughSlskd(gap) {
-  if (roadie.job) return;
-  roadieShare = { error: null };
-  roadie.job = { kind: "share", line: "Adding the folders to slskd's settings…", percent: null, cancel: null };
+  if (managed.job) return;
+  shareChange = { error: null };
+  managed.job = { kind: "share", line: "Adding the folders to slskd's settings…", percent: null };
   render();
   try {
     var token = await slskdAdminToken();
@@ -4520,53 +4595,12 @@ async function shareThroughSlskd(gap) {
     slskdShared = null;
   } catch (e) {
     console.error("slskd: sharing through slskd failed:", e);
-    roadieShare = { error: String(e && e.message || e), manual: !!(e && e.manual) };
+    shareChange = { error: String(e && e.message || e), manual: !!(e && e.manual) };
   } finally {
-    roadie.job = null;
+    managed.job = null;
   }
   await refreshReadiness();
   render();
-}
-
-// Roadie has a newer setup of slskd: the user reviews it in Roadie's dialog
-// (`tool upgrade` proposes it, Roadie 0.6+). Afterwards the connection is read
-// again, since a new setup may hand out a new key.
-async function reviewRecipeUpdate() {
-  var r;
-  try {
-    r = await runRoadieJob("recipe-update", ["tool", "upgrade", "slskd"], "Waiting for you to review it in Roadie's dialog…");
-  } catch (e) {
-    console.error("slskd: Roadie recipe update failed:", e);
-    roadie.error = String(e && e.message || e);
-    render();
-    return;
-  }
-  if (!r) return;
-  if (r.code === 2) { render(); return; } // declined: the offer stays until the next revision
-  if (r.code !== 0) {
-    roadie.error = roadieFailure(r.code, r.json, r.stderr);
-    render();
-    return;
-  }
-  api.log("info", "applied Roadie's new slskd setup", "slskd");
-  await probeRoadie(true);
-  if (settings.managedBy === "roadie") await adoptRoadieConnection("new slskd setup");
-  slskdShared = null;
-  await refreshReadiness();
-}
-
-// Pure: the card's row offering a newer slskd setup from Roadie.
-function recipeUpdateRows(tool, job) {
-  var u = recipeUpdateInfo(tool);
-  if (!u) return [];
-  if (job && job.kind === "recipe-update") {
-    var running = [mutedText(job.line)];
-    if (job.cancel) running.push(buttonRow([actionButton("Cancel", "roadie-cancel")]));
-    return running;
-  }
-  return [optionRow("Update for slskd's setup",
-    "Roadie has a newer way to run slskd" + (u.from ? " (setup " + u.from + " → " + u.to + ")" : "") + ". Roadie shows you what changes; nothing changes until you approve it.",
-    actionButton("Review update…", "roadie-recipe-update", "accent", { disabled: !!job }))];
 }
 
 // Ask slskd to scan its shares; once, after a change, when it is signed in.
@@ -4588,67 +4622,52 @@ function describeFolders(paths) {
   return paths.length > 3 ? shown + " and " + (paths.length - 3) + " more" : shown;
 }
 
-// The row that says which folders become public, with the way out. Absent
-// when there is nothing to share or this Roadie can't take the list.
+// The install form's row that says which folders become public, with the
+// way out. Absent when there are no collections to share.
 function shareCollectionsRows() {
   var paths = collectionPaths(localCollections);
-  if (!paths.length || !roadieCanShareDirs(roadie.tool)) return [];
+  if (!paths.length) return [];
   return [{ type: "settings-row", label: "Share my Viboplr collections",
     description: (paths.length === 1 ? "1 folder: " : paths.length + " folders: ") + describeFolders(paths) +
       ". Other Soulseek users can browse and download from them; Soulseek serves people who share before those who don't. Your downloads folder is shared too.",
-    control: { type: "toggle", label: "", action: "roadie-set-share", checked: !!roadieCreds.shareCollections } }];
+    control: { type: "toggle", label: "", action: "install-set-share", checked: !!installForm.shareCollections } }];
 }
 
 function autostartRow(action, checked) {
-  return { type: "settings-row", label: "Start slskd at login",
-    description: "Off: slskd runs until you restart the computer; start it again from here. On: Roadie adds a login item that starts it, and macOS tells you so.",
+  return { type: "settings-row", label: "Start slskd with Viboplr",
+    description: "On: when Viboplr opens, the plugin starts slskd if it isn't already running. Off: start it from here when you want it. To have slskd run without Viboplr, add it to your computer's login items yourself.",
     control: { type: "toggle", label: "", action: action, checked: !!checked } };
 }
 
-// Rows the Connection section adds when Roadie has slskd. Where its files
-// are is shown whenever Roadie has one, connected or not: a user stuck on a
-// rejected key is exactly the one looking for them. The login-item choice
-// (`roadie tool autostart`) and Remove only when this plugin uses Roadie's
-// slskd, since both act on that one.
-function roadieManagedRows() {
-  if (!roadie.installed || !roadie.tool || !roadie.tool.installed) return [];
-  var managed = settings.managedBy === "roadie";
-  return (managed ? [autostartRow("roadie-autostart", roadie.tool.autostart)] : [])
-    .concat(roadieFileRows(roadie.tool, canOpenPaths(), roadieShowFiles))
-    .concat(managed ? roadieRemoveRows(roadieRemove, roadie.job) : []);
+function keepRunningRow() {
+  return { type: "settings-row", label: "Keep slskd running when Viboplr quits",
+    description: "On: downloads and sharing carry on while Viboplr is closed. Off: Viboplr stops slskd when it quits. Applies from slskd's next start.",
+    control: { type: "toggle", label: "", action: "managed-set-keep-running", checked: !settings.stopWithViboplr } };
 }
 
-// What the Connection section folds away: the file list, and (for Roadie's
-// slskd) the address/key form Roadie filled in. Both stay out of the way of
-// the one thing a not-ready screen is for, which is the fix at the top.
-var roadieShowFiles = false;
-var roadieShowDetails = false;
-
-// Pure: the address the plugin talks to is Roadie's slskd: a loopback host
-// on the port Roadie reports. "localhost:5030" typed by hand and Roadie's
-// "127.0.0.1:5030" are the same slskd.
-function isLoopbackHost(h) {
-  return h === "localhost" || h === "127.0.0.1" || h === "::1" || h === "[::1]";
-}
-function hostPort(u) {
-  var m = /^\s*(https?):\/\/(\[[^\]]+\]|[^:\/]+)(?::(\d+))?/i.exec(String(u || ""));
-  if (!m) return null;
-  return { host: m[2].toLowerCase(), port: m[3] ? Number(m[3]) : (m[1].toLowerCase() === "https" ? 443 : 80) };
-}
-function roadieOwnsAddress(url, tool) {
-  if (!tool || !tool.installed || !tool.url) return false;
-  var a = hostPort(url), b = hostPort(tool.url);
-  return !!(a && b && a.port === b.port && isLoopbackHost(a.host) && isLoopbackHost(b.host));
+function installFormSection() {
+  var folder = String(installForm.downloadsDir || "");
+  return {
+    type: "section",
+    title: "Your Soulseek setup",
+    children: [
+      mutedText("Your account goes into slskd's own settings file; the plugin doesn't keep it."),
+      { type: "settings-row", label: "Soulseek username",
+        control: { type: "text-input", placeholder: "username", action: "install-set-user", value: installForm.username } },
+      { type: "settings-row", label: "Soulseek password",
+        control: { type: "text-input", placeholder: "password", action: "install-set-pass", password: true, value: installForm.password } },
+      mutedText("No account yet? Soulseek has no sign-up page: choose a username nobody else uses and a password, and the account is created the first time slskd signs in. Keep the password somewhere safe; Soulseek can't reset it."),
+      optionRow("Downloads folder", folder || "Where finished downloads go. Pick a folder inside one of your collections and they reach your library by themselves.",
+        actionButton(folder ? "Change…" : "Choose…", "install-pick-folder", folder ? "secondary" : "accent")),
+      autostartRow("install-set-autostart", installForm.autostart)
+    ].concat(shareCollectionsRows(), [
+      { type: "button", label: "Install slskd", action: "install", variant: "accent", disabled: !installFormComplete(installForm) }
+    ])
+  };
 }
 
-// Pure: Roadie has an slskd it will hand this plugin a key for without asking
-// (Viboplr is already approved), so switching to it is one click.
-function roadieCanHandOver(tool) {
-  return !!(tool && tool.installed && Array.isArray(tool.approvedConsumers) && tool.approvedConsumers.indexOf(ROADIE_CONSUMER) >= 0);
-}
-
-// Why Roadie's slskd isn't signed in, read from its log on each readiness
-// pass while it isn't: { kind, message } or null.
+// Why the slskd isn't signed in, read from its log on each readiness pass
+// while it isn't: { kind, message } or null.
 var signinWhy = null;
 
 async function refreshSigninWhy() {
@@ -4657,13 +4676,13 @@ async function refreshSigninWhy() {
     return;
   }
   // slskd's own log endpoint answers with the key we already hold, so the
-  // reason is there for any slskd, not only one Roadie runs. Roadie's copy
-  // of the log is the fallback (an older slskd, or a key without access).
-  var ours = roadie.installed && roadieOwnsAddress(settings.url, roadie.tool);
-  var user = ours && roadie.tool.config && roadie.tool.config.soulseekUsername;
+  // reason is there for any slskd. The output the host captured is the
+  // fallback for the one this plugin installed (an older slskd, or a key
+  // without access to the log).
+  var ours = usesManaged(settings, managed) && managedOwnsAddress(settings.url, managed.record);
   var lines = await slskdApiLogLines();
-  if (!lines.length && ours) lines = await slskdLogLines();
-  signinWhy = signinReasonFromLog(lines, user ? String(user) : null);
+  if (!lines.length && ours) lines = await managedLogLines();
+  signinWhy = signinReasonFromLog(lines, null);
 }
 
 // Pure: slskd's GET /api/v0/logs entries as plain message lines, oldest first.
@@ -4686,190 +4705,86 @@ async function slskdApiLogLines() {
   }
 }
 
-// A kicked slskd stays signed out until it restarts. Quiet on success: the
-// readiness pass that follows is the answer.
-async function restartSlskdWithRoadie() {
-  var r;
-  try {
-    r = await runRoadieJob("restart", ["tool", "restart", "slskd"], "Restarting slskd…");
-  } catch (e) {
-    console.error("slskd: Roadie restart failed:", e);
-    roadie.error = String(e && e.message || e);
-    render();
-    return;
-  }
-  if (!r) return;
-  if (r.code !== 0) {
-    roadie.error = roadieFailure(r.code, r.json, r.stderr);
-    render();
-    return;
-  }
-  if (r.json && r.json.installed != null) { roadie.tool = r.json; roadie.checkedAt = Date.now(); }
-  api.log("info", "slskd restarted through Roadie", "slskd");
-  signinWhy = null;
-  await awaitSlskdUp("restart");
-}
-
-// ---- Where Roadie keeps slskd --------------------------------------------
-//
-// Roadie's `tool status` names the install folder, the private data folder,
-// the logs folder and the config file it renders (Roadie 0.5.0+; older ones
-// send none of it and the rows stay away). The config file is revealed in its
-// folder rather than opened: it holds the Soulseek password, and opening a
-// .yml hands it to whatever editor is associated.
+// ---- Where slskd's files are ---------------------------------------------
 
 // Pure: the host can open and reveal local paths.
 function canOpenPaths() {
   return !!(api && api.system && typeof api.system.openPath === "function" && typeof api.system.revealPath === "function");
 }
 
-// Pure: the locations Roadie reported, in the order a user looks for them.
-// `reveal` selects the file in its folder instead of opening it.
-function roadieFilePlaces(tool) {
-  if (!tool) return [];
+// The places worth showing, resolved when the card asks for them. The
+// settings file is revealed in its folder, never opened: it holds the
+// Soulseek password, and opening a .yml hands it to whatever editor is
+// associated.
+var managedPlaces = null;
+async function loadManagedPlaces() {
+  if (!managed.record) { managedPlaces = null; return; }
+  var get = async function (segs) {
+    try { return await api.storage.files.getPath(segs); } catch (e) { return null; }
+  };
   var places = [];
-  var files = Array.isArray(tool.configFiles) ? tool.configFiles : [];
-  for (var i = 0; i < files.length; i++) {
-    if (files[i] && files[i].path) places.push({ label: files.length > 1 ? "Settings file " + (i + 1) : "Settings file", path: files[i].path, reveal: true });
-  }
-  if (tool.installDir) places.push({ label: "Installed in", path: tool.installDir, reveal: false });
-  if (tool.dataDir) places.push({ label: "Data folder", path: tool.dataDir, reveal: false });
-  if (tool.logsDir) places.push({ label: "Logs", path: tool.logsDir, reveal: false });
-  return places;
+  var cfg = await get([MANAGED_DIR, "data", "slskd.yml"]);
+  if (cfg) places.push({ label: "Settings file", path: cfg, reveal: true });
+  var bin = await get([MANAGED_DIR, managed.record.version]);
+  if (bin) places.push({ label: "Installed in", path: bin, reveal: false });
+  var data = await get([MANAGED_DIR, "data", "app"]);
+  if (data) places.push({ label: "Data folder", path: data, reveal: false });
+  var log = await get(["logs", MANAGED_NAME + ".log"]);
+  if (log) places.push({ label: "Log", path: log, reveal: true });
+  managedPlaces = places;
 }
+
+var managedShowFiles = false;
+var managedShowDetails = false;
 
 // Pure: one folded row, and when `open` one row per location with its button
 // on the row itself.
-function roadieFileRows(tool, canOpen, open) {
+function managedFileRows(places, canOpen, open) {
   if (!canOpen) return [];
-  var places = roadieFilePlaces(tool);
-  if (!places.length) return [];
-  var rows = [optionRow("slskd's files", open ? "Where Roadie keeps slskd on this computer." : "Install folder, settings file, data and logs.",
-    actionButton(open ? "Hide" : "Show", "roadie-files-toggle"))];
-  if (!open) return rows;
+  var rows = [optionRow("slskd's files", open ? "Where slskd lives on this computer." : "Install folder, settings file, data and log.",
+    actionButton(open ? "Hide" : "Show", "managed-files-toggle"))];
+  if (!open || !places) return rows;
   for (var j = 0; j < places.length; j++) {
     var p = places[j];
-    var desc = p.reveal ? p.path + " — holds your Soulseek password, and Roadie rewrites it: change settings through Roadie, not here." : p.path;
+    var desc = p.label === "Settings file" ? p.path + " — holds your Soulseek password. Change settings in slskd's web page, which checks them." : p.path;
     rows.push(optionRow(p.label, desc,
-      actionButton(p.reveal ? "Show in folder" : "Open folder", "roadie-open-path", "secondary", { data: { path: p.path, reveal: p.reveal } })));
+      actionButton(p.reveal ? "Show in folder" : "Open folder", "managed-open-path", "secondary", { data: { path: p.path, reveal: p.reveal } })));
   }
   return rows;
 }
 
-async function openRoadiePath(path, reveal) {
+async function openManagedPath(path, reveal) {
   try {
     if (reveal) await api.system.revealPath(path);
     else await api.system.openPath(path);
   } catch (e) {
     console.error("slskd: couldn't open " + path + ":", e);
-    api.ui.showNotification("Couldn't open " + path + ": " + String(e && e.message || e));
+    api.ui.showNotification("Couldn't open " + path + ": " + String(e && e.message || e), { kind: "error" });
   }
 }
 
-// ---- Removing slskd through Roadie ---------------------------------------
-//
-// `roadie tool uninstall slskd` stops slskd, drops its login item and
-// deletes its binaries; without --keep-data it also deletes the settings
-// Roadie keeps for it (the Soulseek login, the web login) and every app's
-// key. Folders slskd wrote to (downloads, shares) are never touched. The
-// plugin offers the same two choices Roadie's own window does; Roadie's
-// dialog is the confirmation on top of that, as for an install.
-//
-// asking: the choice is on screen; error: the last attempt's failure, kept
-// until the next one (the Roadie dialog may have been missed).
-var roadieRemove = { asking: false, error: null };
-
-// Pure: the remove row in each state — idle, choosing, running, failed.
-function roadieRemoveRows(rm, job) {
-  if (job && job.kind === "uninstall") {
-    var running = [mutedText(job.line)];
-    if (job.cancel) running.push(buttonRow([actionButton("Cancel", "roadie-cancel")]));
-    return running;
-  }
-  if (rm.asking) {
-    return [
-      { type: "settings-row", label: "Remove slskd?",
-        description: "Roadie stops slskd and deletes it. Your downloads and shared folders stay where they are. Keeping the settings keeps your Soulseek login for a reinstall." },
-      buttonRow([
-        actionButton("Remove, keep settings", "roadie-remove", "accent", { data: { keepData: true } }),
-        actionButton("Remove everything", "roadie-remove", "secondary", { data: { keepData: false } }),
-        actionButton("Cancel", "roadie-remove-cancel")
-      ])
-    ];
-  }
-  var rows = [optionRow("Remove slskd", "Roadie installed it, so Roadie removes it. It asks you first.",
-    actionButton("Remove…", "roadie-remove-ask", "secondary", { disabled: !!job }))];
-  if (rm.error) rows.push(mutedText("Roadie: " + rm.error));
-  return rows;
-}
-
-// Pure: the arguments of the uninstall.
-function roadieUninstallArgs(keepData) {
-  var args = ["tool", "uninstall", "slskd"];
-  if (keepData) args.push("--keep-data");
-  return args;
-}
-
-// Success says nothing: the view falls back to the setup hub, which is the
-// answer. A decline or a failure stays under the button.
-async function uninstallSlskdWithRoadie(keepData) {
-  roadieRemove = { asking: false, error: null };
-  var r;
-  try {
-    r = await runRoadieJob("uninstall", roadieUninstallArgs(keepData), "Waiting for you to approve it in Roadie's dialog…");
-  } catch (e) {
-    console.error("slskd: Roadie uninstall failed:", e);
-    roadieRemove.error = String(e && e.message || e);
-    render();
-    return;
-  }
-  if (!r) return;
-  if (r.code !== 0) {
-    roadieRemove.error = roadieFailure(r.code, r.json, r.stderr);
-    api.log("warn", "Roadie uninstall of slskd: " + roadieRemove.error, "slskd");
-    render();
-    return;
-  }
-  api.log("info", "slskd removed through Roadie" + (keepData ? " (settings kept)" : ""), "slskd");
-  // Roadie said it's gone, so don't wait for the next status read to agree:
-  // a stale "installed" would keep pointing the plugin at a dead address.
-  webLogin = null;
-  downloadsDir = null;
-  incompleteDir = null;
-  await releaseRoadieConnection();
-  await probeRoadie(true);
-  await refreshReadiness();
-  render();
-}
-
-async function setRoadieAutostart(on) {
-  var r = await roadieExec(["tool", "autostart", "slskd", on ? "on" : "off"]);
-  if (r.code !== 0) {
-    roadie.error = roadieFailure(r.code, r.json, r.stderr);
-    api.ui.showNotification("Roadie couldn't change \"start at login\": " + roadie.error);
-  } else {
-    roadie.tool = r.json;
-    roadie.checkedAt = Date.now();
-    api.log("info", "slskd start-at-login " + (on ? "on" : "off") + " (Roadie)", "slskd");
-  }
-  render();
-  renderSettings();
-}
-
-// A Roadie command in flight (its latest line and percent), or the last one's
-// failure, which stays until the next attempt.
-// An uninstall or a share change shows on its own row, not here.
-function roadieJobNodes() {
+// A start / update in flight (its line and percent), or the last failure,
+// which stays until the next attempt. A removal or a share change shows on
+// its own row, not here.
+function managedJobNodes() {
   var nodes = [];
-  if (roadie.job && (roadie.job.kind === "uninstall" || roadie.job.kind === "share")) return nodes;
-  if (roadie.job) {
-    nodes.push(mutedText(roadie.job.line));
-    if (roadie.job.percent != null) nodes.push({ type: "progress-bar", value: roadie.job.percent, max: 100 });
-    if (roadie.job.cancel) nodes.push(buttonRow([actionButton("Cancel", "roadie-cancel")]));
-  } else if (roadie.error) {
-    nodes.push(mutedText("Roadie: " + roadie.error));
+  if (managed.job && (managed.job.kind === "remove" || managed.job.kind === "share")) return nodes;
+  if (managed.job) {
+    nodes.push(mutedText(managed.job.line));
+    if (managed.job.percent != null) nodes.push({ type: "progress-bar", value: managed.job.percent, max: 100 });
+  } else if (managed.error) {
+    nodes.push(mutedText(managed.error));
   }
   return nodes;
+}
+
+// Pure: the card's row offering the newer slskd this plugin pins.
+function managedUpdateRows(record, job) {
+  if (!record || !versionLess(record.version, SLSKD_RELEASE.version)) return [];
+  if (job && job.kind === "update") return [];
+  return [optionRow("Update slskd",
+    "slskd " + SLSKD_RELEASE.version + " is available (you have " + record.version + "). Viboplr asks before it downloads; slskd restarts on the new version and keeps its settings.",
+    actionButton("Update", "managed-update", "accent", { disabled: !!job }))];
 }
 
 // ---------------------------------------------------------------------------
@@ -4878,7 +4793,7 @@ function roadieJobNodes() {
 
 // "slskd not found" — unconfigured (never connected) or unreachable (was set
 // up, now nothing answers) — is a hub and three pages. The hub says what's
-// wrong in one line and lists the ways forward; each way (install with Roadie,
+// wrong in one line and lists the ways forward; each way (install it here,
 // install by hand, connect to one you already run) gets a page to itself, so
 // the account form, the guide and the address fields are never on screen
 // together. `setupPage` resets to the hub whenever slskd becomes ready.
@@ -4925,26 +4840,19 @@ function optionRow(label, description, control) {
 function backBar() {
   return buttonRow([pageButton("‹ Back", "home")]);
 }
-function useRoadieRow() {
-  return optionRow("Use Roadie's slskd",
-    "Roadie already has slskd on this computer. Connect to it — Roadie asks you to approve once.",
-    { type: "button", label: "Connect", action: "roadie-connect", variant: "accent" });
-}
-
 // ---- Finding slskd on this computer, before anything else ---------------
 //
 // The first run looks for a slskd already running here, on its usual ports,
-// with no Roadie involved: a slskd the user runs, the manual guide's, or one
-// Roadie installed all answer the same way. slskd answers
+// before anything is installed: a slskd the user runs, the manual guide's,
+// or one this plugin installed all answer the same way. slskd answers
 // GET /api/v0/session/enabled without a key ("true" or "false": whether it
 // wants one), which tells it apart from anything else on the port. Found, the
 // plugin tries the key it already has (the guide writes that one into
 // slskd.yml); if slskd wants another, the user types it. Only when nothing is
-// found does Roadie come in, as one way to install slskd.
+// found does installing come in.
 
 // state: "idle" | "looking" | "found" | "none". found: { url, insecure,
-// authEnabled, roadie } — `roadie`: Roadie runs this slskd and can hand over
-// its key. keyInput: what the user typed (memory only until it works).
+// authEnabled }. keyInput: what the user typed (memory only until it works).
 var discovery = { state: "idle", found: null, keyInput: "", error: null };
 var DISCOVERY_TIMEOUT_MS = 1500;
 
@@ -4988,7 +4896,8 @@ async function keyWorks(where, key) {
   return null;
 }
 
-// Save a connection the user (or discovery) settled on: theirs, not Roadie's.
+// Save a connection the user (or discovery) settled on: theirs, not one this
+// plugin installed.
 async function useConnection(url, key, insecure) {
   settings.url = url;
   settings.apiKey = key;
@@ -5016,7 +4925,7 @@ async function discoverSlskd() {
     try {
       var r = await fetchText(cands[i].url + "/api/v0/session/enabled", { method: "GET", timeoutMs: DISCOVERY_TIMEOUT_MS, insecure: cands[i].insecure, headers: { "Accept": "application/json" } });
       var fp = slskdFingerprint(r.status, r.text);
-      if (fp) found = { url: cands[i].url, insecure: cands[i].insecure, authEnabled: fp.authEnabled, roadie: false };
+      if (fp) found = { url: cands[i].url, insecure: cands[i].insecure, authEnabled: fp.authEnabled };
     } catch (e) { /* nothing on this port */ }
   }
   if (!found) {
@@ -5035,14 +4944,7 @@ async function discoverSlskd() {
     render();
     return;
   }
-  // It wants a key we don't have. Roadie can hand one over only for a slskd
-  // it runs itself; say so only when that's true (a status read, no dialog).
-  try {
-    await probeRoadie(true);
-    found.roadie = !!(roadie.installed && roadie.tool && roadieOwnsAddress(found.url, roadie.tool));
-  } catch (e) {
-    found.roadie = false;
-  }
+  // It wants a key we don't have: the user types one of slskd's.
   discovery = { state: "found", found: found, keyInput: "", error: null };
   render();
 }
@@ -5079,21 +4981,20 @@ function discoveryNodes(d) {
       control: { type: "text-input", placeholder: "API key", action: "discover-set-key", password: true, value: d.keyInput || "" } }
   ];
   if (d.error) rows.push(mutedText(d.error));
-  var buttons = [actionButton("Connect", "discover-connect", "accent", { disabled: !String(d.keyInput || "").trim() }), actionButton("Open slskd", "discover-open")];
-  if (f.roadie) buttons.push(actionButton("Get the key from Roadie", "roadie-connect"));
-  rows.push(buttonRow(buttons));
+  rows.push(buttonRow([actionButton("Connect", "discover-connect", "accent", { disabled: !String(d.keyInput || "").trim() }), actionButton("Open slskd", "discover-open")]));
   return [{ type: "section", title: "Found slskd on this computer", children: rows }];
 }
 
 // Pure: the install options, shared by the first-run hub and the "not
-// installed any more?" part of the unreachable one. Automatic comes first and
-// is the recommended one wherever the host can provide Roadie.
-function installRows(r) {
+// installed any more?" part of the unreachable one. Installing here comes first
+// and is the recommended one wherever this Viboplr can do it.
+// `m` is `managed`.
+function installRows(m) {
   var rows = [];
-  var auto = !!(r && r.supported);
+  var auto = !!(m && m.supported && slskdAssetFor(m.platform));
   if (auto) {
     rows.push(optionRow("Install automatically",
-      "Roadie downloads slskd, runs it in the background and keeps it up to date. Recommended.",
+      "Viboplr downloads slskd and runs it in the background on this computer, after it asks you. Recommended.",
       pageButton("Install…", "install-auto", "accent")));
   }
   rows.push(optionRow("Install manually",
@@ -5103,20 +5004,18 @@ function installRows(r) {
 }
 
 // Pure: the hub for a slskd that isn't found. `st` is "unconfigured" or
-// "unreachable"; `cfg` the connection settings; `r` the Roadie snapshot;
-// `detail` the last probe's error, if any.
-// `d`: the discovery state (first run only).
-function setupHomeView(st, cfg, r, detail, d) {
+// "unreachable"; `cfg` the connection settings; `m` the installed-slskd
+// snapshot; `detail` the last probe's error, if any; `d` the discovery state
+// (first run only).
+function setupHomeView(st, cfg, m, detail, d) {
   var children = [];
-  var roadieSlskd = roadieHasUnusedSlskd(cfg, r);
 
-  if (st === "unreachable" && cfg.managedBy === "roadie") {
-    // Roadie installed it and still says so (an uninstall releases the
-    // connection and lands on the first-run hub), so it's only stopped.
+  if (st === "unreachable" && usesManaged(cfg, m)) {
+    // This plugin installed it, so it's only stopped.
     children.push(headingText("slskd is stopped"));
-    children.push(mutedText("Roadie installed slskd on this computer; it isn't running right now."));
+    children.push(mutedText("slskd is installed on this computer; it isn't running right now."));
     children.push(buttonRow([
-      actionButton("Start slskd", "roadie-start", "accent", { disabled: !!(r && r.job) }),
+      actionButton("Start slskd", "managed-start", "accent", { disabled: !!(m && m.job) }),
       pageButton("Connection settings…", "connect")
     ]));
     return children;
@@ -5133,12 +5032,10 @@ function setupHomeView(st, cfg, r, detail, d) {
       checkButton("Try again", "accent"),
       pageButton("Connection settings…", "connect")
     ]));
-    var startRows = [optionRow("Start slskd",
+    children.push({ type: "section", title: "Stopped?", children: [optionRow("Start slskd",
       "Start it the way you installed it. The guide's Run step shows how for your computer.",
-      { type: "button", label: "Show how…", action: "setup-open-guide", variant: "secondary" })];
-    if (roadieSlskd) startRows.unshift(useRoadieRow());
-    children.push({ type: "section", title: "Stopped?", children: startRows });
-    children.push({ type: "section", title: "Not installed any more?", children: installRows(r) });
+      { type: "button", label: "Show how…", action: "setup-open-guide", variant: "secondary" })] });
+    children.push({ type: "section", title: "Not installed any more?", children: installRows(m) });
     return children;
   }
 
@@ -5150,8 +5047,7 @@ function setupHomeView(st, cfg, r, detail, d) {
   if (looking) return children;
   if (!found) {
     if (d && d.state === "none") children.push(mutedText("No slskd is running on this computer."));
-    if (roadieSlskd) children.push({ type: "section", title: "Ready to connect", children: [useRoadieRow()] });
-    children.push({ type: "section", title: "Install slskd", children: installRows(r) });
+    children.push({ type: "section", title: "Install slskd", children: installRows(m) });
   }
   children.push({ type: "section", title: found ? "A different slskd?" : "Running slskd somewhere else?", children: [
     optionRow("Connect to your slskd",
@@ -5164,27 +5060,16 @@ function setupHomeView(st, cfg, r, detail, d) {
 
 function installAutoView() {
   var children = [backBar(), headingText("Install slskd automatically")];
-  var stage = autoInstallStage(roadie);
-  if (stage === "unsupported") {
-    children.push(mutedText("This version of Viboplr can't install slskd for you. The manual guide takes a few minutes."));
+  if (!managed.supported || !slskdAssetFor(managed.platform)) {
+    children.push(mutedText(managed.supported
+      ? "There's no slskd build for this computer in this plugin. The manual guide takes a few minutes."
+      : "This version of Viboplr can't install slskd for you. The manual guide takes a few minutes."));
     children.push(pageButton("Show guide…", "install-manual", "accent"));
     return children;
   }
-  children.push(mutedText("Roadie downloads slskd, asks you to approve it, and runs it in the background on this computer only."));
-  if (stage === "get-roadie") {
-    children.push({ type: "section", title: "First, Roadie", children: [
-      optionRow("Install Roadie",
-        "The small tool that installs and runs slskd for you. Viboplr fetches it; then come back here.",
-        { type: "button", label: "Install Roadie…", action: "roadie-get", variant: "accent" })
-    ] });
-  } else if (stage === "adopt") {
-    children.push({ type: "section", title: "Already installed", children: [useRoadieRow()] });
-  } else if (stage === "form") {
-    var other = otherInstanceNodes(roadie.other);
-    for (var o = 0; o < other.length; o++) children.push(other[o]);
-    children.push(roadieInstallSection());
-  }
-  var job = roadieJobNodes();
+  children.push(mutedText("Viboplr downloads slskd " + SLSKD_RELEASE.version + " from its official release, checks it is exactly the file this plugin expects, and runs it in the background on this computer. It asks you before it installs anything."));
+  children.push(installFormSection());
+  var job = managedJobNodes();
   for (var i = 0; i < job.length; i++) children.push(job[i]);
   return children;
 }
@@ -5225,7 +5110,7 @@ function setupView() {
   if (setupPage === "install-auto") children = installAutoView();
   else if (setupPage === "install-manual") children = installManualView();
   else if (setupPage === "connect") children = connectView();
-  else children = setupHomeView(readiness.state, settings, roadie, readiness.detail, discovery).concat(roadieJobNodes());
+  else children = setupHomeView(readiness.state, settings, managed, readiness.detail, discovery).concat(managedJobNodes());
   return { type: "layout", direction: "vertical", children: children };
 }
 
@@ -5236,18 +5121,13 @@ function wantsSetupScreen(st, page) {
   return st === "unconfigured" || (st === "unreachable" && page !== "home");
 }
 
-// Pure: the "key rejected" screen. When Roadie has slskd, the fix is
-// Roadie's own key, not an edit to a file Roadie rewrites.
-function unauthorizedNodes(cfg, r) {
-  var tool = r && r.installed ? r.tool : null;
+// Pure: the "key rejected" screen. The slskd this plugin installed carries the
+// plugin's key in its settings; a refusal means slskd's settings were changed.
+function unauthorizedNodes(cfg, m) {
   var nodes = [headingText("slskd rejected the API key")];
-  if (roadieCanHandOver(tool)) {
-    var ours = roadieOwnsAddress(cfg.url, tool);
-    nodes.push({ type: "text", content: ours
-      ? "This is the slskd Roadie installed, and it only accepts the key Roadie gave Viboplr. The key below is a different one. Use Roadie's slskd to switch to Roadie's address and key; Viboplr is already allowed, so Roadie asks nothing."
-      : "slskd is running, but it doesn't accept the key below. Roadie also has an slskd on this computer, which Viboplr is already allowed to use: switch to it, or fix the key for this one." });
-    nodes.push(buttonRow([actionButton("Use Roadie's slskd", "roadie-connect", "accent"),
-      actionButton("Open setup guide", "setup-open-guide")]));
+  if (usesManaged(cfg, m)) {
+    nodes.push({ type: "text", content: "This is the slskd Viboplr installed, but it no longer accepts the key it was set up with — its API keys were changed in slskd's settings. Add the key back in slskd's settings page (System → Options, web → authentication → api_keys), or remove slskd and install it again." });
+    nodes.push(buttonRow([actionButton("Open slskd", "open-slskd", "accent"), checkButton("Check again")]));
     return nodes;
   }
   nodes.push({ type: "text", content: "slskd is running, but its settings file doesn't list the key below. Add it under web → authentication → api_keys in slskd.yml and restart slskd — the setup guide's Configure step shows the exact lines with this key already in them." });
@@ -5255,14 +5135,12 @@ function unauthorizedNodes(cfg, r) {
   return nodes;
 }
 
-// Pure: the "not signed in" screen. For Roadie's slskd the reason comes from
-// its log and the fix is a restart through Roadie; the account lives in
-// Roadie, so there is no yml to send the user to.
-function disconnectedNodes(cfg, r, why) {
-  var tool = r && r.installed ? r.tool : null;
+// Pure: the "not signed in" screen. For the slskd this plugin installed the
+// reason comes from its log and the fix is a restart.
+function disconnectedNodes(cfg, m, why) {
   var nodes = [headingText("slskd isn't signed in to Soulseek")];
-  var busy = !!(r && r.job);
-  var ours = roadieOwnsAddress(cfg.url, tool);
+  var busy = !!(m && m.job);
+  var ours = usesManaged(cfg, m) && managedOwnsAddress(cfg.url, m.record);
   // The network is in the way: a restart changes nothing, checking again
   // is the honest button.
   if (why && signinNeedsNetwork(why)) {
@@ -5273,7 +5151,7 @@ function disconnectedNodes(cfg, r, why) {
   if (ours) {
     nodes.push({ type: "text", content: why ? why.message
       : "slskd is running and the key works, but it isn't signed in to the Soulseek network, and its log doesn't say why. Restarting slskd makes it sign in again." });
-    nodes.push(buttonRow([actionButton("Restart slskd", "roadie-restart", "accent", { disabled: busy }),
+    nodes.push(buttonRow([actionButton("Restart slskd", "managed-restart", "accent", { disabled: busy }),
       actionButton("Open slskd", "open-slskd")]));
     return nodes;
   }
@@ -5358,76 +5236,48 @@ function statusVariant() {
 }
 
 function connectionSection() {
-  if (settings.managedBy === "roadie" && roadie.installed && roadie.tool && roadie.tool.installed) return roadieConnectionSection();
-  return { type: "section", title: "Connection", children: roadieManagedRows().concat(connectionFormRows()) };
+  if (usesManaged(settings, managed)) return managedConnectionSection();
+  return { type: "section", title: "Connection", children: connectionFormRows() };
 }
 
-// A slskd Roadie runs for this plugin: Roadie filled in the address and key,
-// so the form is folded away (typing into it ends Roadie's management) and
-// the card is what Roadie can do: test, start at login, files, remove.
-function roadieConnectionSection() {
+// The slskd this plugin installed: the plugin filled in the address and key,
+// so the form is folded away (typing into it stops using this slskd) and the
+// card is what can be done with it: test, start / stop behaviour, sharing,
+// update, files, remove.
+function managedConnectionSection() {
+  var st = managed.status;
   // Remove goes last: the one destructive row sits below everything else.
   var rows = [optionRow("Address", settings.url + " · " + statusLine(), checkButton("Test"))]
-    .concat(recipeUpdateRows(roadie.tool, roadie.job))
-    .concat([autostartRow("roadie-autostart", roadie.tool.autostart)])
-    .concat(sharingRows(roadie.tool, localCollections, roadie.job, roadieShare, slskdShared))
-    .concat(roadieFileRows(roadie.tool, canOpenPaths(), roadieShowFiles))
-    .concat([optionRow("Connection details", roadieShowDetails
-      ? "Roadie filled these in. Changing them stops using Roadie's slskd."
-      : "The address and key Roadie handed over.", actionButton(roadieShowDetails ? "Hide" : "Show", "roadie-details-toggle"))]);
-  if (roadieShowDetails) rows = rows.concat(connectionFormRows());
-  rows = rows.concat(roadieRemoveRows(roadieRemove, roadie.job));
-  return { type: "section", title: "slskd from Roadie", children: rows };
+    .concat(managedUpdateRows(managed.record, managed.job))
+    .concat([autostartRow("managed-autostart", settings.startWithViboplr), keepRunningRow()])
+    .concat(sharingRows(localCollections, managed.job, shareChange, slskdShared))
+    .concat(managedFileRows(managedPlaces, canOpenPaths(), managedShowFiles))
+    .concat([optionRow("Connection details", managedShowDetails
+      ? "Filled in at install. Changing them stops using the slskd installed here."
+      : "The address and key set up at install.", actionButton(managedShowDetails ? "Hide" : "Show", "managed-details-toggle"))]);
+  if (managedShowDetails) rows = rows.concat(connectionFormRows());
+  rows = rows.concat(managedRemoveRows(managedRemove, managed.job));
+  return { type: "section", title: "slskd on this computer", children: rows };
 }
 
 // ---- slskd's own web page -----------------------------------------------
 //
 // For testing and for slskd's own settings. The page asks for a sign-in that
-// is not the API key: a slskd Roadie installed sits behind the login its
-// recipe sets (slskd / slskd since Roadie 0.5.2; "roadie" and a random
-// password before), which Roadie hands to an approved app with the
-// connection; a slskd the user set up has slskd's
-// defaults unless they changed web → authentication in slskd.yml, which the
-// plugin can't read. Fetched on the click and kept in memory only.
+// is not the API key: the slskd this plugin installed sits behind the random
+// login the install wrote; a slskd the user set up has slskd's defaults
+// unless they changed web → authentication in slskd.yml, which the plugin
+// can't read. Shown on the click only.
 //
-// webLogin: null (hidden) | { loading } | { error } | { username, password, note }
+// webLogin: null (hidden) | { username, password, note }
 var webLogin = null;
 var SLSKD_DEFAULT_LOGIN = { username: "slskd", password: "slskd" };
 
-// Pure: the login out of Roadie's `tool connection` answer, or null when this
-// Roadie predates it.
-function webLoginFromRoadie(json) {
-  var w = json && json.webLogin;
-  if (!w || !w.username || !w.password) return null;
-  return { username: String(w.username), password: String(w.password) };
-}
-
-async function revealWebLogin() {
-  if (settings.managedBy !== "roadie") {
-    webLogin = { username: SLSKD_DEFAULT_LOGIN.username, password: SLSKD_DEFAULT_LOGIN.password,
-      note: "slskd's defaults. If you changed web → authentication in slskd.yml, use those instead." };
-    rerenderWebLogin();
-    return;
-  }
-  webLogin = { loading: true };
-  rerenderWebLogin();
-  var r;
-  try {
-    r = await roadieExec(["tool", "connection", "slskd", "--consumer", ROADIE_CONSUMER]);
-  } catch (e) {
-    console.error("slskd: reading the web login from Roadie failed:", e);
-    webLogin = { error: String((e && e.message) || e) };
-    rerenderWebLogin();
-    return;
-  }
-  var login = r.code === 0 ? webLoginFromRoadie(r.json) : null;
-  if (login) {
-    webLogin = { username: login.username, password: login.password, note: "The sign-in Roadie set up for slskd's web page." };
-  } else if (r.code !== 0) {
-    webLogin = { error: "Roadie: " + roadieFailure(r.code, r.json, r.stderr) };
-  } else {
-    webLogin = { error: "This Roadie doesn't hand out slskd's login yet. It arrives with a Roadie update (Settings → Dependencies)." };
-  }
+function revealWebLogin() {
+  var r = managed.record;
+  webLogin = usesManaged(settings, managed) && r.webUsername
+    ? { username: r.webUsername, password: r.webPassword, note: "The sign-in Viboplr set up for slskd's web page." }
+    : { username: SLSKD_DEFAULT_LOGIN.username, password: SLSKD_DEFAULT_LOGIN.password,
+        note: "slskd's defaults. If you changed web → authentication in slskd.yml, use those instead." };
   rerenderWebLogin();
 }
 
@@ -5451,10 +5301,6 @@ function webPageSection() {
   var hide = actionButton("Hide login", "slskd-hide-login");
   if (!webLogin) {
     rows.push(optionRow("Sign-in", "The page asks for a username and password — not the API key.", actionButton("Show login", "slskd-show-login")));
-  } else if (webLogin.loading) {
-    rows.push(optionRow("Sign-in", "Asking Roadie…", hide));
-  } else if (webLogin.error) {
-    rows.push(optionRow("Sign-in", webLogin.error, hide));
   } else {
     rows.push(optionRow("Sign-in", webLogin.note, hide));
     rows.push(loginField("Username", webLogin.username));
@@ -6692,7 +6538,7 @@ function fallbackSettingsSection() {
 function render() {
   if (!api) return;
   pushViewHeader();
-  if (roadie.setup) {
+  if (managed.setup) {
     api.ui.setViewData(VIEW_ID, setupProgressView(), { scrollKey: "setup" });
     return;
   }
@@ -6710,10 +6556,10 @@ function render() {
   var body = [];
   // Not ready, like yt-dlp without its binary: the view stays, the problem
   // is one line on top with the click that fixes it.
-  var banner = readinessBanner(st, conn(), roadie, signinWhy, mainTab === "settings");
+  var banner = readinessBanner(st, conn(), managed, signinWhy, mainTab === "settings");
   if (banner) {
     body.push(banner);
-    body = body.concat(roadieJobNodes());
+    body = body.concat(managedJobNodes());
   }
   body.push({
     type: "tabs",
@@ -6755,12 +6601,12 @@ function renderSettings() {
 // Pure: the Status checklist on top of Settings while slskd is ready — the
 // four things that must hold for downloads to work and reach the library,
 // each with its fix on the same row. (Not ready, `fixNodes` explains instead.)
-// `share` says how to fix sharing: "roadie" (the card below has Share…),
+// `share` says how to fix sharing: "managed" (the card below has Share…),
 // "slskd" (slskd's own settings), or null.
 function statusChecklist(rd, cfg, currentTier, col, share, ago) {
   var rows = [];
   rows.push(optionRow("✓ Connected as " + (rd.username || "?"),
-    (rd.version ? "slskd " + rd.version + " · " : "") + (cfg.managedBy === "roadie" ? "slskd from Roadie · " : "") + (cfg.url || "") + (ago ? " · " + ago : ""),
+    (rd.version ? "slskd " + rd.version + " · " : "") + (cfg.managedBy === "plugin" ? "slskd installed here · " : "") + (cfg.url || "") + (ago ? " · " + ago : ""),
     checkButton("Test")));
   if (rd.shareCount == null) {
     // slskd didn't say; nothing to claim either way.
@@ -6772,7 +6618,7 @@ function statusChecklist(rd, cfg, currentTier, col, share, ago) {
       ? optionRow("⚠ Not sharing anything", "Sharers serve people who share first, so your downloads may queue a long time. Add a shared folder in slskd's settings.",
         actionButton("Open slskd", "open-slskd"))
       : { type: "settings-row", label: "⚠ Not sharing anything",
-        description: "Sharers serve people who share first, so your downloads may queue a long time." + (share === "roadie" ? " Share your collections from the card below." : "") });
+        description: "Sharers serve people who share first, so your downloads may queue a long time." + (share === "managed" ? " Share your collections from the card below." : "") });
   }
   if (currentTier !== "local") {
     rows.push({ type: "settings-row", label: "⚠ slskd is on another computer",
@@ -6788,9 +6634,9 @@ function statusChecklist(rd, cfg, currentTier, col, share, ago) {
 }
 
 function settingsTab() {
-  var children = fixNodes(readiness.state, conn(), roadie, readiness.detail, signinWhy);
+  var children = fixNodes(readiness.state, conn(), managed, readiness.detail, signinWhy);
   if (readiness.state === "ready") {
-    var share = conn().managedBy === "roadie" && roadieCanShareDirs(roadie.tool) ? "roadie" : "slskd";
+    var share = usesManaged(conn(), managed) ? "managed" : "slskd";
     children.push(statusChecklist(readiness, conn(), tier, tier === "local" && downloadsDir ? downloadsCollection() : null,
       share, checkedAgo(connCheck.at, Date.now())));
   }
@@ -7401,13 +7247,12 @@ function registerActions() {
   api.ui.onAction("setup-page", function (data) {
     var page = data && data.page;
     setupPage = SETUP_PAGES.indexOf(page) >= 0 ? page : "home";
-    // Entering the automatic page is when Roadie's answer matters; a fresh
-    // one means a Roadie installed a moment ago shows up without a restart.
+    // The install page needs the platform (which build) and the collections
+    // (what it offers to share; otherwise loaded only once slskd is ready).
     if (setupPage === "install-auto") {
-      // Roadie's answer decides the form, and the collections are what it
-      // offers to share (they are otherwise loaded only once slskd is ready).
+      managed.error = null;
       Promise.all([
-        probeRoadie(true).catch(function (e) { console.error("slskd: Roadie probe failed:", e); }),
+        probeManaged().catch(function (e) { console.error("slskd: install check failed:", e); }),
         loadCollections().catch(function (e) { console.error("slskd: loading collections failed:", e); })
       ]).then(render);
     }
@@ -7421,9 +7266,7 @@ function registerActions() {
   api.ui.onAction("open-slskd", function () {
     if (settings.url) api.network.openUrl(settings.url).catch(console.error);
   });
-  api.ui.onAction("slskd-show-login", function () {
-    revealWebLogin().catch(function (e) { console.error("slskd: show login failed:", e); });
-  });
+  api.ui.onAction("slskd-show-login", function () { revealWebLogin(); });
   api.ui.onAction("slskd-hide-login", function () {
     webLogin = null;
     rerenderWebLogin();
@@ -7432,18 +7275,61 @@ function registerActions() {
   // them goes nowhere.
   api.ui.onAction("slskd-login-field", function () {});
 
-  // Roadie. Every one of these is a click; Roadie then asks the user in its
-  // own dialog before it installs slskd or hands this plugin a key.
-  api.ui.onAction("roadie-get", function () {
-    // The host's own install modal for a registered dependency ("Install for
-    // me"). It says nothing when Roadie lands, so re-probe once it has.
-    api.ui.requestAction("require-dependency", { name: ROADIE_DEP, feature: "Soulseek" });
+  // Installing slskd here. Every one of these is a click; Viboplr then asks
+  // the user before anything is installed.
+  api.ui.onAction("install", function () {
+    installSlskd().catch(function (e) { console.error("slskd: install failed:", e); });
   });
-  api.ui.onAction("roadie-install", function () {
-    installSlskdWithRoadie().catch(function (e) { console.error("slskd: Roadie install failed:", e); });
+  api.ui.onAction("install-pick-folder", async function () {
+    try {
+      var picked = await api.ui.pickFolder({ title: "Where should slskd put finished downloads?" });
+      if (picked) {
+        installForm.downloadsDir = picked;
+        render();
+      }
+    } catch (e) {
+      console.error("slskd: choosing a folder failed:", e);
+    }
   });
-  api.ui.onAction("roadie-start", function () {
-    startSlskdWithRoadie().catch(function (e) { console.error("slskd: Roadie start failed:", e); });
+  api.ui.onAction("install-retry", function () {
+    var s = managed.setup;
+    if (!s || !s.failed) return;
+    continueSetup(s, s.failed.step).catch(function (e) { console.error("slskd: setup retry failed:", e); });
+  });
+  api.ui.onAction("install-close", function () {
+    managed.setup = null;
+    render();
+  });
+  api.ui.onAction("install-set-share", function (data) {
+    installForm.shareCollections = !!(data && data.value);
+    render();
+  });
+  api.ui.onAction("install-set-autostart", function (data) {
+    installForm.autostart = !!(data && data.value);
+    render();
+  });
+  api.ui.onAction("managed-start", function () {
+    startManaged().catch(function (e) { console.error("slskd: start failed:", e); });
+  });
+  api.ui.onAction("managed-restart", function () {
+    restartManaged().catch(function (e) { console.error("slskd: restart failed:", e); });
+  });
+  api.ui.onAction("managed-update", function () {
+    updateManaged().catch(function (e) { console.error("slskd: update failed:", e); });
+  });
+  api.ui.onAction("managed-autostart", function (data) {
+    setStartWithViboplr(!!(data && data.value)).then(function () {
+      render();
+      renderSettings();
+    }).catch(function (e) { console.error("slskd: start-with-Viboplr change failed:", e); });
+  });
+  // Saved at once, not through saveSetting's debounce: it is read at the next
+  // start, which may be a click away.
+  api.ui.onAction("managed-set-keep-running", function (data) {
+    settings.stopWithViboplr = !(data && data.value);
+    api.storage.set("stopWithViboplr", settings.stopWithViboplr).catch(function (e) { console.error("slskd: couldn't save stopWithViboplr:", e); });
+    render();
+    renderSettings();
   });
   // The not-ready banner's "Fix…": the explanation is on top of Settings.
   api.ui.onAction("slskd-show-fix", function () {
@@ -7454,37 +7340,17 @@ function registerActions() {
     render();
     schedulePoll(false);
   });
-  api.ui.onAction("roadie-connect", function () {
-    adoptRoadieConnection("button").then(function (ok) {
-      if (ok) return refreshReadiness();
-      render();
-    }).catch(function (e) { console.error("slskd: Roadie connect failed:", e); });
+  api.ui.onAction("share-collections", function () {
+    shareCollections().catch(function (e) { console.error("slskd: sharing collections failed:", e); });
   });
-  api.ui.onAction("roadie-cancel", function () {
-    if (roadie.job && roadie.job.cancel) roadie.job.cancel();
+  api.ui.onAction("share-confirm", function () {
+    var gap = (shareChange && shareChange.confirm) || [];
+    if (!gap.length) return;
+    shareThroughSlskd(gap).catch(function (e) { console.error("slskd: sharing through slskd failed:", e); });
   });
-  api.ui.onAction("roadie-setup-retry", function () {
-    var s = roadie.setup;
-    if (!s || !s.failed) return;
-    continueSetup(s, s.failed.step).catch(function (e) { console.error("slskd: Roadie setup retry failed:", e); });
-  });
-  api.ui.onAction("roadie-setup-close", function () {
-    roadie.setup = null;
+  api.ui.onAction("share-cancel", function () {
+    shareChange = { error: null };
     render();
-  });
-  api.ui.onAction("roadie-set-share", function (data) {
-    roadieCreds.shareCollections = !!(data && data.value);
-    render();
-  });
-  api.ui.onAction("roadie-set-autostart", function (data) {
-    roadieCreds.autostart = !!(data && data.value);
-    render();
-  });
-  api.ui.onAction("roadie-autostart", function (data) {
-    setRoadieAutostart(!!(data && data.value)).catch(function (e) { console.error("slskd: Roadie autostart change failed:", e); });
-  });
-  api.ui.onAction("roadie-share-collections", function () {
-    shareCollectionsWithRoadie().catch(function (e) { console.error("slskd: sharing collections failed:", e); });
   });
   api.ui.onAction("discover-again", function () {
     discoverSlskd().catch(function (e) { console.error("slskd: looking for slskd failed:", e); });
@@ -7500,77 +7366,51 @@ function registerActions() {
   api.ui.onAction("discover-open", function () {
     if (discovery.found) api.network.openUrl(discovery.found.url).catch(console.error);
   });
-  api.ui.onAction("roadie-share-confirm", function () {
-    var gap = (roadieShare && roadieShare.confirm) || [];
-    if (!gap.length) return;
-    shareThroughSlskd(gap).catch(function (e) { console.error("slskd: sharing through slskd failed:", e); });
+  api.ui.onAction("managed-files-toggle", function () {
+    managedShowFiles = !managedShowFiles;
+    (managedShowFiles ? loadManagedPlaces() : Promise.resolve()).then(render)
+      .catch(function (e) { console.error("slskd: locating slskd's files failed:", e); });
   });
-  api.ui.onAction("roadie-share-cancel", function () {
-    roadieShare = { error: null };
+  api.ui.onAction("managed-details-toggle", function () {
+    managedShowDetails = !managedShowDetails;
     render();
   });
-  api.ui.onAction("roadie-recipe-update", function () {
-    reviewRecipeUpdate().catch(function (e) { console.error("slskd: Roadie recipe update failed:", e); });
-  });
-  // Another slskd runs here: connect to it by hand (it has its own key).
-  api.ui.onAction("roadie-use-other", function () {
-    if (roadie.other && roadie.other.url) {
-      settings.url = roadie.other.url;
-      saveSetting("url", settings.url);
-    }
-    setupPage = "connect";
-    render();
-  });
-  api.ui.onAction("roadie-recheck-other", function () {
-    probeRoadie(true).then(render).catch(function (e) { console.error("slskd: Roadie probe failed:", e); });
-  });
-  api.ui.onAction("roadie-files-toggle", function () {
-    roadieShowFiles = !roadieShowFiles;
-    render();
-  });
-  api.ui.onAction("roadie-details-toggle", function () {
-    roadieShowDetails = !roadieShowDetails;
-    render();
-  });
-  api.ui.onAction("roadie-restart", function () {
-    restartSlskdWithRoadie().catch(function (e) { console.error("slskd: Roadie restart failed:", e); });
-  });
-  api.ui.onAction("roadie-open-path", function (data) {
+  api.ui.onAction("managed-open-path", function (data) {
     if (!data || !data.path || !canOpenPaths()) return;
-    openRoadiePath(String(data.path), !!data.reveal).catch(function (e) { console.error("slskd: open path failed:", e); });
+    openManagedPath(String(data.path), !!data.reveal).catch(function (e) { console.error("slskd: open path failed:", e); });
   });
-  api.ui.onAction("roadie-remove-ask", function () {
-    roadieRemove = { asking: true, error: null };
+  api.ui.onAction("managed-remove-ask", function () {
+    managedRemove = { asking: true, error: null };
     render();
   });
-  api.ui.onAction("roadie-remove-cancel", function () {
-    roadieRemove.asking = false;
+  api.ui.onAction("managed-remove-cancel", function () {
+    managedRemove.asking = false;
     render();
   });
-  api.ui.onAction("roadie-remove", function (data) {
-    uninstallSlskdWithRoadie(!!(data && data.keepData)).catch(function (e) { console.error("slskd: Roadie uninstall failed:", e); });
+  api.ui.onAction("managed-remove", function () {
+    removeManaged().catch(function (e) { console.error("slskd: removing slskd failed:", e); });
   });
   // Every keystroke arrives; the view re-renders only when the Install
   // button's enabled state flips.
-  function setCred(key, value) {
-    var was = roadieCredsComplete(roadieCreds);
-    roadieCreds[key] = value || "";
-    if (roadieCredsComplete(roadieCreds) !== was) render();
+  function setField(key, value) {
+    var was = installFormComplete(installForm);
+    installForm[key] = value || "";
+    if (installFormComplete(installForm) !== was) render();
   }
-  api.ui.onAction("roadie-set-user", function (data) { setCred("username", data && data.value); });
-  api.ui.onAction("roadie-set-user:submit", function (data) { setCred("username", data && data.value); });
-  api.ui.onAction("roadie-set-pass", function (data) { setCred("password", data && data.value); });
-  api.ui.onAction("roadie-set-pass:submit", function (data) {
-    setCred("password", data && data.value);
-    installSlskdWithRoadie().catch(function (e) { console.error("slskd: Roadie install failed:", e); });
+  api.ui.onAction("install-set-user", function (data) { setField("username", data && data.value); });
+  api.ui.onAction("install-set-user:submit", function (data) { setField("username", data && data.value); });
+  api.ui.onAction("install-set-pass", function (data) { setField("password", data && data.value); });
+  api.ui.onAction("install-set-pass:submit", function (data) {
+    setField("password", data && data.value);
+    installSlskd().catch(function (e) { console.error("slskd: install failed:", e); });
   });
 
   api.ui.onAction("test-connection", function () {
     return checkConnection();
   });
 
-  // A typed address or key is the user's own: it ends Roadie's management of
-  // the connection, so nothing overwrites what they typed.
+  // A typed address or key is the user's own: the plugin stops treating the
+  // connection as the slskd it installed, so nothing overwrites what they typed.
   function userSetsConnection(key, value) {
     webLogin = null;
     if (settings.managedBy && value !== settings[key]) {
@@ -9531,7 +9371,7 @@ function schedulePoll(fast) {
 // Lifecycle
 // ---------------------------------------------------------------------------
 async function loadSettings() {
-  var keys = ["url", "apiKey", "tierOverride", "insecure", "preferredFormats", "fallbackQuality", "fallbackMaxGb", "fallbackMaxAgeDays", "upgradeTarget", "batchSeq", "managedBy", "debugServer", "debugUrl"];
+  var keys = ["url", "apiKey", "tierOverride", "insecure", "preferredFormats", "fallbackQuality", "fallbackMaxGb", "fallbackMaxAgeDays", "upgradeTarget", "batchSeq", "managedBy", "stopWithViboplr", "startWithViboplr", "debugServer", "debugUrl"];
   for (var i = 0; i < keys.length; i++) {
     try {
       var v = await api.storage.get(keys[i]);
@@ -9539,6 +9379,14 @@ async function loadSettings() {
     } catch (e) {
       console.error("slskd: couldn't read setting " + keys[i] + ":", e);
     }
+  }
+  await loadManagedRecord();
+  // "roadie" is from plugin versions that ran slskd through Roadie, which
+  // Viboplr no longer carries: the address stays (it is just a slskd now),
+  // and one the plugin installed needs its install record.
+  if (settings.managedBy && !(settings.managedBy === "plugin" && managed.record)) {
+    settings.managedBy = null;
+    api.storage.set("managedBy", null).catch(function (e) { console.error("slskd: couldn't save managedBy:", e); });
   }
   await loadServerState();
 }
@@ -9746,6 +9594,10 @@ async function activate(hostApi) {
   renderSettings();
 
   await refreshReadiness();
+  if (shouldStartWithViboplr(settings, managed)) {
+    // Not awaited: a start waits for slskd to come up, and activation must not.
+    startManaged().catch(function (e) { console.error("slskd: starting slskd with Viboplr failed:", e); });
+  }
   if (readiness.state === "unconfigured") {
     discoverSlskd().catch(function (e) { console.error("slskd: looking for slskd failed:", e); });
   }
@@ -9771,7 +9623,7 @@ function deactivate() {
   completionsSeeded = false;
   lastResolve = null;
   fallbackBusy = false;
-  roadie.setup = null;   // ends a setup's sign-in wait
+  managed.setup = null;  // ends a setup's sign-in wait
   api = null;
 }
 
@@ -9831,51 +9683,48 @@ return {
   _whatIsThisUrl: whatIsThisUrl,
   _setupHomeView: setupHomeView,
   _wantsSetupScreen: wantsSetupScreen,
-  _webLoginFromRoadie: webLoginFromRoadie,
   _readinessBanner: readinessBanner,
   _viewHeaderFor: viewHeaderFor,
   _fixNodes: fixNodes,
   _collectionPaths: collectionPaths,
-  _installShareDirs: installShareDirs,
-  _roadieCanShareDirs: roadieCanShareDirs,
+  _installShares: installShares,
+  _renderSlskdYml: renderSlskdYml,
+  _slskdAssetFor: slskdAssetFor,
+  _slskdDownloadFor: slskdDownloadFor,
+  _slskdBinaryName: slskdBinaryName,
+  _versionLess: versionLess,
+  _portLooksFree: portLooksFree,
+  _managedFailure: managedFailure,
+  _managedCapable: managedCapable,
+  _managedStartSpec: managedStartSpec,
+  _managedUpdateRows: managedUpdateRows,
+  _managedFileRows: managedFileRows,
+  _managedRemoveRows: managedRemoveRows,
+  _installFormComplete: installFormComplete,
+  _usesManaged: usesManaged,
+  _SLSKD_RELEASE: SLSKD_RELEASE,
   _describeFolders: describeFolders,
   _installRows: installRows,
   _connectionSection: connectionSection,
-  _roadieAutoConfigAction: roadieAutoConfigAction,
-  _autoInstallStage: autoInstallStage,
-  _parseRoadieJson: parseRoadieJson,
-  _roadieProgress: roadieProgress,
-  _roadieInstallArgs: roadieInstallArgs,
-  _roadieUninstallArgs: roadieUninstallArgs,
-  _roadieRemoveRows: roadieRemoveRows,
-  _roadieFileRows: roadieFileRows,
-  _roadieFilePlaces: roadieFilePlaces,
   _shareGap: shareGap,
   _yamlWithShares: yamlWithShares,
   _sharedFromSlskd: sharedFromSlskd,
-  _otherInstanceNodes: otherInstanceNodes,
-  _recipeUpdateInfo: recipeUpdateInfo,
   _discoveryCandidates: discoveryCandidates,
   _slskdFingerprint: slskdFingerprint,
   _discoveryNodes: discoveryNodes,
-  _sharedDirsWith: sharedDirsWith,
   _sharingRows: sharingRows,
-  _roadieOwnsAddress: roadieOwnsAddress,
+  _managedOwnsAddress: managedOwnsAddress,
   _unauthorizedNodes: unauthorizedNodes,
   _disconnectedNodes: disconnectedNodes,
   _apiLogMessages: apiLogMessages,
   _checkedAgo: checkedAgo,
-  _roadieFailure: roadieFailure,
-  _roadieHasUnusedSlskd: roadieHasUnusedSlskd,
   _newSetup: newSetup,
   _advanceSetup: advanceSetup,
   _failSetup: failSetup,
-  _setupStepForLine: setupStepForLine,
   _setupChecklist: setupChecklist,
   _signinFailure: signinFailure,
   _signinProgress: signinProgress,
   _signinReasonFromLog: signinReasonFromLog,
-  _roadieCredsComplete: roadieCredsComplete,
   _setSigninTiming: function (waitMs, pollMs, settleMs) { SIGNIN_WAIT_MS = waitMs; SIGNIN_POLL_MS = pollMs; if (settleMs != null) START_SETTLE_MS = settleMs; },
   _hostOf: hostOf,
   _searchQueryForTarget: searchQueryForTarget,

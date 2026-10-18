@@ -1,25 +1,27 @@
 {
   "id": "slskd",
   "name": "Soulseek",
-  "version": "0.24.0",
+  "version": "0.25.0",
   "author": "Viboplr",
   "description": "Search and download from the Soulseek network via a slskd daemon: ranked results, whole-album grabs, live transfer progress, finished files that play and reach your library, and a playback fallback that fetches a missing track from Soulseek.",
   "minAppVersion": "1.0.85",
   "runtime": "worker",
   "permissions": [
     "network:*",
-    "exec:roadie",
     "files:read",
     "system:open",
     "library:read",
     "library:write",
     "playback:control"
   ],
+  "optionalPermissions": [
+    "programs:run"
+  ],
   "permissionReasons": {
     "network:*": "Talk to the slskd server at the address you set, which can be on any host, and find one running on this computer",
-    "exec:roadie": "Ask Roadie to install or start slskd, each step after you approve it, and read the address and key it reports",
+    "programs:run": "Only if you install slskd here: fetch its official release, check its checksum, run it in the background",
     "files:read": "Read title, artist and album from finished downloads instead of guessing from the file name",
-    "system:open": "Open slskd's web page, the setup guides, and the folders where Roadie keeps slskd's settings",
+    "system:open": "Open slskd's web page, the setup guides, and the folders where slskd keeps its files",
     "library:read": "Check your copy's quality before an upgrade, an album's missing tracks, and whether downloads land in a collection",
     "library:write": "Rescan a collection when a download lands in it, and swap in a better copy once you approve it",
     "playback:control": "Play finished Soulseek downloads from the Downloads tab"
@@ -31,12 +33,6 @@
   "viewHeader": {
     "subtitle": "Search and download from the Soulseek network"
   },
-  "binaryDependencies": [
-    {
-      "name": "roadie",
-      "reason": "Optional: installs and runs slskd for you, each step after you approve it"
-    }
-  ],
   "contributes": {
     "assistant": {
       "instructions": "Fetch music from the Soulseek peer-to-peer network through the user's slskd daemon. Flow: status (connected? signed in? where do downloads land?) → search (a real network search, ~5-30s; results are ranked best-first and carry an id) → download with one or more result ids. A download sits in another user's upload queue — it can take minutes or hours — so watch it with list_downloads rather than waiting. download is a real transfer the user's daemon performs: only download what the user actually asked for. Finished files play from the Downloads tab, and land in the library automatically when slskd's downloads folder is inside a collection. Upgrading a library track to a better copy, two ways: (a) interactive — search with upgradeFor=<library track id> (only files that beat the copy in hand), let the user pick, download, watch list_downloads until the row has a uri; (b) automatic — upgrade with the track id (this plugin searches, downloads and checks the file itself), watch list_upgrades until state is ready. Either way the finished file's uri goes to Viboplr's replace_track_file, which stages it and shows current vs new; replace only after the user says yes.",
