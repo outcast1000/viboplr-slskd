@@ -1794,7 +1794,11 @@ function readinessBanner(st, cfg, m, why, onSettings) {
   var fix = onSettings ? [] : [actionButton("Fix…", "slskd-show-fix")];
   var text, variant, buttons;
   if (st === "unreachable" && ours) {
-    text = "slskd isn't running. Search, downloads and the playback fallback need it.";
+    // Why it isn't running, when the last start failed (e.g. the user said no
+    // to running programs): without it the banner only restates the symptom.
+    text = m && m.error && !busy
+      ? "slskd isn't running. " + m.error
+      : "slskd isn't running. Search, downloads and the playback fallback need it.";
     variant = "warning";
     buttons = [actionButton("Start slskd", "managed-start", "accent", { disabled: busy })];
   } else if (st === "unreachable") {
@@ -3514,58 +3518,61 @@ function whatIsThisUrl(apiKey, collections) {
 // Installing slskd on this computer (api.system.programs)
 // ---------------------------------------------------------------------------
 // One of three ways to get slskd (the others: the manual guide, and connecting
-// to one the user runs). Viboplr knows nothing about slskd: it offers generic
-// primitives — download into the plugin's own folder, unpack, run, start and
-// stop in the background — and asks the user before each install. It never
-// starts a program by itself: the plugin starts slskd when Viboplr opens
-// (settings.startWithViboplr) or when the user asks. Everything
-// slskd-specific is here: which build, its pinned checksum, slskd.yml, how to
-// stop it gracefully.
+// to one the user runs). Viboplr installs slskd as one of its own tools: the
+// manifest's binaryDependencies entry says where it comes from (slskd/slskd's
+// GitHub releases, checked against GitHub's checksum), and Viboplr downloads
+// it on the user's click, lists it in Extensions → Tools and announces its
+// updates there. The plugin only starts and stops it
+// (api.system.programs.start({ dependency: "slskd" })) and writes its
+// settings. Viboplr never starts it by itself, except to restart it around an
+// update the user clicked: the plugin starts slskd when Viboplr opens
+// (settings.startWithViboplr) or when the user asks.
 //
 // Where things live (the plugin's own storage folder, `api.storage.files`):
 //
-//   slskd/<version>/            the unpacked release (slskd + wwwroot/ …)
 //   slskd/data/slskd.yml        written once at install; slskd owns it after
 //   slskd/data/app/             slskd's app directory (database, its own logs)
 //   slskd/data/extract/         .NET's single-file extraction folder
 //   slskd/data/incomplete/      partial downloads (here, so no folder outside
 //                               the store has to be created for slskd)
-//   slskd/download/<zip>        the release while it is unpacked
 //   logs/slskd.log              slskd's output (the host writes it)
 //
-// The permission it needs (`programs:run` + the release hosts) is an OPTIONAL
-// one in the manifest: a user who runs their own slskd is never asked for it.
-// The host asks the first time the install needs it, then confirms each
-// download. Nothing here runs without the user's click.
+// The program itself is Viboplr's, in its shared tools folder. Plugin versions
+// up to 0.25.0 downloaded slskd into this store instead (slskd/<version>/): a
+// record without `source: "host"` is such a copy. It keeps starting from there
+// and offers one row, Move, which switches it to Viboplr's copy; it gets no
+// updates until it moves.
+//
+// The permission it needs (`programs:run`) is an OPTIONAL one in the manifest:
+// a user who runs their own slskd is never asked for it. Nothing here runs
+// without the user's click.
 
-// The slskd build this plugin installs, checksummed when it was pinned. A new
-// slskd reaches users with a plugin release; the plugin's signature covers
-// these hashes.
-var SLSKD_RELEASE = {
-  version: "0.26.1",
-  url: "https://github.com/slskd/slskd/releases/download/0.26.1/slskd-0.26.1-{asset}.zip",
-  sha256: {
-    "osx-arm64": "5cf79a4d41ad40906aababc6bd05585899f102e7c544e38157df747f01cb6f4b",
-    "osx-x64": "ccc278d659a658787a575cc40a0be9a19511e0578ba457a4c0675db987e4e8e7",
-    "win-x64": "14928215e6931f291dbc489cbeeccffba6d1aa0d5b94d4262705a596407d50d3",
-    "win-arm64": "bf0c4fcbfab58350a6684925c0e744c940aa4b6a0a282ddbefb8a2b619ff09ed"
-  }
-};
 var MANAGED_NAME = "slskd";          // the program's name in api.system.programs
+var SLSKD_TOOL = "slskd";            // the tool's name in binaryDependencies / Extensions → Tools
 var MANAGED_RECORD_KEY = "managedSlskd";
 var MANAGED_DIR = "slskd";
 var MANAGED_LISTEN_PORT = 50300;     // Soulseek's incoming connections (slskd's default)
 var MANAGED_WEB_PORTS = [5030, 5031, 5032, 5033, 5034, 5035, 5036, 5037, 5038, 5039];
 var MANAGED_STOP_GRACE_SECS = 15;
 var INSTALL_DECLINED = "Install declined";
+// What programs.start rejects with when the user says no to "Run slskd in the
+// background?" (the host's DEPENDENCY_RUN_DECLINED).
+var RUN_DECLINED = "Run declined";
+// After asking Viboplr to install slskd: how often to look whether it landed,
+// and for how long. The install dialog is the user's; they may take a while.
+var TOOL_POLL_MS = 3000;
+var TOOL_WAIT_MS = 5 * 60 * 1000;
 
-// supported: this host can install programs for a plugin; record: what the
-// install left (storage `managedSlskd`: { version, asset, port, webUsername,
-// webPassword, downloadsDir, installedAt }); status: the host's last
-// api.system.programs.status; job: a start / stop / update / share the user
+// supported: this host can install slskd as its tool and run it; dep: what
+// the host says about that tool (api.system.getDependency: { installed,
+// version, origin, latest }, or null when no definition is in force); record:
+// what the install left (storage `managedSlskd`: { source: "host", port,
+// webUsername, webPassword, downloadsDir, installedAt } — a legacy store copy
+// has { version, asset } instead of source); status: the host's last
+// api.system.programs.status; job: a start / stop / move / share the user
 // started ({ kind, line, percent }); error: the last failure, shown until the
 // next attempt; setup: the install checklist while it runs.
-var managed = { supported: false, platform: null, record: null, status: null, job: null, error: null, setup: null };
+var managed = { supported: false, dep: null, record: null, status: null, job: null, error: null, setup: null };
 // What slskd itself shares (GET /api/v0/shares), read once slskd is ready;
 // null when not read.
 var slskdShared = null;
@@ -3577,37 +3584,44 @@ var slskdShared = null;
 // `shareCollections`: share the user's Viboplr collections on Soulseek — on
 // unless they turn it off, because Soulseek queues people who share nothing
 // behind everyone else.
+// `downloadsDir` starts as <Downloads>/Soulseek (prefillDownloadsDir), so the
+// form needs no picking before it works.
 var installForm = { username: "", password: "", downloadsDir: "", autostart: true, shareCollections: true };
 
-// Pure: the release asset for the platform Vibo reports, or null (no build,
-// e.g. Linux on this plugin's release list).
-function slskdAssetFor(platform) {
-  if (!platform) return null;
-  var os = platform.os === "macos" ? "osx" : (platform.os === "windows" ? "win" : null);
-  var arch = platform.arch === "arm64" ? "arm64" : (platform.arch === "x64" ? "x64" : null);
-  if (!os || !arch) return null;
-  var asset = os + "-" + arch;
-  return SLSKD_RELEASE.sha256[asset] ? asset : null;
-}
-
+// Pure: the program file inside a legacy store copy (slskd/<version>/).
 function slskdBinaryName(asset) {
   return /^win-/.test(String(asset || "")) ? "slskd.exe" : "slskd";
 }
 
-// Pure: { url, sha256, file } for an asset.
-function slskdDownloadFor(asset) {
-  var url = SLSKD_RELEASE.url.replace("{asset}", asset);
-  return { url: url, sha256: SLSKD_RELEASE.sha256[asset], file: url.slice(url.lastIndexOf("/") + 1) };
+// Pure: the record is Viboplr's copy of slskd, not a legacy store copy.
+function isHostRecord(record) {
+  return !!(record && record.source === "host");
 }
 
-// Pure: "0.26.1" < "0.27.0" — what the update row compares.
-function versionLess(a, b) {
-  var pa = String(a || "").split(".").map(Number), pb = String(b || "").split(".").map(Number);
-  for (var i = 0; i < Math.max(pa.length, pb.length); i++) {
-    var x = pa[i] || 0, y = pb[i] || 0;
-    if (x !== y) return x < y;
+// Pure: the tool is installed as Viboplr's own copy (a system copy on PATH is
+// the user's, and Viboplr never starts it).
+function hostToolReady(dep) {
+  return !!(dep && dep.installed && dep.origin === "managed");
+}
+
+// Pure: "<downloads>/Soulseek", with the separator the folder already uses.
+function defaultDownloadsDir(folders) {
+  var d = folders && typeof folders.downloads === "string" ? trimDir(folders.downloads) : "";
+  if (!d) return "";
+  var sep = d.indexOf("\\") >= 0 && d.indexOf("/") < 0 ? "\\" : "/";
+  return d + sep + "Soulseek";
+}
+
+// The form's downloads folder starts as <Downloads>/Soulseek when the host
+// can say where Downloads is; otherwise the user picks one.
+async function prefillDownloadsDir() {
+  if (installForm.downloadsDir || !api || !api.system || typeof api.system.userFolders !== "function") return;
+  try {
+    var dir = defaultDownloadsDir(await api.system.userFolders());
+    if (dir && !installForm.downloadsDir) installForm.downloadsDir = dir;
+  } catch (e) {
+    console.error("slskd: couldn't read the Downloads folder:", e);
   }
-  return false;
 }
 
 // 24 random alphanumerics for slskd's web sign-in. Math.random is all the
@@ -3686,18 +3700,38 @@ function installFormComplete(form) {
 // Pure: what a failed program call means to the user. The host rejects an
 // install the user turned down with "Install declined", and a permission they
 // refused with a PermissionError naming it.
-function managedFailure(e) {
+// `kind` is what was being done ("start", "restart", "move"…); a refused
+// permission means something different for a start than for an install.
+function managedFailure(e, kind) {
   var msg = String((e && e.message) || e || "");
+  var starting = kind === "start" || kind === "restart";
   if (msg === INSTALL_DECLINED) return { declined: true, message: "You cancelled the install." };
-  if (/^Permission denied/.test(msg)) return { declined: true, message: "Viboplr wasn't allowed to install programs for this plugin, so nothing was installed." };
+  if (msg.indexOf(RUN_DECLINED) === 0) return { declined: true, message: "You didn't allow slskd to run in the background, so it wasn't started." };
+  if (/^Permission denied/.test(msg)) {
+    return { declined: true, message: starting
+      ? "You didn't allow Soulseek to run programs, so slskd wasn't started. Start slskd asks again."
+      : "Viboplr wasn't allowed to install programs for this plugin, so nothing was installed." };
+  }
   if (/already running/i.test(msg)) return { declined: false, message: "Another copy of slskd is already running on this computer. Quit it (or connect Viboplr to it instead), then try again." };
   return { declined: false, message: msg || "Something went wrong." };
 }
 
-// Pure: the host can install programs for this plugin.
+// Pure: the host can install slskd as its own tool and run it for this
+// plugin (Viboplr 1.0.113+). Whether slskd's definition is in force is
+// `managed.dep`, read from the host.
 function managedCapable(a) {
   return !!(a && a.system && a.system.programs && typeof a.system.programs.start === "function" &&
-    typeof a.system.platform === "function" && a.ui && typeof a.ui.pickFolder === "function");
+    typeof a.system.getDependency === "function" &&
+    a.ui && typeof a.ui.pickFolder === "function" && typeof a.ui.requestAction === "function");
+}
+
+// Pure: "Install automatically" can be offered: a capable host. slskd's
+// definition need not be in force yet — an unsigned (side-loaded or dev) copy's
+// waits for the user's consent, which the host asks for when the install
+// requests the tool (`require-dependency`). minAppVersion 1.0.113 guarantees a
+// host that accepts the definition at all.
+function canInstallHere(m) {
+  return !!(m && m.supported);
 }
 
 // Pure: the address the plugin talks to is the slskd it installed: a loopback
@@ -3725,7 +3759,7 @@ function usesManaged(cfg, m) {
 async function loadManagedRecord() {
   try {
     var r = await api.storage.get(MANAGED_RECORD_KEY);
-    managed.record = r && typeof r === "object" && r.version ? r : null;
+    managed.record = r && typeof r === "object" && (r.version || r.source === "host") ? r : null;
   } catch (e) {
     console.error("slskd: couldn't read the install record:", e);
     managed.record = null;
@@ -3746,9 +3780,12 @@ async function saveManagedRecord(r) {
 // process is spawned), so it runs on every readiness pass while installed.
 async function probeManaged() {
   managed.supported = managedCapable(api);
-  if (!managed.supported) { managed.status = null; return; }
-  if (!managed.platform) {
-    try { managed.platform = await api.system.platform(); } catch (e) { console.error("slskd: platform unknown:", e); }
+  if (!managed.supported) { managed.status = null; managed.dep = null; return; }
+  try {
+    managed.dep = await api.system.getDependency(SLSKD_TOOL);
+  } catch (e) {
+    console.error("slskd: couldn't read the slskd tool's status:", e);
+    managed.dep = null;
   }
   if (!managed.record) { managed.status = null; return; }
   try {
@@ -3770,9 +3807,13 @@ async function storePath(segments, ensureDir) {
 }
 
 // Pure: what api.system.programs.start gets, from paths already resolved.
+// Viboplr's copy is named by the tool (the host finds it, and its working
+// folder is this plugin's store); a legacy store copy by its path.
 function managedStartSpec(record, paths, outliveApp) {
-  return {
-    path: [MANAGED_DIR, record.version, slskdBinaryName(record.asset)],
+  var where = isHostRecord(record)
+    ? { dependency: SLSKD_TOOL }
+    : { path: [MANAGED_DIR, record.version, slskdBinaryName(record.asset)] };
+  return Object.assign(where, {
     args: ["--app-dir", paths.app, "--config", paths.config, "--no-logo"],
     env: {
       // .NET unpacks a single-file app on first run; keep that inside the
@@ -3782,7 +3823,7 @@ function managedStartSpec(record, paths, outliveApp) {
       DOTNET_NOLOGO: "1"
     },
     outliveApp: outliveApp !== false
-  };
+  });
 }
 
 async function managedPaths() {
@@ -3816,26 +3857,32 @@ async function pickFreePort() {
   return null;
 }
 
-// Download, verify and unpack one release into slskd/<version>/, and check
-// the binary runs. `onProgress(received, total)` follows the download.
-async function fetchRelease(asset, onProgress) {
-  var d = slskdDownloadFor(asset);
-  var zip = [MANAGED_DIR, "download", d.file];
-  // A download that failed or was turned down earlier may have left its file.
-  try { await api.storage.files.remove([MANAGED_DIR, "download"]); } catch (e) { console.error("slskd: couldn't clear old downloads:", e); }
-  await api.system.programs.download(zip, d.url, { sha256: d.sha256, label: "slskd " + SLSKD_RELEASE.version, onProgress: onProgress });
-  var dest = [MANAGED_DIR, SLSKD_RELEASE.version];
-  await api.system.programs.extract(zip, dest);
-  try { await api.storage.files.remove([MANAGED_DIR, "download"]); } catch (e) { console.error("slskd: couldn't remove the downloaded zip:", e); }
-  var extract = await storePath([MANAGED_DIR, "data", "extract"], true);
-  var probe = await api.system.programs.run(dest.concat([slskdBinaryName(asset)]), ["--version"], {
-    env: { DOTNET_BUNDLE_EXTRACT_BASE_DIR: extract, DOTNET_CLI_TELEMETRY_OPTOUT: "1", DOTNET_NOLOGO: "1" },
-    timeoutSecs: 120
-  });
-  var out = String(probe.stdout || "") + String(probe.stderr || "");
-  if (probe.exitCode !== 0 || out.indexOf(SLSKD_RELEASE.version) < 0) {
-    throw new Error("slskd didn't run on this computer: " + (out.trim().split("\n").pop() || "exit code " + probe.exitCode));
+// Make sure Viboplr has its copy of slskd: already there, or ask Viboplr to
+// install it (its own dialog: "slskd is needed …", with the download and the
+// checksum check) and look every few seconds until it lands. Resolves with
+// the tool's status, or null once `isCurrent()` says nobody is waiting any
+// more (Cancel, a deactivate). The host tells the plugin nothing when the
+// dialog closes, so a dialog turned down shows up as the wait running out.
+async function ensureHostTool(isCurrent) {
+  var dep = await api.system.getDependency(SLSKD_TOOL);
+  if (hostToolReady(dep)) return dep;
+  if (dep && dep.installed && dep.origin === "system") {
+    throw new Error("slskd is already installed on this computer outside Viboplr" + (dep.version ? " (" + dep.version + ")" : "") + ". Viboplr doesn't start that copy: start it the way you installed it and connect to it instead.");
   }
+  api.ui.requestAction("require-dependency", { name: SLSKD_TOOL, feature: "Running slskd for you" });
+  var until = Date.now() + TOOL_WAIT_MS;
+  while (Date.now() < until) {
+    await sleep(TOOL_POLL_MS);
+    if (!api || !isCurrent()) return null;
+    try {
+      dep = await api.system.getDependency(SLSKD_TOOL);
+    } catch (e) {
+      console.error("slskd: couldn't read the slskd tool's status:", e);
+      dep = null;
+    }
+    if (hostToolReady(dep)) return dep;
+  }
+  throw new Error("slskd wasn't installed. Install it from Viboplr's dialog (or Extensions → Tools), then try again.");
 }
 
 // ---- The install: one screen, one checklist ------------------------------
@@ -3847,9 +3894,7 @@ async function fetchRelease(asset, onProgress) {
 // slskd's server state.
 
 var SETUP_STEPS = [
-  { id: "approve", label: "Allow it in Viboplr's dialogs" },
-  { id: "download", label: "Download slskd" },
-  { id: "unpack", label: "Unpack and check it" },
+  { id: "approve", label: "Install slskd in Viboplr" },
   { id: "start", label: "Start slskd" },
   { id: "connect", label: "Connect Viboplr" },
   { id: "signin", label: "Sign in to Soulseek" }
@@ -3891,8 +3936,7 @@ function setupChecklist(s) {
     if (step.id === "signin" && s.username) label = "Sign in to Soulseek as " + s.username;
     var detail = null;
     if (state === "failed") detail = s.failed.message;
-    else if (state === "active" && step.id === "approve") detail = "Viboplr asks before it installs a program for a plugin.";
-    else if (state === "active" && step.id === "download" && s.percent != null) detail = s.percent + "%";
+    else if (state === "active" && step.id === "approve") detail = "Viboplr asks before it installs anything: press Install in its dialog. Once installed, slskd appears in Extensions → Tools, where Viboplr keeps it up to date.";
     else if (state === "active" && step.id === "signin" && s.progress) detail = s.progress;
     return { id: step.id, label: label, state: state, detail: detail };
   });
@@ -3998,26 +4042,17 @@ async function installSlskd() {
 }
 
 async function installSteps(s, form) {
-  var asset = slskdAssetFor(managed.platform);
-  if (!asset) throw new Error("There's no slskd build for this computer in this plugin. Use the manual guide instead.");
   managed.error = null;
-  await fetchRelease(asset, function (received, total) {
-    if (managed.setup !== s) return;
-    advanceSetup(s, "download");
-    if (s.at === setupIndex("download") && total) s.percent = Math.min(99, Math.round(received / total * 100));
-    render();
-  });
-  if (managed.setup !== s) return;
-  advanceSetup(s, "unpack");
-  render();
+  var dep = await ensureHostTool(function () { return managed.setup === s; });
+  if (!dep || managed.setup !== s) return;
+  managed.dep = dep;
 
   var port = await pickFreePort();
   if (!port) throw new Error("Ports " + MANAGED_WEB_PORTS[0] + "–" + MANAGED_WEB_PORTS[MANAGED_WEB_PORTS.length - 1] + " are all taken on this computer, so slskd has no port for its web page.");
   ensureSetupKey();
   await loadCollections();
   var record = {
-    version: SLSKD_RELEASE.version,
-    asset: asset,
+    source: "host",
     port: port,
     webUsername: "viboplr",
     webPassword: randomPassword(),
@@ -4037,11 +4072,17 @@ async function installSteps(s, form) {
     soulseekPassword: String(form.password)
   }));
   await saveManagedRecord(record);
-  api.log("info", "slskd " + record.version + " installed (" + asset + ", port " + port + ")", "slskd");
+  api.log("info", "slskd " + (dep.version || "") + " set up (Viboplr's copy, port " + port + ")", "slskd");
 
   advanceSetup(s, "start");
   render();
-  await startManagedProcess();
+  try {
+    await startManagedProcess();
+  } catch (e) {
+    // "Don't allow" in the run dialog: nothing is left half set up.
+    if (managedFailure(e).declined) await saveManagedRecord(null);
+    throw e;
+  }
   await setStartWithViboplr(!!form.autostart);
   await probeManaged();
   await continueSetup(s, "connect");
@@ -4148,16 +4189,15 @@ function setupProgressView() {
   for (var i = 0; i < rows.length; i++) {
     var row = rows[i];
     children.push({ type: "text", content: glyph[row.state] + "  " + row.label, className: row.state === "pending" ? MUTED : undefined });
-    if (row.id === "download" && row.state === "active" && s.percent != null) {
-      children.push({ type: "progress-bar", value: s.percent, max: 100 });
-    } else if (row.detail) {
-      children.push(mutedText(row.detail));
-    }
+    if (row.detail) children.push(mutedText(row.detail));
   }
   var buttons = [];
-  if (s.failed) {
+  if (!s.failed && s.at === setupIndex("approve")) {
+    // Waiting on Viboplr's dialog: a way out that doesn't need it.
+    buttons.push({ label: "Cancel", action: "install-close", variant: "secondary" });
+  } else if (s.failed) {
     var step = s.failed.step;
-    if (step === "approve" || step === "download" || step === "unpack") {
+    if (step === "approve") {
       buttons.push({ label: "Back", action: "install-close", variant: "accent" });
     } else {
       buttons.push({ label: step === "signin" ? "Check again" : "Try again", action: "install-retry", variant: "accent" });
@@ -4203,7 +4243,7 @@ async function runManagedJob(kind, line, fn) {
     await fn(managed.job);
   } catch (e) {
     console.error("slskd: " + kind + " failed:", e);
-    managed.error = managedFailure(e).message;
+    managed.error = managedFailure(e, kind).message;
   } finally {
     managed.job = null;
     await probeManaged();
@@ -4230,28 +4270,35 @@ function restartManaged() {
   });
 }
 
-// A newer slskd pinned in this plugin: download it (Viboplr asks first),
-// check it runs, then swap it in for the running one. The settings file is
-// slskd's and stays as it is.
-function updateManaged() {
-  return runManagedJob("update", "Waiting for you to allow the download…", async function (job) {
-    var asset = managed.record.asset;
-    var old = managed.record.version;
-    await fetchRelease(asset, function (received, total) {
-      job.line = "Downloading slskd " + SLSKD_RELEASE.version + "…";
-      job.percent = total ? Math.min(99, Math.round(received / total * 100)) : null;
-      render();
-    });
-    job.line = "Restarting slskd on the new version…";
-    job.percent = null;
+// A legacy store copy (slskd/<version>/ from plugin ≤ 0.25.0) moves to
+// Viboplr's copy: Viboplr installs it (it asks), the old one stops, the same
+// slskd.yml and data start on Viboplr's copy, and the old folder goes. If the
+// new copy won't start, the old one starts again and nothing is deleted.
+function moveManaged() {
+  return runManagedJob("move", "Waiting for Viboplr to install slskd…", async function (job) {
+    var legacy = managed.record;
+    if (!legacy || isHostRecord(legacy)) return;
+    var dep = await ensureHostTool(function () { return managed.job === job; });
+    if (!dep) return;
+    managed.dep = dep;
+    job.line = "Moving slskd to Viboplr's copy…";
     render();
     await stopManagedProcess();
-    await saveManagedRecord(Object.assign({}, managed.record, { version: SLSKD_RELEASE.version }));
-    await startManagedProcess();
-    if (old && old !== SLSKD_RELEASE.version) {
-      try { await api.storage.files.remove([MANAGED_DIR, old]); } catch (e) { console.error("slskd: couldn't remove the old version:", e); }
+    var moved = Object.assign({}, legacy, { source: "host" });
+    delete moved.version;
+    delete moved.asset;
+    await saveManagedRecord(moved);
+    try {
+      await startManagedProcess();
+    } catch (e) {
+      console.error("slskd: Viboplr's copy didn't start; back to the old one:", e);
+      await saveManagedRecord(legacy);
+      try { await startManagedProcess(); } catch (e2) { console.error("slskd: the old copy didn't start either:", e2); }
+      throw e;
     }
-    api.log("info", "slskd updated " + old + " → " + SLSKD_RELEASE.version, "slskd");
+    try { await api.storage.files.remove([MANAGED_DIR, legacy.version]); } catch (e) { console.error("slskd: couldn't remove the old copy:", e); }
+    api.log("info", "slskd moved from the plugin's copy (" + legacy.version + ") to Viboplr's (" + (dep.version || "?") + ")", "slskd");
+    managedPlaces = null;
     await awaitSlskdUp();
   });
 }
@@ -4326,7 +4373,9 @@ function managedRemoveRows(rm, job) {
   if (rm.asking) {
     return [
       { type: "settings-row", label: "Remove slskd?",
-        description: "slskd stops and is deleted from this computer, with its settings and Soulseek login. Your downloads and shared folders stay where they are." },
+        description: isHostRecord(managed.record)
+          ? "slskd stops, and its settings, data and Soulseek login are deleted. Your downloads and shared folders stay where they are. Viboplr's copy of the program stays in Extensions → Tools; remove it there if nothing else uses it."
+          : "slskd stops and is deleted from this computer, with its settings and Soulseek login. Your downloads and shared folders stay where they are." },
       buttonRow([
         actionButton("Remove slskd", "managed-remove", "accent"),
         actionButton("Cancel", "managed-remove-cancel")
@@ -4645,6 +4694,16 @@ function keepRunningRow() {
     control: { type: "toggle", label: "", action: "managed-set-keep-running", checked: !settings.stopWithViboplr } };
 }
 
+// Pure: the downloads row's text — where finished files go, and whether they
+// reach the library by themselves (only inside a local collection).
+function downloadsFolderText(folder, collections) {
+  if (!folder) return "Where finished downloads go.";
+  var col = collectionForPath(folder, collections);
+  return folder + " — where finished downloads go. " + (col
+    ? "It's inside your " + (col.name || "collection") + " collection, so finished files reach your library by themselves."
+    : "Finished files won't appear in your library on their own: pick a folder inside one of your collections for that.");
+}
+
 function installFormSection() {
   var folder = String(installForm.downloadsDir || "");
   return {
@@ -4657,7 +4716,7 @@ function installFormSection() {
       { type: "settings-row", label: "Soulseek password",
         control: { type: "text-input", placeholder: "password", action: "install-set-pass", password: true, value: installForm.password } },
       mutedText("No account yet? Soulseek has no sign-up page: choose a username nobody else uses and a password, and the account is created the first time slskd signs in. Keep the password somewhere safe; Soulseek can't reset it."),
-      optionRow("Downloads folder", folder || "Where finished downloads go. Pick a folder inside one of your collections and they reach your library by themselves.",
+      optionRow("Downloads folder", downloadsFolderText(folder, localCollections),
         actionButton(folder ? "Change…" : "Choose…", "install-pick-folder", folder ? "secondary" : "accent")),
       autostartRow("install-set-autostart", installForm.autostart)
     ].concat(shareCollectionsRows(), [
@@ -4725,7 +4784,8 @@ async function loadManagedPlaces() {
   var places = [];
   var cfg = await get([MANAGED_DIR, "data", "slskd.yml"]);
   if (cfg) places.push({ label: "Settings file", path: cfg, reveal: true });
-  var bin = await get([MANAGED_DIR, managed.record.version]);
+  // Viboplr's copy lives in its tools folder (Extensions → Tools).
+  var bin = isHostRecord(managed.record) ? null : await get([MANAGED_DIR, managed.record.version]);
   if (bin) places.push({ label: "Installed in", path: bin, reveal: false });
   var data = await get([MANAGED_DIR, "data", "app"]);
   if (data) places.push({ label: "Data folder", path: data, reveal: false });
@@ -4778,13 +4838,19 @@ function managedJobNodes() {
   return nodes;
 }
 
-// Pure: the card's row offering the newer slskd this plugin pins.
-function managedUpdateRows(record, job) {
-  if (!record || !versionLess(record.version, SLSKD_RELEASE.version)) return [];
-  if (job && job.kind === "update") return [];
-  return [optionRow("Update slskd",
-    "slskd " + SLSKD_RELEASE.version + " is available (you have " + record.version + "). Viboplr asks before it downloads; slskd restarts on the new version and keeps its settings.",
-    actionButton("Update", "managed-update", "accent", { disabled: !!job }))];
+// Pure: the card's version line (Viboplr's copy: where its updates are) or,
+// for a legacy store copy, the row that moves it to Viboplr's copy. `dep` is
+// the host's tool status.
+function managedVersionRows(record, dep, job) {
+  if (!record) return [];
+  if (isHostRecord(record)) {
+    var v = dep && dep.version ? "slskd " + dep.version : "slskd";
+    return [{ type: "settings-row", label: "Version", description: v + " · Viboplr's copy. Updates appear in Extensions → Tools and in Viboplr's update notice; slskd restarts on the new version and keeps its settings." }];
+  }
+  if (job && job.kind === "move") return [];
+  return [optionRow("Move slskd to Viboplr's copy",
+    "This slskd (" + (record.version || "?") + ") was installed by an older version of this plugin and gets no updates. Moving it lets Viboplr keep it up to date in Extensions → Tools. slskd keeps its settings, data and Soulseek account.",
+    actionButton("Move…", "managed-move", "accent", { disabled: !!job }))];
 }
 
 // ---------------------------------------------------------------------------
@@ -4991,7 +5057,7 @@ function discoveryNodes(d) {
 // `m` is `managed`.
 function installRows(m) {
   var rows = [];
-  var auto = !!(m && m.supported && slskdAssetFor(m.platform));
+  var auto = canInstallHere(m);
   if (auto) {
     rows.push(optionRow("Install automatically",
       "Viboplr downloads slskd and runs it in the background on this computer, after it asks you. Recommended.",
@@ -5060,14 +5126,16 @@ function setupHomeView(st, cfg, m, detail, d) {
 
 function installAutoView() {
   var children = [backBar(), headingText("Install slskd automatically")];
-  if (!managed.supported || !slskdAssetFor(managed.platform)) {
+  if (!canInstallHere(managed)) {
     children.push(mutedText(managed.supported
-      ? "There's no slskd build for this computer in this plugin. The manual guide takes a few minutes."
+      ? "Viboplr can't install slskd here: its definition isn't in force (Extensions → Tools says why). The manual guide takes a few minutes."
       : "This version of Viboplr can't install slskd for you. The manual guide takes a few minutes."));
     children.push(pageButton("Show guide…", "install-manual", "accent"));
     return children;
   }
-  children.push(mutedText("Viboplr downloads slskd " + SLSKD_RELEASE.version + " from its official release, checks it is exactly the file this plugin expects, and runs it in the background on this computer. It asks you before it installs anything."));
+  children.push(mutedText(hostToolReady(managed.dep)
+    ? "slskd " + (managed.dep.version || "") + " is already installed in Viboplr. This sets it up and runs it in the background on this computer."
+    : "Viboplr installs slskd from its official release on GitHub, checks it against GitHub's checksum, and runs it in the background on this computer. It asks you before it installs anything, and keeps slskd up to date in Extensions → Tools."));
   children.push(installFormSection());
   var job = managedJobNodes();
   for (var i = 0; i < job.length; i++) children.push(job[i]);
@@ -5248,7 +5316,7 @@ function managedConnectionSection() {
   var st = managed.status;
   // Remove goes last: the one destructive row sits below everything else.
   var rows = [optionRow("Address", settings.url + " · " + statusLine(), checkButton("Test"))]
-    .concat(managedUpdateRows(managed.record, managed.job))
+    .concat(managedVersionRows(managed.record, managed.dep, managed.job))
     .concat([autostartRow("managed-autostart", settings.startWithViboplr), keepRunningRow()])
     .concat(sharingRows(localCollections, managed.job, shareChange, slskdShared))
     .concat(managedFileRows(managedPlaces, canOpenPaths(), managedShowFiles))
@@ -7247,13 +7315,15 @@ function registerActions() {
   api.ui.onAction("setup-page", function (data) {
     var page = data && data.page;
     setupPage = SETUP_PAGES.indexOf(page) >= 0 ? page : "home";
-    // The install page needs the platform (which build) and the collections
-    // (what it offers to share; otherwise loaded only once slskd is ready).
+    // The install page needs the tool's status (can Viboplr install it?), the
+    // collections (what it offers to share; otherwise loaded only once slskd
+    // is ready) and the default downloads folder.
     if (setupPage === "install-auto") {
       managed.error = null;
       Promise.all([
         probeManaged().catch(function (e) { console.error("slskd: install check failed:", e); }),
-        loadCollections().catch(function (e) { console.error("slskd: loading collections failed:", e); })
+        loadCollections().catch(function (e) { console.error("slskd: loading collections failed:", e); }),
+        prefillDownloadsDir()
       ]).then(render);
     }
     render();
@@ -7282,7 +7352,7 @@ function registerActions() {
   });
   api.ui.onAction("install-pick-folder", async function () {
     try {
-      var picked = await api.ui.pickFolder({ title: "Where should slskd put finished downloads?" });
+      var picked = await api.ui.pickFolder({ title: "Where should slskd put finished downloads?", defaultPath: installForm.downloadsDir || undefined });
       if (picked) {
         installForm.downloadsDir = picked;
         render();
@@ -7314,8 +7384,8 @@ function registerActions() {
   api.ui.onAction("managed-restart", function () {
     restartManaged().catch(function (e) { console.error("slskd: restart failed:", e); });
   });
-  api.ui.onAction("managed-update", function () {
-    updateManaged().catch(function (e) { console.error("slskd: update failed:", e); });
+  api.ui.onAction("managed-move", function () {
+    moveManaged().catch(function (e) { console.error("slskd: moving to Viboplr's copy failed:", e); });
   });
   api.ui.onAction("managed-autostart", function (data) {
     setStartWithViboplr(!!(data && data.value)).then(function () {
@@ -9590,6 +9660,16 @@ async function activate(hostApi) {
     return [{ value: "original", label: "Original file", description: "Copies the file Soulseek delivered, untouched." }];
   });
 
+  // Asked only while a program of ours that shouldn't outlive Viboplr runs:
+  // slskd's own shutdown (it finishes writing its database), then the host's
+  // stop. The host stops what's left itself after its wait.
+  if (api.system && api.system.programs && typeof api.system.programs.onAppQuitting === "function") {
+    api.system.programs.onAppQuitting(function () {
+      if (!managed.record || !settings.stopWithViboplr) return;
+      return stopManagedProcess().catch(function (e) { console.error("slskd: stopping slskd at quit failed:", e); });
+    });
+  }
+
   render();
   renderSettings();
 
@@ -9689,20 +9769,21 @@ return {
   _collectionPaths: collectionPaths,
   _installShares: installShares,
   _renderSlskdYml: renderSlskdYml,
-  _slskdAssetFor: slskdAssetFor,
-  _slskdDownloadFor: slskdDownloadFor,
   _slskdBinaryName: slskdBinaryName,
-  _versionLess: versionLess,
+  _isHostRecord: isHostRecord,
+  _hostToolReady: hostToolReady,
+  _defaultDownloadsDir: defaultDownloadsDir,
+  _downloadsFolderText: downloadsFolderText,
+  _canInstallHere: canInstallHere,
   _portLooksFree: portLooksFree,
   _managedFailure: managedFailure,
   _managedCapable: managedCapable,
   _managedStartSpec: managedStartSpec,
-  _managedUpdateRows: managedUpdateRows,
+  _managedVersionRows: managedVersionRows,
   _managedFileRows: managedFileRows,
   _managedRemoveRows: managedRemoveRows,
   _installFormComplete: installFormComplete,
   _usesManaged: usesManaged,
-  _SLSKD_RELEASE: SLSKD_RELEASE,
   _describeFolders: describeFolders,
   _installRows: installRows,
   _connectionSection: connectionSection,
@@ -9726,6 +9807,7 @@ return {
   _signinProgress: signinProgress,
   _signinReasonFromLog: signinReasonFromLog,
   _setSigninTiming: function (waitMs, pollMs, settleMs) { SIGNIN_WAIT_MS = waitMs; SIGNIN_POLL_MS = pollMs; if (settleMs != null) START_SETTLE_MS = settleMs; },
+  _setToolTiming: function (pollMs, waitMs) { TOOL_POLL_MS = pollMs; TOOL_WAIT_MS = waitMs; },
   _hostOf: hostOf,
   _searchQueryForTarget: searchQueryForTarget,
   _nextReadiness: nextReadiness,

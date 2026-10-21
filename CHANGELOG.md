@@ -1,7 +1,37 @@
 # Changelog
 
+## 0.26.0
+
+Needs Viboplr 1.0.113.
+
+- **Viboplr installs and updates slskd.** *Install automatically* now asks
+  Viboplr for its own copy of slskd (the manifest declares slskd under
+  `binaryDependencies`, from slskd's GitHub releases, checked against GitHub's
+  checksum). slskd shows in Extensions → Tools, and its updates come through
+  Viboplr's update notice, installed when you click — Viboplr restarts slskd on
+  the new version. The plugin no longer downloads, pins or updates slskd itself.
+- **A slskd installed by an earlier version keeps working.** It starts from the
+  plugin's folder as before, and the Settings card offers **Move slskd to
+  Viboplr's copy**: same settings, data and account, on Viboplr's copy, and the
+  old folder is removed. If the new copy won't start, the old one starts again.
+- **Downloads folder starts as Downloads/Soulseek.** No folder to pick before
+  installing; *Change…* opens the picker there. The row says whether finished
+  files reach your library (only inside one of your collections) instead of
+  telling you to pick a folder in one.
+- **Quitting Viboplr with "Keep slskd running" off** stops slskd through its
+  own shutdown first.
+- "Don't allow" in Viboplr's "Run slskd in the background?" dialog returns to the
+  form instead of failing the install.
+- **A start you said no to says so.** If you turn down running programs when
+  the plugin starts slskd, the banner reads "You didn't allow Soulseek to run
+  programs, so slskd wasn't started", and *Start slskd* asks again. It used to
+  claim nothing was installed, in small text on the Settings card.
+- **Install automatically and Move work on a side-loaded copy too.** An
+  unsigned copy's slskd definition waits for your consent; both now ask
+  Viboplr for slskd and let it ask, instead of staying greyed out.
+
 ## v0.25.0
-- **Install slskd without Roadie.** Viboplr no longer ships Roadie. On Viboplr versions that can run programs for a plugin, *Install automatically* installs slskd itself: your Soulseek account and a downloads folder, then Viboplr asks you to allow it and confirms the download. slskd comes from its official GitHub release and is kept only if it matches the checksum pinned in this plugin. It runs in the background on this computer only, keeps running when Viboplr quits, and is started again whenever Viboplr opens — both switches are on the *slskd on this computer* card in Settings. Viboplr doesn't add it to your login items; do that yourself to run it without Viboplr, with Start / Restart, Update, sharing more folders, slskd's files and Remove.
+- **Install slskd without Roadie.** Viboplr no longer ships Roadie. On Viboplr versions that can run programs for a plugin, *Install automatically* installs slskd itself: your Soulseek account and a downloads folder, then Viboplr asks you to allow it and confirms the download. slskd comes from its official GitHub release and is kept only if it matches the checksum pinned in this plugin. It runs in the background on this computer only, keeps running when Viboplr quits, and is started again whenever Viboplr opens — both switches are on the *slskd on this computer* card in Settings, with Start / Restart, Update, sharing more folders, slskd's files and Remove. Viboplr doesn't add it to your login items; do that yourself to run it without Viboplr.
 - **Running your own slskd needs no extra permission.** The permission to run programs is optional: it is asked only when you choose the install, so connecting to a slskd you run (here, in Docker, on a NAS) works exactly as before.
 - **A slskd that Roadie installed** keeps its address: the plugin now treats it as a slskd you run. Viboplr removes Roadie and the slskd it installed when it updates, so install again from the Settings tab if that was yours — your Soulseek username and password are asked again; your downloads are untouched.
 

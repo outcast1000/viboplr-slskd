@@ -128,36 +128,70 @@ Owner decisions that must hold:
   one of slskd's keys (`discoveryNodes`). The whole setup must work without installing anything.
 - **Installing slskd is ONE option, never required** (owner, 2026-10-19 — Roadie removed from
   Viboplr). The user can install slskd themselves (the GitHub Pages guide in `docs/`) or run it
-  anywhere and just configure the plugin. *Install automatically* is the plugin installing slskd
-  through the host's generic **`api.system.programs`** ("Installing slskd on this computer" in
-  `index.js`). The host knows nothing about slskd; everything slskd-specific lives here:
-  `SLSKD_RELEASE` pins the version and the **sha256 of each platform's zip** (slskd publishes no
-  checksums; the plugin's signature covers the pins — a new slskd ships as a plugin release),
-  `renderSlskdYml` writes the config once (web on 127.0.0.1, a **random** web sign-in kept in the
-  `managedSlskd` storage record, the plugin's API key with a loopback CIDR, `remote_configuration`
-  and `remote_file_management` on, partial downloads inside the plugin's store so no outside folder
-  has to be created), and `stopManagedProcess` stops it gracefully (JWT from that web login →
-  `DELETE /api/v0/application`) before the host's signal.
+  anywhere and just configure the plugin. *Install automatically* is **Viboplr installing slskd as
+  one of its own tools** (0.26.0, Viboplr 1.0.113+; owner plan 2026-10-20, "one host update flow"):
+  - **The manifest defines the tool**: `binaryDependencies: [{ name: "slskd", required: false,
+    definition }]` — a folder tool (`layout: "folder"`, `entry: "slskd"`) from `slskd/slskd`'s
+    GitHub releases, arch-specific asset templates, `checksum: { github: true }` (GitHub's recorded
+    sha256 — slskd publishes no checksums file), `probeEnv` for .NET's extraction folder. **Keep it
+    byte-identical to the host's fixture** (`src-tauri/tests/fixtures/plugin-dependencies/slskd.json`
+    in the app repo): the host's tests validate and fingerprint that entry, and a changed source
+    reads as "came from another source" (Reinstall) for every installed copy. **No version, no
+    pins**: the host follows `releases/latest`, announces updates in its update notice and
+    Extensions → Tools, and installs them only on the user's click — stopping slskd (SIGTERM),
+    swapping `{bin}/slskd/`, and starting it again with the stored registration. The plugin has
+    **no update code**; don't add one back.
+  - **Install** = `api.ui.requestAction("require-dependency", { name: "slskd" })` (Viboplr's own
+    "slskd is needed … It works without it" dialog), then `ensureHostTool` polls
+    `api.system.getDependency("slskd")` every `TOOL_POLL_MS` (3s) for up to `TOOL_WAIT_MS` (5 min)
+    until it is `installed` with `origin: "managed"`. The host says nothing when its dialog closes,
+    so a dialog turned down is the wait running out ("slskd wasn't installed"); the checklist's
+    first step has **Cancel**. A slskd on PATH (`origin: "system"`) is the user's: never started,
+    the step says to connect to it.
+  - **Running** it: `programs.start("slskd", { dependency: "slskd", args, env, outliveApp })`
+    (`managedStartSpec`; the host resolves Viboplr's copy, `cwd` defaults to the plugin's store).
+    The first start asks "Run slskd in the background?" (host `DependencyRunConfirm`, once per
+    source); "Don't allow" rejects with `"Run declined"` → `managedFailure` → back to the form, and
+    the half-made record is dropped.
+  - Everything else is slskd-specific and stays here: `renderSlskdYml` writes the config once (web
+    on 127.0.0.1, a **random** web sign-in kept in the `managedSlskd` storage record, the plugin's
+    API key with a loopback CIDR, `remote_configuration` and `remote_file_management` on, partial
+    downloads inside the plugin's store), and `stopManagedProcess` stops it gracefully (JWT from that
+    web login → `DELETE /api/v0/application`) before the host's signal.
+  - **The record**: `{ source: "host", port, webUsername, webPassword, downloadsDir, installedAt }`.
+    The version is the host's (`managed.dep.version`), shown on the card's Version row.
+  - **Legacy store copies** (plugin ≤ 0.25.0 downloaded slskd into `slskd/<version>/` itself; the
+    record has `version` + `asset`, no `source`) keep starting from the store by `path`. The card
+    shows **Move slskd to Viboplr's copy** (`managedVersionRows` → `moveManaged`): install via the
+    host as above, stop the old copy, rewrite the record to `source: "host"`, start by `dependency`
+    with the same `slskd.yml` and data, then delete `slskd/<old>/`. If the new copy won't start, the
+    legacy record comes back and the old copy starts again; nothing is deleted. A legacy copy gets
+    no updates until it moves.
+  - **Downloads folder**: starts as `<Downloads>/Soulseek` (`api.system.userFolders`,
+    `prefillDownloadsDir`), so the form needs no picking; *Change…* opens the picker on the current
+    one. The row says whether finished files reach the library (`downloadsFolderText`: only inside
+    a local collection) — never "pick a folder inside one of your collections" as the instruction,
+    which on a profile without one points at nothing. slskd is given the path in `slskd.yml`; the
+    plugin can't create folders outside its store.
   - **Permission:** `programs:run` is in the manifest's **`optionalPermissions`**, so a user who runs
-    their own slskd is never asked. The host asks the first time the install needs it (and warns for
-    an unsigned copy), then **confirms every download** in its own dialog — the plugin passes
-    `label: "slskd <version>"`. A declined dialog rejects with `"Install declined"` (or a
-    `PermissionError`); `managedFailure` turns both into "back to the form", not an error.
+    their own slskd is never asked. The host asks the first time a start needs it (and warns for an
+    unsigned copy).
   - **Lifetime:** slskd keeps running after Viboplr quits (`outliveApp`, off only via the card's
     *Keep slskd running when Viboplr quits* → `settings.stopWithViboplr`, applied at the next start)
     and the plugin starts it on activation when the host knows it (`registered`) and it isn't
     running (`shouldStartWithViboplr`, `settings.startWithViboplr`, on by default, the install
-    form's and the card's switch). The host has **no login items** (removed 2026-10-19 — every
-    start happens inside Viboplr, under its approval check); a user who wants slskd without
-    Viboplr adds it to the OS themselves. Uninstalling the plugin makes the host stop it.
+    form's and the card's switch). With *Keep running* off, Viboplr's quit asks the plugin first
+    (`api.system.programs.onAppQuitting` → `stopManagedProcess`), and the host stops whatever is
+    left after its wait. The host has **no login items**; a user who wants slskd without Viboplr adds
+    it to the OS themselves. Uninstalling the plugin makes the host stop it.
   - `managedBy: "plugin"` + the `managedSlskd` record mark the connection as this plugin's slskd;
     `usesManaged` is the one test. A typed address/key clears it. A stored `"roadie"` from older
     versions is cleared at load (the address stays, it is just a slskd now).
-  - The **"slskd on this computer" card** (`managedConnectionSection`): address + Test, Update
-    (`managedUpdateRows`, when the pin is newer than the record), start with Viboplr, keep running,
-    **Sharing**, files (folded; the settings file is only revealed — it holds the Soulseek password),
-    connection details (folded), Remove last (stop → `programs.remove` → delete `slskd/` and `logs/`;
-    downloads and shares untouched).
+  - The **"slskd on this computer" card** (`managedConnectionSection`): address + Test, Version (or
+    Move for a legacy copy), start with Viboplr, keep running, **Sharing**, files (folded; the
+    settings file is only revealed — it holds the Soulseek password), connection details (folded),
+    Remove last (stop → `programs.remove` → delete `slskd/` and `logs/`; downloads and shares
+    untouched; Viboplr's copy of the program stays in Extensions → Tools).
   - **Sharing** more folders goes through slskd's own settings API (`shareThroughSlskd`: admin JWT,
     `yamlWithShares`, slskd validates, then `PUT /api/v0/shares`), after a confirm on the card,
     because the folders become public. The gap is measured against what slskd reports (`shareGap`).
@@ -165,8 +199,12 @@ Owner decisions that must hold:
     captured (`logs/slskd.log` in the plugin's store, `managedLogLines`). A **kick** ("another client
     logged in using the same username") is final until slskd restarts — the card and banner offer
     *Restart slskd*.
-  - Everything is feature-detected (`managedCapable`: `api.system.programs`, `api.system.platform`,
-    `api.ui.pickFolder`); an older Viboplr just doesn't offer the install, so `minAppVersion` stays.
+  - `managedCapable` needs `api.system.programs`, `api.system.getDependency`, `api.ui.pickFolder`
+    and `api.ui.requestAction`; *Install automatically* also needs slskd's definition in force
+    (`canInstallHere`: `getDependency` answers non-null). `minAppVersion` is **1.0.113**, the first
+    host with folder tools, `checksum.github`, `start({ dependency })`, `onAppQuitting` and
+    `userFolders` — not a `1.0.112-beta.N`: the host's `semverSatisfies` drops the pre-release
+    part, so a beta minimum would admit 1.0.112-beta.3, which has none of them.
 - **No metadata-based download provider.** A download the user asks for by hand gets a
   file they picked, not the fallback's best guess. The one deliberate exception is
   **Upgrade** (owner's decision, 2026-09-27): it picks the file itself, but the *replace*

@@ -5,9 +5,9 @@ const { fakeHost } = require("./harness/host.js");
 
 const plugin = loadPlugin();
 
-// Getting slskd: find one already running, install it here through Viboplr's
-// api.system.programs (the host asks the user before each install), follow the
-// manual guide, or connect to one elsewhere. These pin the rules that keep the
+// Getting slskd: find one already running, have Viboplr install it as one of
+// its tools (binaryDependencies; the host asks the user) and run it through
+// api.system.programs, follow the manual guide, or connect to one elsewhere. These pin the rules that keep the
 // install honest — nothing runs unasked, a typed connection is never
 // overwritten — and the screens around a slskd that isn't ready.
 
@@ -38,6 +38,8 @@ const findNodes = (n, pred, out = []) => {
 async function withPlugin(hostOpts, fn) {
   const host = fakeHost(hostOpts);
   const p = loadPlugin();
+  // Viboplr's install dialog answers at once in the fake; don't wait 3s a look.
+  p._setToolTiming(2, hostOpts && hostOpts.toolWaitMs ? hostOpts.toolWaitMs : 2000);
   try {
     await p.activate(host.api);
     await fn(host, p);
@@ -109,25 +111,30 @@ const fill = async (host) => {
   await host.actions["install-pick-folder"]();
   await until(() => lastView(host).includes("/Users/me/Music/Soulseek"));
 };
+const toolReady = { name: "slskd", installed: true, version: "0.26.1", origin: "managed", latest: "0.26.1" };
 
 // ---- What is installed, and how ------------------------------------------
 
-test("the build: one pinned, checksummed asset per supported platform, none for Linux", () => {
-  const asset = plugin._slskdAssetFor;
-  assert.equal(asset({ os: "macos", arch: "arm64" }), "osx-arm64");
-  assert.equal(asset({ os: "macos", arch: "x64" }), "osx-x64");
-  assert.equal(asset({ os: "windows", arch: "x64" }), "win-x64");
-  assert.equal(asset({ os: "windows", arch: "arm64" }), "win-arm64");
-  assert.equal(asset({ os: "linux", arch: "x64" }), null);
-  assert.equal(asset({ os: "macos", arch: "riscv64" }), null);
-  assert.equal(asset(null), null);
-  const d = plugin._slskdDownloadFor("osx-arm64");
-  assert.equal(d.url, "https://github.com/slskd/slskd/releases/download/0.26.1/slskd-0.26.1-osx-arm64.zip");
-  assert.equal(d.file, "slskd-0.26.1-osx-arm64.zip");
-  assert.match(d.sha256, /^[0-9a-f]{64}$/);
-  for (const a of Object.keys(plugin._SLSKD_RELEASE.sha256)) assert.match(plugin._SLSKD_RELEASE.sha256[a], /^[0-9a-f]{64}$/, a);
+test("Viboplr's copy: what counts as installed, and which record is which", () => {
+  assert.equal(plugin._hostToolReady({ installed: true, origin: "managed", version: "0.26.1" }), true);
+  assert.equal(plugin._hostToolReady({ installed: true, origin: "system", version: "0.26.1" }), false, "a system copy is the user's");
+  assert.equal(plugin._hostToolReady({ installed: false, origin: null }), false);
+  assert.equal(plugin._hostToolReady(null), false);
+  assert.equal(plugin._isHostRecord({ source: "host", port: 5030 }), true);
+  assert.equal(plugin._isHostRecord({ version: "0.26.1", asset: "osx-arm64" }), false, "a copy plugin 0.25.0 installed in its store");
   assert.equal(plugin._slskdBinaryName("win-x64"), "slskd.exe");
   assert.equal(plugin._slskdBinaryName("osx-arm64"), "slskd");
+});
+
+test("the downloads folder starts as <Downloads>/Soulseek, and says whether files reach the library", () => {
+  assert.equal(plugin._defaultDownloadsDir({ downloads: "/Users/me/Downloads/" }), "/Users/me/Downloads/Soulseek");
+  assert.equal(plugin._defaultDownloadsDir({ downloads: "C:\\Users\\me\\Downloads" }), "C:\\Users\\me\\Downloads\\Soulseek");
+  assert.equal(plugin._defaultDownloadsDir({ downloads: null }), "");
+  assert.equal(plugin._defaultDownloadsDir(null), "");
+  const cols = [{ id: 1, name: "Music", path: "/Users/me/Music" }];
+  assert.match(plugin._downloadsFolderText("/Users/me/Downloads/Soulseek", cols), /won't appear in your library on their own/);
+  assert.match(plugin._downloadsFolderText("/Users/me/Music/Soulseek", cols), /inside your Music collection, so finished files reach your library/);
+  assert.equal(plugin._downloadsFolderText("", cols), "Where finished downloads go.");
 });
 
 test("slskd.yml: loopback only, the plugin's key limited to this computer, every string quoted safely", () => {
@@ -180,24 +187,43 @@ test("what a failure means: the user's no is not an error; the singleton gets it
   assert.equal(f(new Error('Permission denied: plugin "slskd" needs "programs:run" to call api.system.programs.download')).declined, true);
   assert.match(f(new Error("slskd exited as soon as it started:\nslskd is already running")).message, /Another copy of slskd/);
   assert.equal(f(new Error("disk full")).message, "disk full");
+  // A refused start is not a refused install, and says how to be asked again.
+  const start = f(new Error('Permission denied: plugin "slskd" needs "programs:run" to call api.system.programs.start — the user didn\'t allow it'), "start");
+  assert.equal(start.declined, true);
+  assert.match(start.message, /wasn't started.*Start slskd asks again/);
+  assert.doesNotMatch(start.message, /install/i);
 });
 
-test("the start spec: the pinned version's binary, everything .NET writes kept in the plugin's folder", () => {
+test("a start the user refused: the banner says why, and Start asks again", () => {
+  const b = plugin._readinessBanner("unreachable", managedCfg, { ...installed, error: "You didn't allow Soulseek to run programs, so slskd wasn't started. Start slskd asks again." });
+  assert.match(b.children[0].content, /^slskd isn't running\. You didn't allow Soulseek to run programs/);
+  assert.deepEqual(clickable(b), ["managed-start"]);
+});
+
+test("the start spec: Viboplr's copy by name, a legacy copy by its path; everything .NET writes kept in the plugin's folder", () => {
+  const host = plugin._managedStartSpec({ source: "host", port: 5030 }, { app: "a", config: "c", extract: "e" }, true);
+  assert.equal(host.dependency, "slskd");
+  assert.equal(host.path, undefined, "the host finds its own copy");
+  assert.equal(host.cwd, undefined, "the working folder defaults to the plugin's store");
   const spec = plugin._managedStartSpec({ version: "0.26.1", asset: "win-x64" }, { app: "C:\\s\\app", config: "C:\\s\\slskd.yml", extract: "C:\\s\\extract" }, false);
   assert.deepEqual(spec.path, ["slskd", "0.26.1", "slskd.exe"]);
+  assert.equal(spec.dependency, undefined);
   assert.deepEqual(spec.args, ["--app-dir", "C:\\s\\app", "--config", "C:\\s\\slskd.yml", "--no-logo"]);
   assert.equal(spec.env.DOTNET_BUNDLE_EXTRACT_BASE_DIR, "C:\\s\\extract");
   assert.equal(spec.outliveApp, false);
   assert.equal(plugin._managedStartSpec({ version: "0.26.1", asset: "osx-arm64" }, { app: "a", config: "c", extract: "e" }).outliveApp, true, "independent unless the setting says otherwise");
 });
 
-test("a host that can't install programs offers only the guide and connecting", () => {
+test("a host that can't install slskd as its tool offers only the guide and connecting", () => {
   assert.equal(plugin._managedCapable({ system: {}, ui: {} }), false);
-  assert.equal(plugin._managedCapable({ system: { programs: { start() {} }, platform() {} }, ui: { pickFolder() {} } }), true);
+  assert.equal(plugin._managedCapable({ system: { programs: { start() {} } }, ui: { pickFolder() {}, requestAction() {} } }), false, "no getDependency: an older Viboplr");
+  assert.equal(plugin._managedCapable({ system: { programs: { start() {} }, getDependency() {} }, ui: { pickFolder() {}, requestAction() {} } }), true);
   const hub = plugin._setupHomeView("unconfigured", { url: "", managedBy: null }, { supported: false });
   assert.deepEqual(clickable(hub), ["page:install-manual", "page:connect", "discover-again", "setup-open-about"]);
-  const linux = plugin._setupHomeView("unconfigured", { url: "", managedBy: null }, { supported: true, platform: { os: "linux", arch: "x64" } });
-  assert.deepEqual(clickable(linux), ["page:install-manual", "page:connect", "discover-again", "setup-open-about"], "no build for this computer → no automatic option");
+  // A definition still waiting for the user's consent (an unsigned copy) is
+  // asked for when the install requests the tool — not a reason to hide it.
+  const waitingTool = plugin._setupHomeView("unconfigured", { url: "", managedBy: null }, { supported: true, dep: null });
+  assert.ok(clickable(waitingTool).includes("page:install-auto"), "slskd's definition not in force yet → still offered");
 });
 
 test("a port is free only when the connection is refused, never when it just doesn't answer", () => {
@@ -208,29 +234,30 @@ test("a port is free only when the connection is refused, never when it just doe
   assert.equal(free(null), false);
 });
 
-test("versions: the update row appears only for an older install", () => {
-  assert.equal(plugin._versionLess("0.26.0", "0.26.1"), true);
-  assert.equal(plugin._versionLess("0.26.1", "0.26.1"), false);
-  assert.equal(plugin._versionLess("0.27.0", "0.26.1"), false);
-  assert.equal(plugin._versionLess("0.9.9", "0.10.0"), true);
-  assert.deepEqual(clickable(plugin._managedUpdateRows({ version: "0.26.0" }, null)), ["managed-update"]);
-  assert.deepEqual(plugin._managedUpdateRows({ version: "0.26.1" }, null), []);
-  assert.deepEqual(plugin._managedUpdateRows(null, null), []);
+test("the card's version row: Viboplr's copy says where updates are; a legacy copy offers Move", () => {
+  const dep = { installed: true, version: "0.26.1", origin: "managed" };
+  const host = plugin._managedVersionRows({ source: "host", port: 5030 }, dep, null);
+  assert.deepEqual(clickable(host), [], "updates are Viboplr's, not a button here");
+  assert.match(JSON.stringify(host), /slskd 0.26.1 · Viboplr's copy/);
+  assert.deepEqual(clickable(plugin._managedVersionRows({ version: "0.26.1", asset: "osx-arm64" }, dep, null)), ["managed-move"]);
+  assert.equal(plugin._managedVersionRows({ version: "0.26.1" }, null, null)[0].control.disabled, false, "a definition waiting for consent is asked for by the move itself");
+  assert.deepEqual(plugin._managedVersionRows({ version: "0.26.1" }, dep, { kind: "move" }), [], "while it moves, the job line says so");
+  assert.deepEqual(plugin._managedVersionRows(null, dep, null), []);
 });
 
 // ---- The hub and the not-ready screens -----------------------------------
 
-const installed = { supported: true, platform: { os: "macos", arch: "arm64" }, record: { version: "0.26.1", asset: "osx-arm64", port: 5030 }, status: { running: false } };
+const installed = { supported: true, dep: toolReady, record: { source: "host", port: 5030 }, status: { running: false } };
 const managedCfg = { url: "http://127.0.0.1:5030", managedBy: "plugin" };
 
 test("first-run hub: install here, install by hand, or connect — nothing else on screen", () => {
-  const hub = plugin._setupHomeView("unconfigured", { url: "", managedBy: null }, { supported: true, platform: { os: "macos", arch: "arm64" } });
+  const hub = plugin._setupHomeView("unconfigured", { url: "", managedBy: null }, { supported: true, dep: { installed: false } });
   assert.deepEqual(clickable(hub), ["page:install-auto", "page:install-manual", "page:connect", "discover-again", "setup-open-about"]);
   assert.ok(!JSON.stringify(hub).includes("text-input"), "no address/key fields and no account form on the hub");
 });
 
 test("unreachable hub: retry and settings first, then start it, then reinstall", () => {
-  const m = { supported: true, platform: { os: "macos", arch: "arm64" } };
+  const m = { supported: true, dep: { installed: false } };
   const hub = plugin._setupHomeView("unreachable", { url: "http://localhost:5030", managedBy: null }, m, "connection refused");
   assert.deepEqual(clickable(hub), ["test-connection", "page:connect", "setup-open-guide", "page:install-auto", "page:install-manual"]);
   const text = JSON.stringify(hub);
@@ -340,17 +367,18 @@ const API_LOG_BLOCKED = [
 test("setup steps: they move forward only, and a failure stops the list", () => {
   const s = plugin._newSetup(" outcast1000 ");
   assert.equal(s.username, "outcast1000");
-  plugin._advanceSetup(s, "unpack");
-  plugin._advanceSetup(s, "download"); // a late report never moves it back
+  plugin._advanceSetup(s, "start");
+  plugin._advanceSetup(s, "approve"); // a late report never moves it back
   let rows = plugin._setupChecklist(s);
-  assert.deepEqual(rows.map((r) => r.state), ["done", "done", "active", "pending", "pending", "pending"]);
-  assert.equal(rows[5].label, "Sign in to Soulseek as outcast1000");
+  assert.deepEqual(rows.map((r) => r.id), ["approve", "start", "connect", "signin"], "no download step: Viboplr installs it");
+  assert.deepEqual(rows.map((r) => r.state), ["done", "active", "pending", "pending"]);
+  assert.equal(rows[3].label, "Sign in to Soulseek as outcast1000");
   plugin._failSetup(s, "boom");
-  plugin._advanceSetup(s, "start"); // nothing moves past a failure
+  plugin._advanceSetup(s, "connect"); // nothing moves past a failure
   rows = plugin._setupChecklist(s);
-  assert.deepEqual(rows.map((r) => r.state), ["done", "done", "failed", "pending", "pending", "pending"]);
-  assert.equal(rows[2].detail, "boom");
-  assert.match(plugin._setupChecklist(plugin._newSetup(""))[0].detail, /asks before it installs/);
+  assert.deepEqual(rows.map((r) => r.state), ["done", "failed", "pending", "pending"]);
+  assert.equal(rows[1].detail, "boom");
+  assert.match(plugin._setupChecklist(plugin._newSetup(""))[0].detail, /asks before it installs anything.*Extensions → Tools/);
 });
 
 test("sign-in: the live line follows slskd's server state; the log names the reason", () => {
@@ -498,7 +526,7 @@ test("integration: no slskd and an older host: the setup still works (guide or a
 
 // ---- The install, end to end ------------------------------------------------
 
-test("integration: Install downloads the pinned build, writes slskd.yml, starts it and connects", async () => {
+test("integration: Install asks Viboplr for its copy, writes slskd.yml, starts it by name and connects", async () => {
   const comp = freeComputer();
   await withPlugin(installHost(comp, { host: { collections: [{ id: 1, name: "Music", path: "/Users/me/Music" }] } }), async (host, p) => {
     p._setSigninTiming(2000, 5);
@@ -508,14 +536,10 @@ test("integration: Install downloads the pinned build, writes slskd.yml, starts 
     await host.actions["install"]();
     await until(() => host.store.managedBy === "plugin" && !lastView(host).includes("Setting up slskd"), 3000);
 
-    const dl = host.calls.programs.find((c) => c.op === "download");
-    assert.deepEqual(dl.args[0], ["slskd", "download", "slskd-0.26.1-osx-arm64.zip"]);
-    assert.equal(dl.args[1], "https://github.com/slskd/slskd/releases/download/0.26.1/slskd-0.26.1-osx-arm64.zip");
-    assert.equal(dl.args[2].sha256, "5cf79a4d41ad40906aababc6bd05585899f102e7c544e38157df747f01cb6f4b", "the pinned checksum goes to the host");
-    assert.equal(dl.args[2].label, "slskd 0.26.1", "the host's install dialog names it");
+    assert.deepEqual(host.calls.requestAction.filter((r) => r.action === "require-dependency").map((r) => r.payload.name), ["slskd"], "Viboplr's own install dialog, once");
     const order = ops(host).filter((o) => o !== "status");
-    assert.deepEqual(order.slice(0, 6), ["files.remove", "download", "extract", "files.remove", "run", "start"], order.join(" "));
-    assert.deepEqual(host.calls.programs.find((c) => c.op === "run").args[1], ["--version"]);
+    assert.ok(!order.includes("download") && !order.includes("extract") && !order.includes("run"), "the plugin downloads nothing itself: " + order.join(" "));
+    assert.equal(order[0], "start");
     assert.equal(host.store.startWithViboplr, true, "starting with Viboplr is on by default");
 
     const yml = host.files["slskd/data/slskd.yml"];
@@ -525,16 +549,31 @@ test("integration: Install downloads the pinned build, writes slskd.yml, starts 
     assert.ok(yml.includes('        key: "' + host.store.apiKey + '"'), "slskd accepts the key the plugin uses");
 
     const rec = host.store.managedSlskd;
-    assert.equal(rec.version, "0.26.1");
+    assert.equal(rec.source, "host");
+    assert.equal(rec.version, undefined, "the version is Viboplr's to know");
     assert.equal(rec.port, 5030);
     assert.match(rec.webPassword, /^[A-Za-z0-9]{24}$/, "a random web sign-in, not slskd/slskd");
     assert.equal(host.store.url, "http://127.0.0.1:5030");
     assert.equal(host.store.soulseekPassword, undefined, "the password is never kept by the plugin");
     const start = host.calls.programs.find((c) => c.op === "start").args[1];
+    assert.equal(start.dependency, "slskd");
+    assert.equal(start.path, undefined);
     assert.equal(start.outliveApp, true, "keeps running after Viboplr quits");
     assert.ok(start.args.includes("--config"));
     assert.ok(lastView(host).includes('"type":"tabs"'), "the view is the plugin itself once signed in");
     assert.equal(host.calls.notifications.length, 0, "success announces nothing");
+  });
+});
+
+test("integration: slskd already installed in Viboplr: no install dialog, straight to the setup", async () => {
+  const comp = freeComputer();
+  await withPlugin(installHost(comp, { host: { tool: toolReady } }), async (host, p) => {
+    p._setSigninTiming(2000, 5);
+    await fill(host);
+    assert.ok(lastView(host).includes("slskd 0.26.1 is already installed in Viboplr"));
+    await host.actions["install"]();
+    await until(() => host.store.managedBy === "plugin", 3000);
+    assert.equal(host.calls.requestAction.filter((r) => r.action === "require-dependency").length, 0);
   });
 });
 
@@ -552,54 +591,101 @@ test("integration: a taken port moves slskd to the next free one", async () => {
   });
 });
 
-test("integration: the form is off until complete, and turning sharing / start-with-Viboplr off is what is kept", async () => {
+test("integration: the form starts with <Downloads>/Soulseek, is off until the account is in, and turning sharing / start-with-Viboplr off is what is kept", async () => {
   const comp = freeComputer();
   await withPlugin(installHost(comp, { host: { collections: [{ id: 1, name: "Music", path: "/Users/me/Music" }] } }), async (host, p) => {
     p._setSigninTiming(2000, 5);
     await host.actions["setup-page"]({ page: "install-auto" });
-    await until(() => lastView(host).includes("install-set-user"));
-    assert.ok(/"action":"install","variant":"accent","disabled":true/.test(lastView(host)), "Install starts disabled");
-    assert.ok(lastView(host).includes("Soulseek has no sign-up page"));
+    await until(() => lastView(host).includes("/Users/me/Downloads/Soulseek"));
+    const v = lastView(host);
+    assert.ok(v.includes("Soulseek has no sign-up page"));
+    assert.ok(v.includes("won't appear in your library on their own"), "outside the collections: says so");
+    assert.ok(v.includes('"label":"Change…"'), "a folder is set, so the button changes it");
+    assert.ok(/"action":"install","variant":"accent","disabled":true/.test(v), "Install starts disabled");
     await host.actions["install"]();
     await new Promise((r) => setTimeout(r, 5));
-    assert.equal(host.calls.programs.filter((c) => c.op === "download").length, 0, "nothing ran");
+    assert.equal(host.calls.programs.filter((c) => c.op === "start").length, 0, "nothing ran");
     await host.actions["install-set-user"]({ value: "bj" });
     await host.actions["install-set-pass"]({ value: "secret" });
-    assert.ok(/"action":"install","variant":"accent","disabled":true/.test(lastView(host)), "still needs a folder");
-    await host.actions["install-pick-folder"]();
+    assert.ok(/"action":"install","variant":"accent"(?!,"disabled":true)/.test(lastView(host)), "no folder to pick first");
     await host.actions["install-set-share"]({ value: false });
     await host.actions["install-set-autostart"]({ value: false });
     await host.actions["install"]();
     await until(() => host.store.managedBy === "plugin", 3000);
+    assert.ok(host.files["slskd/data/slskd.yml"].includes('  downloads: "/Users/me/Downloads/Soulseek"'));
     assert.ok(!host.files["slskd/data/slskd.yml"].includes('"/Users/me/Music"\n'), "collections not shared");
     assert.equal(host.store.startWithViboplr, false, "won't start with Viboplr");
   });
 });
 
-test("integration: turning the install down in Viboplr's dialog returns to the untouched form", async () => {
+test("integration: without userFolders the form still needs a folder picked, and the picker opens on the current one", async () => {
   const comp = freeComputer();
-  await withPlugin(installHost(comp, { programs: { download: async () => { throw new Error("Install declined"); } } }), async (host) => {
-    await fill(host);
-    await host.actions["install"]();
-    await until(() => lastView(host).includes("You cancelled the install."), 2000);
-    const v = lastView(host);
-    assert.ok(v.includes("install-set-user") && v.includes('"value":"bj"'), "the form, still filled in");
-    assert.equal(host.store.managedSlskd, undefined, "nothing recorded");
-    assert.equal(host.calls.programs.filter((c) => c.op === "start").length, 0);
+  let asked = null;
+  await withPlugin(installHost(comp, { host: { noUserFolders: true } }), async (host) => {
+    host.api.ui.pickFolder = async (opts) => { asked = opts; return "/Users/me/Music/Soulseek"; };
+    await host.actions["setup-page"]({ page: "install-auto" });
+    await until(() => lastView(host).includes("install-set-user"));
+    await host.actions["install-set-user"]({ value: "bj" });
+    await host.actions["install-set-pass"]({ value: "secret" });
+    assert.ok(/"action":"install","variant":"accent","disabled":true/.test(lastView(host)), "still needs a folder");
+    assert.ok(lastView(host).includes('"label":"Choose…"'));
+    await host.actions["install-pick-folder"]();
+    assert.equal(asked.defaultPath, undefined);
+    await host.actions["install-pick-folder"]();
+    assert.equal(asked.defaultPath, "/Users/me/Music/Soulseek");
+    assert.ok(lastView(host).includes("inside your Music collection"));
   });
 });
 
-test("integration: a failure after the download keeps the form filled for Back", async () => {
+test("integration: Viboplr's install dialog closed without installing: the step fails, Back keeps the form", async () => {
   const comp = freeComputer();
-  await withPlugin(installHost(comp, { programs: { run: async () => ({ exitCode: 1, stdout: "", stderr: "bad CPU type" }) } }), async (host) => {
+  await withPlugin(installHost(comp, { host: { installTool: false, toolWaitMs: 40 } }), async (host) => {
     await fill(host);
     await host.actions["install"]();
     await until(() => lastView(host).includes("✗"), 2000);
-    assert.ok(lastView(host).includes("slskd didn't run on this computer: bad CPU type"));
+    assert.ok(lastView(host).includes("slskd wasn't installed"), lastView(host).slice(0, 800));
+    assert.equal(host.store.managedSlskd, undefined, "nothing recorded");
+    assert.equal(host.calls.programs.filter((c) => c.op === "start").length, 0);
     await host.actions["install-close"]();
     await host.actions["setup-page"]({ page: "install-auto" });
     const v = lastView(host);
     assert.ok(v.includes('"value":"bj"') && v.includes("/Users/me/Music/Soulseek"), "what the user typed is still there");
+  });
+});
+
+test("integration: Cancel while Viboplr's dialog is up ends the wait", async () => {
+  const comp = freeComputer();
+  await withPlugin(installHost(comp, { host: { installTool: false, toolWaitMs: 60000 } }), async (host) => {
+    await fill(host);
+    host.actions["install"]();
+    await until(() => lastView(host).includes('"label":"Cancel"'));
+    await host.actions["install-close"]();
+    await new Promise((r) => setTimeout(r, 20));
+    assert.ok(!lastView(host).includes("Setting up slskd"));
+    assert.equal(host.calls.programs.filter((c) => c.op === "start").length, 0);
+  });
+});
+
+test("integration: 'Don't allow' in the run dialog returns to the form and leaves nothing set up", async () => {
+  const comp = freeComputer();
+  await withPlugin(installHost(comp, { programs: { start: async () => { throw new Error("Run declined"); } } }), async (host) => {
+    await fill(host);
+    await host.actions["install"]();
+    await until(() => lastView(host).includes("didn't allow slskd to run"), 2000);
+    assert.ok(lastView(host).includes('"value":"bj"'), "the form, still filled in");
+    assert.equal(host.store.managedSlskd, undefined, "no half-finished install");
+  });
+});
+
+test("integration: a slskd on PATH is the user's: not started, and the plugin says to connect to it", async () => {
+  const comp = freeComputer();
+  await withPlugin(installHost(comp, { host: { tool: { name: "slskd", installed: true, version: "0.25.1", origin: "system", latest: "0.26.1" } } }), async (host) => {
+    await fill(host);
+    await host.actions["install"]();
+    await until(() => lastView(host).includes("✗"), 2000);
+    assert.ok(lastView(host).includes("outside Viboplr (0.25.1)"));
+    assert.equal(host.calls.requestAction.filter((r) => r.action === "require-dependency").length, 0);
+    assert.equal(host.calls.programs.filter((c) => c.op === "start").length, 0);
   });
 });
 
@@ -657,10 +743,12 @@ test("integration: a refused sign-in stops the wait early with the reason", asyn
 
 const managedStore = (extra = {}) => ({
   url: "http://127.0.0.1:5030", apiKey: "k".repeat(40), managedBy: "plugin",
-  managedSlskd: { version: "0.26.1", asset: "osx-arm64", port: 5030, webUsername: "viboplr", webPassword: "w".repeat(24), downloadsDir: "/Users/me/Music/Soulseek", installedAt: 1 },
+  managedSlskd: { source: "host", port: 5030, webUsername: "viboplr", webPassword: "w".repeat(24), downloadsDir: "/Users/me/Music/Soulseek", installedAt: 1 },
   ...extra
 });
-const filesInstalled = { "slskd/data/slskd.yml": "x", "slskd/0.26.1/slskd": "bin" };
+// A copy plugin ≤ 0.25.0 installed in its own store.
+const legacyRecord = { version: "0.26.0", asset: "osx-arm64", port: 5030, webUsername: "viboplr", webPassword: "w".repeat(24), downloadsDir: "/Users/me/Music/Soulseek", installedAt: 1 };
+const filesInstalled = { "slskd/data/slskd.yml": "x" };
 
 test("integration: at launch a stopped installed slskd shows the banner, no toast, and Start starts it", async () => {
   const comp = freeComputer();
@@ -697,15 +785,16 @@ test("integration: Restart asks slskd to shut down first, then starts it again",
   });
 });
 
-test("integration: the card — update, start with Viboplr, keep running, files, details, remove last; no address form", async () => {
+test("integration: the card — version, start with Viboplr, keep running, files, details, remove last; no address form", async () => {
   const comp = freeComputer();
   comp.up = true;
-  await withPlugin({ store: managedStore({ managedSlskd: { ...managedStore().managedSlskd, version: "0.26.0" } }), files: { ...filesInstalled, "slskd/0.26.0/slskd": "bin" }, fetch: comp.fetch }, async (host) => {
+  await withPlugin({ store: managedStore(), tool: toolReady, files: filesInstalled, fetch: comp.fetch }, async (host) => {
     await until(() => settingsView(host).includes("slskd on this computer"), 1000);
     const view = host.calls.views.filter((v) => v.viewId === "slskd-browse").at(-1).data;
     const card = findNodes(view, (n) => n.type === "section" && n.title === "slskd on this computer")[0];
-    assert.deepEqual(clickable(card), ["test-connection", "managed-update", "share-collections",
-      "managed-files-toggle", "managed-details-toggle", "managed-remove-ask"], "Remove last");
+    assert.deepEqual(clickable(card), ["test-connection", "share-collections",
+      "managed-files-toggle", "managed-details-toggle", "managed-remove-ask"], "Remove last; no update button (Viboplr's)");
+    assert.ok(JSON.stringify(card).includes("slskd 0.26.1 · Viboplr's copy"));
     const toggles = findNodes(card, (n) => n.type === "settings-row" && n.control && n.control.type === "toggle").map((n) => n.control.action);
     assert.deepEqual(toggles, ["managed-autostart", "managed-set-keep-running"]);
     assert.ok(!JSON.stringify(view).includes('"action":"set-url"'), "no address/key form until Connection details is opened");
@@ -717,20 +806,75 @@ test("integration: the card — update, start with Viboplr, keep running, files,
   });
 });
 
-test("integration: Update downloads the newer build (the host asks), restarts on it and removes the old one", async () => {
+test("integration: a legacy store copy keeps starting from the store, and Move switches it to Viboplr's copy", async () => {
   const comp = freeComputer();
   comp.up = true;
-  await withPlugin({ store: managedStore({ managedSlskd: { ...managedStore().managedSlskd, version: "0.26.0" } }), files: { ...filesInstalled, "slskd/0.26.0/slskd": "bin" }, fetch: comp.fetch,
+  await withPlugin({ store: managedStore({ managedSlskd: legacyRecord }), files: { ...filesInstalled, "slskd/0.26.0/slskd": "bin" }, fetch: comp.fetch,
     programs: { start: async () => { comp.up = true; return { name: "slskd", registered: true, running: true }; } } }, async (host, p) => {
     p._setSigninTiming(2000, 5, 20);
-    await until(() => settingsView(host).includes("managed-update"), 1000);
-    await host.actions["managed-update"]();
-    await until(() => host.store.managedSlskd.version === "0.26.1", 2000);
-    const order = ops(host).filter((o) => ["download", "extract", "run", "stop", "start"].includes(o));
-    assert.deepEqual(order, ["download", "extract", "run", "stop", "start"]);
-    assert.ok(host.calls.programs.some((c) => c.op === "files.remove" && c.path === "slskd/0.26.0"), "the old version is deleted");
-    assert.ok(!settingsView(host).includes("managed-update"), "nothing left to update");
+    await until(() => settingsView(host).includes("managed-move"), 1000);
+    assert.ok(settingsView(host).includes("gets no updates"));
+    await host.actions["managed-move"]();
+    await until(() => host.store.managedSlskd.source === "host", 2000);
+    assert.deepEqual(host.calls.requestAction.filter((r) => r.action === "require-dependency").map((r) => r.payload.name), ["slskd"]);
+    const order = ops(host).filter((o) => ["stop", "start"].includes(o));
+    assert.deepEqual(order, ["stop", "start"]);
+    assert.equal(host.calls.programs.find((c) => c.op === "start").args[1].dependency, "slskd", "the same settings, on Viboplr's copy");
+    assert.equal(host.store.managedSlskd.version, undefined);
+    assert.equal(host.store.managedSlskd.port, 5030, "the rest of the record is kept");
+    assert.ok(host.calls.programs.some((c) => c.op === "files.remove" && c.path === "slskd/0.26.0"), "the old copy is deleted");
+    assert.ok(!host.calls.programs.some((c) => c.op === "files.remove" && c.path === "slskd/data"), "its settings and data stay");
+    assert.ok(!settingsView(host).includes("managed-move"), "nothing left to move");
   });
+});
+
+test("integration: a legacy copy starts from its store path", async () => {
+  const comp = freeComputer();
+  await withPlugin({ store: managedStore({ managedSlskd: legacyRecord }), files: { ...filesInstalled, "slskd/0.26.0/slskd": "bin" }, fetch: comp.fetch,
+    programs: { start: async () => { comp.up = true; return { name: "slskd", registered: true, running: true }; } } }, async (host, p) => {
+    p._setSigninTiming(2000, 5, 20);
+    await until(() => bannerOf(host));
+    host.actions["managed-start"]();
+    await until(() => host.calls.programs.some((c) => c.op === "start"), 1000);
+    assert.deepEqual(host.calls.programs.find((c) => c.op === "start").args[1].path, ["slskd", "0.26.0", "slskd"]);
+    await until(() => !bannerOf(host), 1000);
+  });
+});
+
+test("integration: a Move whose new copy won't start goes back to the old one and deletes nothing", async () => {
+  const comp = freeComputer();
+  comp.up = true;
+  await withPlugin({ store: managedStore({ managedSlskd: legacyRecord }), files: { ...filesInstalled, "slskd/0.26.0/slskd": "bin" }, fetch: comp.fetch,
+    programs: { start: async (name, spec) => {
+      if (spec.dependency) throw new Error("slskd exited as soon as it started:\nbad config");
+      comp.up = true;
+      return { name: "slskd", registered: true, running: true };
+    } } }, async (host, p) => {
+    p._setSigninTiming(2000, 5, 20);
+    await until(() => settingsView(host).includes("managed-move"), 1000);
+    await host.actions["managed-move"]();
+    await until(() => settingsView(host).includes("bad config"), 2000);
+    assert.equal(host.store.managedSlskd.version, "0.26.0", "the legacy record is back");
+    const starts = host.calls.programs.filter((c) => c.op === "start").map((c) => c.args[1]);
+    assert.equal(starts.length, 2);
+    assert.deepEqual(starts[1].path, ["slskd", "0.26.0", "slskd"], "the old copy runs again");
+    assert.ok(!host.calls.programs.some((c) => c.op === "files.remove" && c.path === "slskd/0.26.0"));
+  });
+});
+
+test("integration: at quit, with Keep running off, the plugin stops slskd cleanly; with it on, it leaves it", async () => {
+  for (const stop of [true, false]) {
+    const comp = freeComputer();
+    comp.up = true;
+    const seen = [];
+    await withPlugin({ store: managedStore({ stopWithViboplr: stop }), files: filesInstalled,
+      fetch: async (url, init) => { seen.push(((init && init.method) || "GET") + " " + url.replace(/^https?:\/\/[^/]+/, "")); return comp.fetch(url, init); } }, async (host) => {
+      assert.equal(host.quitHandlers.length, 1, "registered on activation");
+      await host.quitHandlers[0]();
+      assert.equal(seen.includes("DELETE /api/v0/application"), stop, "slskd's own shutdown");
+      assert.equal(ops(host).includes("stop"), stop);
+    });
+  }
 });
 
 test("integration: Keep running off makes the next start tied to Viboplr", async () => {

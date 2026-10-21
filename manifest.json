@@ -1,10 +1,10 @@
 {
   "id": "slskd",
   "name": "Soulseek",
-  "version": "0.25.0",
+  "version": "0.26.0",
   "author": "Viboplr",
   "description": "Search and download from the Soulseek network via a slskd daemon: ranked results, whole-album grabs, live transfer progress, finished files that play and reach your library, and a playback fallback that fetches a missing track from Soulseek.",
-  "minAppVersion": "1.0.85",
+  "minAppVersion": "1.0.113",
   "runtime": "worker",
   "permissions": [
     "network:*",
@@ -19,13 +19,51 @@
   ],
   "permissionReasons": {
     "network:*": "Talk to the slskd server at the address you set, which can be on any host, and find one running on this computer",
-    "programs:run": "Only if you install slskd here: fetch its official release, check its checksum, run it in the background",
+    "programs:run": "Only if you let Viboplr set slskd up here: run Viboplr's copy of slskd in the background",
     "files:read": "Read title, artist and album from finished downloads instead of guessing from the file name",
     "system:open": "Open slskd's web page, the setup guides, and the folders where slskd keeps its files",
     "library:read": "Check your copy's quality before an upgrade, an album's missing tracks, and whether downloads land in a collection",
     "library:write": "Rescan a collection when a download lands in it, and swap in a better copy once you approve it",
     "playback:control": "Play finished Soulseek downloads from the Downloads tab"
   },
+  "binaryDependencies": [
+    {
+      "name": "slskd",
+      "required": false,
+      "reason": "Run a Soulseek client on this computer, if you don't run slskd yourself",
+      "definition": {
+        "description": "Soulseek client the Soulseek plugin can run for you",
+        "versionArgs": [
+          "--version"
+        ],
+        "versionPattern": "^v?(\\d+\\.\\d+\\.\\d+)",
+        "probeEnv": {
+          "DOTNET_BUNDLE_EXTRACT_BASE_DIR": "{install}/.probe-extract",
+          "DOTNET_CLI_TELEMETRY_OPTOUT": "1",
+          "DOTNET_NOLOGO": "1"
+        },
+        "install": {
+          "url": "https://github.com/slskd/slskd/releases"
+        },
+        "managed": {
+          "repo": "slskd/slskd",
+          "assets": {
+            "macos-arm64": "slskd-{version}-osx-arm64.zip",
+            "macos-x64": "slskd-{version}-osx-x64.zip",
+            "windows-x64": "slskd-{version}-win-x64.zip",
+            "windows-arm64": "slskd-{version}-win-arm64.zip",
+            "linux-x64": "slskd-{version}-linux-x64.zip",
+            "linux-arm64": "slskd-{version}-linux-arm64.zip"
+          },
+          "layout": "folder",
+          "entry": "slskd",
+          "checksum": {
+            "github": true
+          }
+        }
+      }
+    }
+  ],
   "stability": "experimental",
   "homepage": "https://github.com/outcast1000/viboplr-slskd",
   "updateUrl": "https://github.com/outcast1000/viboplr-slskd/releases/latest/download/update.json",

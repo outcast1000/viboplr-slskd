@@ -59,7 +59,18 @@ function fakeHost(opts) {
       startedAt: progState.running ? 1 : null, outliveApp: progState.spec ? progState.spec.outliveApp !== false : true,
       logPath: FILES_ROOT + "/logs/" + name + ".log" };
   }
-  const programs = {};
+  // The slskd tool as api.system.getDependency reports it. `o.tool` seeds it
+  // (default: defined, not installed); `requestAction("require-dependency")`
+  // installs it as Viboplr's copy unless `o.installTool === false` (the user
+  // closed the dialog).
+  const toolState = { slskd: o.tool !== undefined ? o.tool : { name: "slskd", installed: false, version: null, origin: null, latest: "0.26.1" } };
+  const installTool = () => {
+    if (o.installTool === false || !toolState.slskd) return;
+    toolState.slskd = { name: "slskd", installed: true, version: "0.26.1", origin: "managed", latest: "0.26.1" };
+  };
+  // Handlers the plugin gave programs.onAppQuitting.
+  const quitHandlers = [];
+  const programs = { onAppQuitting: o.noQuitHook ? undefined : (fn) => { quitHandlers.push(fn); return () => {}; } };
   for (const op of Object.keys(programsDefaults)) {
     programs[op] = async (...args) => {
       calls.programs.push({ op, args });
@@ -110,7 +121,10 @@ function fakeHost(opts) {
       },
       onAction: (id, fn) => { actions[id] = fn; },
       navigateToView: (v) => calls.navigated.push(v),
-      requestAction: (a, p) => calls.requestAction.push({ action: a, payload: p }),
+      requestAction: (a, p) => {
+        calls.requestAction.push({ action: a, payload: p });
+        if (a === "require-dependency" && p && p.name === "slskd") installTool();
+      },
       setBadge: (v, b) => calls.badges.push(b),
       // Absent when a test asks for an older host (`noViewHeader: true`).
       setViewHeader: o.noViewHeader ? undefined : (v, h) => calls.headers.push({ viewId: v, header: h }),
@@ -152,7 +166,15 @@ function fakeHost(opts) {
         openPath: async (p) => { calls.opened.push(["open", p]); },
         revealPath: async (p) => { calls.opened.push(["reveal", p]); }
       },
-      o.dependencies ? { getDependency: async (name) => (o.dependencies[name] !== undefined ? o.dependencies[name] : null) } : {},
+      o.dependencies || !o.noPrograms ? {
+        getDependency: async (name) => {
+          if (o.dependencies && o.dependencies[name] !== undefined) return o.dependencies[name];
+          if (name === "slskd" && !o.noPrograms) return toolState.slskd;
+          return null;
+        }
+      } : {},
+      // The user's standard folders (`o.noUserFolders` for an older host).
+      o.noUserFolders ? {} : { userFolders: async () => ({ home: "/Users/me", downloads: "/Users/me/Downloads", music: "/Users/me/Music" }) },
       o.exec ? {
         exec: async (program, args, execOpts) => {
           calls.exec.push({ program, args });
@@ -168,7 +190,7 @@ function fakeHost(opts) {
     ),
     assistant: { onTool: (name, fn) => { tools[name] = fn; } }
   };
-  return { api, actions, tools, resolvers, calls, store, files, progState };
+  return { api, actions, tools, resolvers, calls, store, files, progState, toolState, quitHandlers };
 }
 
 module.exports = { fakeHost };
