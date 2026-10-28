@@ -299,7 +299,7 @@ test("integration (older host): Upgrade opens the Upgrades tab, finds, downloads
     assert.deepEqual(h.calls.navigated, ["slskd-browse"], "the click lands on the plugin's view");
     const tabs = findNodes(lastView(h), (n) => n.type === "tabs")[0];
     assert.equal(tabs.activeTab, "upgrades", "…on the Upgrades tab");
-    assert.ok(findNodes(lastView(h), (n) => n.type === "section" && n.title === "Upgrading").length, "with this track's panel on top");
+    assert.ok(findNodes(lastView(h), (n) => n.type === "section" && findNodes(n, (b) => b.action === "upgrade-panel-close").length).length, "with this track's panel on top");
     assert.ok(!h.calls.notices.some((n) => /Looking for a better copy/.test(n.message)), "no toast — the view already says it");
 
     await waitFor(() => entryOf(p) && entryOf(p).state === "downloading", 8000, "the download to start");
@@ -321,8 +321,8 @@ test("integration (older host): Upgrade opens the Upgrades tab, finds, downloads
     h.actions["main-tab"]({ tabId: "upgrades" });
     const list = findNodes(lastView(h), (n) => n.type === "track-row-list")[0];
     assert.equal(list.items.length, 1);
-    assert.ok(list.items[0].subtitle.startsWith("Ready: FLAC"), list.items[0].subtitle);
-    assert.deepEqual(list.items[0].actions, ["upgrade-show", "upgrade-replace", "upgrade-remove"]);
+    assert.ok(list.items[0].subtitle.startsWith("Shown above · Ready: FLAC"), "the panel's own row says so: " + list.items[0].subtitle);
+    assert.deepEqual(list.items[0].actions, ["upgrade-replace", "upgrade-remove"], "no Details for the one already shown");
 
     h.actions["upgrade-replace-notice"]();
     assert.equal(h.calls.requestAction.length, 1);
@@ -447,7 +447,10 @@ test("the Upgrades panel shows the file you have, the file it is fetching and th
   assert.equal(findNodes(downloading, (n) => n.type === "progress-bar")[0].value, 50);
   assert.match(text(downloading), /✓ Search   ─   ● Download 50%   ─   ○ Check   ─   ○ Replace/, "the steps");
   const dButtons = findNodes(downloading, (n) => n.type === "button").map((b) => b.label);
-  assert.equal(dButtons[dButtons.length - 1], "Cancel upgrade", "Cancel last, apart from the ways forward");
+  assert.deepEqual(dButtons.slice(-2), ["Cancel upgrade", "Close"], "Cancel after the ways forward; Close only folds the panel");
+  assert.ok(dButtons.includes("Try another source") || !dButtons.includes("Try another sharer"));
+  assert.equal(downloading.title, "Downloading", "the panel's title is where it stands");
+  assert.match(text(downloading), /about 0:38 left/, "how long it has to go");
 
   const ready = plugin._upgradePanel(Object.assign({}, base, { state: "ready",
     file: { path: "/slskd/downloads/viboplr/upgrades/1/03 - Sultans of Swing.flac", size: 38e6, quality: { extension: "flac", qualityTier: 0, bitDepth: 16, sampleRate: 44100 } } }),
@@ -458,10 +461,13 @@ test("the Upgrades panel shows the file you have, the file it is fetching and th
 
   const asking = plugin._upgradePanel(Object.assign({}, base, { state: "ready", file: { path: "/x.flac", quality: { extension: "flac", qualityTier: 0 } } }), null, true, true, true);
   assert.match(text(asking), /Waiting for your answer/);
-  assert.equal(findNodes(asking, (n) => n.type === "button").length, 0, "no second Replace while the dialog is up");
+  assert.equal(findNodes(asking, (n) => n.type === "button" && n.action === "upgrade-replace").length, 0, "no second Replace while the dialog is up");
 
   const waiting = plugin._upgradePanel(Object.assign({}, base, { state: "searching" }), null, false, false, true);
   assert.match(text(waiting), /Waiting for slskd/);
+  const queued = plugin._upgradePanel(Object.assign({}, base, { state: "searching" }), null, true, false, true, 3);
+  assert.match(text(queued), /Waiting to search · 3 ahead/);
+  assert.equal(queued.title, "Waiting");
   void key;
 });
 
@@ -545,7 +551,9 @@ test("integration: nothing at the target → the best better copy is offered; Ta
     await h.actions["ctx:slskd-upgrade"]({ kind: "track", trackId: 42 });
     await waitFor(() => entryOf(p) && entryOf(p).state === "alternative", 8000, "the alternative");
     assert.equal(calls.batches.length, 0, "nothing downloaded that misses the target");
-    assert.ok(/No copy at Any lossless found; best better copy is MP3 320kbps/.test(entryOf(p).message), entryOf(p).message);
+    assert.ok(/No Any lossless on Soulseek, but MP3 320kbps beats your copy/.test(entryOf(p).message), entryOf(p).message);
+    const panel = findNodes(lastView(h), (n) => n.type === "section" && findNodes(n, (b) => b.action === "upgrade-panel-close").length)[0];
+    assert.ok(findNodes(panel, (b) => b.type === "button" && b.label === "Take MP3 320kbps").length, "the button names what you'd get");
 
     await h.actions["upgrade-take-alternative"]({ itemId: "t42" });
     await waitFor(() => calls.batches.length === 1, 2000, "the alternative's download");
@@ -618,12 +626,12 @@ test("integration: the panel lists the sources found; Use this switches to anoth
     await h.actions["ctx:slskd-upgrade"]({ kind: "track", trackId: 42 });
     await waitFor(() => entryOf(p) && entryOf(p).state === "downloading", 8000, "the download to start");
     await p._refreshTransfers();
-    let panel = findNodes(lastView(h), (n) => n.type === "section" && n.title === "Upgrading")[0];
+    let panel = findNodes(lastView(h), (n) => n.type === "section" && findNodes(n, (b) => b.action === "upgrade-panel-close").length)[0];
     assert.equal(findNodes(panel, (n) => n.type === "track-row-list").length, 0, "folded until asked for");
     assert.equal(findNodes(panel, (n) => n.type === "button" && n.action === "upgrade-choose").length, 0,
       "with sources in hand, choosing yourself stays inside the upgrade");
     h.actions["upgrade-sources-toggle"]({ itemId: "t42" });
-    panel = findNodes(lastView(h), (n) => n.type === "section" && n.title === "Upgrading")[0];
+    panel = findNodes(lastView(h), (n) => n.type === "section" && findNodes(n, (b) => b.action === "upgrade-panel-close").length)[0];
     const sources = findNodes(panel, (n) => n.type === "track-row-list")[0];
     assert.ok(sources, "the sources list");
     assert.equal(sources.items.length, 2);
@@ -894,10 +902,63 @@ test("integration: Upgrade on a selection starts one entry per local track and s
     assert.deepEqual(h.calls.notifications.slice(-1),
       ["Upgrading 2 tracks. Skipped 3: 1 isn't a local file, 1 is already being upgraded, 1 isn't in your library."]);
     assert.deepEqual(h.calls.navigated, ["slskd-browse"]);
-    const bar = findNodes(lastView(h), (n) => n.type === "toolbar" && n.title === "Pending")[0];
-    assert.ok(bar, "the pending bar");
+    const bar = findNodes(lastView(h), (n) => n.type === "toolbar" && n.title === "In progress")[0];
+    assert.ok(bar, "the in-progress bar");
     const list = findNodes(lastView(h), (n) => n.type === "track-row-list")[0];
     assert.ok(list.selectable, "many rows can be cancelled / removed at once");
+  } finally {
+    p.deactivate();
+  }
+});
+
+test("upgradeGroup / upgradeSearchQueue / upgradesTabCount: what waits on you, what runs, what didn't work out", () => {
+  const g = (state) => plugin._upgradeGroup({ state });
+  assert.deepEqual(["ready", "alternative"].map(g), ["needs", "needs"]);
+  assert.deepEqual(["searching", "downloading", "checking"].map(g), ["progress", "progress", "progress"]);
+  assert.deepEqual(["none", "failed", "cancelled"].map(g), ["ended", "ended", "ended"]);
+  assert.deepEqual(["replaced", "gone"].map(g), ["history", "history"]);
+
+  const all = { t1: { state: "searching" }, t2: { state: "ready" }, t3: { state: "searching" }, t4: { state: "searching" } };
+  assert.deepEqual(plugin._upgradeSearchQueue(all, "t3"), { t3: 0, t1: 1, t4: 2 }, "the running one first, the rest in start order");
+  assert.deepEqual(plugin._upgradeSearchQueue(all, null), { t1: 0, t3: 1, t4: 2 }, "between polls the first in line is next");
+  assert.deepEqual(plugin._upgradeSearchQueue(all, "t2"), { t1: 0, t3: 1, t4: 2 }, "a key that isn't searching is ignored");
+
+  assert.equal(plugin._upgradesTabCount(all), 1, "what needs you wins");
+  assert.equal(plugin._upgradesTabCount({ t1: { state: "searching" }, t5: { state: "none" } }), 1, "else what runs");
+  assert.equal(plugin._upgradesTabCount({ t5: { state: "failed" }, t6: { state: "replaced" } }), undefined);
+});
+
+test("integration: the Upgrades tab groups entries; Replace all shows for one ready; Close folds the panel; the dead ends clear at once", async () => {
+  const p = loadPlugin();
+  const { h } = replacingHost([]);
+  await p.activate(h.api);
+  try {
+    const all = p._upgrades();
+    const base = { target: "flac16", currentLabel: "MP3 ≈192kbps", triedUsers: [], candidates: [] };
+    all.t1 = Object.assign({ trackId: 1, title: "Ready one", state: "ready", createdAt: 1, file: { path: "/x.flac", quality: { extension: "flac", qualityTier: 0 } } }, base);
+    all.t2 = Object.assign({ trackId: 2, title: "Alt one", state: "alternative", createdAt: 2, alternative: { extension: "mp3", bitRate: 320 } }, base);
+    all.t3 = Object.assign({ trackId: 3, title: "Nothing", state: "none", createdAt: 3, message: "Nothing better than your copy on Soulseek right now" }, base);
+    all.t4 = Object.assign({ trackId: 4, title: "Broke", state: "failed", createdAt: 4, message: "None of the 3 sources sent the file" }, base);
+    h.actions["main-tab"]({ tabId: "upgrades" });
+    let view = lastView(h);
+    const bars = findNodes(view, (n) => n.type === "toolbar").map((t) => t.title);
+    assert.deepEqual(bars, ["Needs you", "Didn't work out"], "grouped, what needs you first");
+    const needsBar = findNodes(view, (n) => n.type === "toolbar" && n.title === "Needs you")[0];
+    assert.ok(needsBar.buttons.some((b) => b.action === "upgrade-replace-all" && /\(1\)/.test(b.label)), "Replace all ready shows even for one");
+    assert.equal(findNodes(view, (n) => n.type === "settings-row" && n.label === "Upgrade to").length, 1);
+    assert.equal(findNodes(view, (n) => n.type === "layout" && n.children && n.children[0] && n.children[0].label === "Upgrade to").length, 1, "the target comes first");
+    assert.equal(findNodes(view, (n) => n.type === "tabs")[0].tabs.find((t) => t.id === "upgrades").count, 2);
+
+    const panelOf = (v) => findNodes(v, (n) => n.type === "section" && findNodes(n, (b) => b.action === "upgrade-panel-close").length)[0];
+    assert.ok(panelOf(view), "the newest waiting on you is shown");
+    h.actions["upgrade-panel-close"]();
+    assert.equal(panelOf(lastView(h)), undefined, "closed");
+    h.actions["upgrade-show"]({ itemId: "t4" });
+    assert.equal(panelOf(lastView(h)).title, "Didn't work", "Details opens it again, titled by state");
+
+    h.actions["upgrade-clear-ended"]();
+    await waitFor(() => !all.t3 && !all.t4, 2000, "the dead ends cleared");
+    assert.ok(all.t1 && all.t2, "the rest stay");
   } finally {
     p.deactivate();
   }

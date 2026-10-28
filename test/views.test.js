@@ -284,8 +284,11 @@ test("upgradeBadge / upgradeRowProgress: one chip per state; a queued download s
   assert.deepEqual(b("downloading", { state: "Queued, Remotely" }), { label: "Queued", variant: "warning" });
   assert.deepEqual(b("downloading", { state: "InProgress" }), { label: "Downloading", variant: "accent" });
   assert.deepEqual(b("ready"), { label: "Ready", variant: "success" });
-  assert.deepEqual(b("alternative"), { label: "Below target", variant: "warning" });
-  assert.deepEqual(b("failed"), { label: "Failed", variant: "error" });
+  assert.deepEqual(b("alternative"), { label: "Better copy found", variant: "warning" });
+  assert.deepEqual(b("failed"), { label: "Didn't work", variant: "error" });
+  assert.deepEqual(plugin._upgradeBadge({ state: "searching" }, null, 1), { label: "Up next", variant: "muted" });
+  assert.deepEqual(plugin._upgradeBadge({ state: "searching" }, null, 4), { label: "Waiting", variant: "muted" });
+  assert.deepEqual(plugin._upgradeBadge({ state: "searching" }, null, 0), { label: "Searching", variant: "muted" });
   assert.equal(plugin._upgradeBadge(null), null);
   assert.equal(plugin._upgradeRowProgress({ state: "downloading" }, { state: "InProgress", size: 10, bytesTransferred: 5 }), 0.5);
   assert.equal(plugin._upgradeRowProgress({ state: "ready" }, { state: "InProgress", size: 10, bytesTransferred: 5 }), null);

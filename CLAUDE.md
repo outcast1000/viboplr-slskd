@@ -230,7 +230,9 @@ than by a long-running promise, because a stranger's queue can outlast a restart
   `lossy256` (≥240); the size-conscious ones deliberately skip better files). Sort: match
   bucket → quality (MP3 first under `high`, FLAC under `lossless`) → sharer ledger → free slot →
   speed → queue. No pick
-  at the target but a better copy exists → **alternative** ("Take the best found").
+  at the target but a better copy exists → **alternative** (chip *Better copy found*, panel button
+  *Take <quality>*). **none** means nothing beats your copy at any target, so it offers no
+  "try a lower target".
 - **downloading**: one sharer at a time into `viboplr/upgrades/`, each sharer once, at most 4.
   No bytes for 10 min → cancelled, counted as a stall, next sharer. **Cancelled** by the user
   stops the upgrade instead of moving on.
@@ -245,13 +247,13 @@ than by a long-running promise, because a stranger's queue can outlast a restart
 - **The user steers a pending upgrade** (owner, 2026-10-05: "it is queued and I can do
   nothing"). The panel offers *Cancel* while searching / downloading / checking
   (`cancelUpgrade` → state **cancelled**, transfer dropped in slskd, no ledger strike — it's
-  the user's call, not the sharer's failure), *Try another sharer* (`skipUpgradeSource`, the next
+  the user's call, not the sharer's failure), *Try another source* (`skipUpgradeSource`, the next
   untried candidate without waiting out the stall timer) and a **Sources found** list
   (`upgradeSources` = the picks plus the alternative; row ids `t<id>#<index>`) where *Use this*
   (`useUpgradeSource`) downloads exactly that file — past the 4-sharer cap, and a pick below the
-  target lowers it to `best` for this upgrade, as *Take the best found* does. The rows carry
-  *Details* (points the panel at that upgrade), Replace / Take the best found / Search again
-  when they apply, *Cancel* and Remove; *Try another sharer* and the sources toggle are on the
+  target lowers it to `best` for this upgrade, as taking the alternative does. The rows carry
+  *Details* (points the panel at that upgrade), Replace / Take the better copy / Search again
+  when they apply, *Cancel* and Remove; *Try another source* and the sources toggle are on the
   panel only (UX review, 2026-10-06 — five verbs on a row is a row nobody reads). The sources
   list is folded by default (UX pass, 2026-10-11): choosing a source by hand stays inside the
   entry instead of detouring through a filtered search and the Downloads tab.
@@ -261,11 +263,23 @@ than by a long-running promise, because a stranger's queue can outlast a restart
   notice (`batchUpgradeNote`; silent when nothing was skipped). Searches still run one at a time.
   A batch entry **never raises the Replace dialog by itself** — thirty dialogs at random over an
   hour would be thirty interruptions — it waits at Ready; *Replace all ready (N)…* on the
-  Pending bar (or Replace on a selection) walks the host's compare dialogs in turn
-  (`replaceAllReady`, *Stop after this one*). The pending list is selectable, so Cancel /
-  Search again / Remove / Take the best found reach many rows at once.
-- **History is folded.** The tab lists only pending upgrades; **replaced** / **gone** collapse
-  into a "History · N finished" toolbar with *Show* / *Clear* (`showUpgradeHistory`, memory only).
+  Needs you bar (shown from **one** ready entry, owner 2026-10-28; or Replace on a selection) walks
+  the host's compare dialogs in turn (`replaceAllReady`, *Stop after this one*). Every group's list
+  is selectable, so its actions reach many rows at once.
+- **Grouped, not one "Pending" list** (UX pass, owner-approved 2026-10-28, from a mockup):
+  `upgradeGroup` → **Needs you** (ready, alternative; *Replace all ready*) · **In progress**
+  (searching, downloading, checking) · **Didn't work out** (none, failed, cancelled; *Search all
+  again* `upgrade-retry-ended`, *Clear* `upgrade-clear-ended`) · History (folded: *Show* / *Clear*,
+  `showUpgradeHistory`, memory only). Each list declares its own actions (`UPGRADE_LIST_ACTIONS`).
+  The tab count (`upgradesTabCount`) is what needs you, else what runs.
+- **A queued search says it is waiting.** slskd runs one search at a time, so a batch's entries
+  queue: `upgradeSearchQueue` (running one = `upgradeSearchKey`, then key order, which is the order
+  `advanceUpgradesNow` starts them) gives each its place → "Waiting to search · N ahead", chip
+  *Up next* / *Waiting*. Thirty rows all saying *Searching* read as stuck.
+- **The panel** is titled by state (`upgradeBadge` label, never a fixed "Upgrading"), ends with
+  *Close* (`upgrade-panel-close` → `focusedUpgrade = false`; Details or a new upgrade opens it), and
+  its row in the list says "Shown above" with no Details. Downloads show "about N left"
+  (`transferEta`) and a remote queue how long it has waited (`waitedFor`).
 
 ## View layout (UX review, owner-approved 2026-10-06)
 
@@ -306,8 +320,8 @@ Each tab owns one job, and a setting lives next to what it controls:
   for how long (`waitedFor`) and offer *Another source* when queued **remotely**. "Remove" is
   labelled **Clear from list** with ✕ — the bin icon is only for *Delete file*, which deletes.
 - **Upgrades** — the *Upgrade to* select on top (moved from Settings); the panel shows the
-  four steps (`upgradeStepper`), your copy beside the one on its way, *Cancel upgrade* last;
-  Sources found is a selectable list so its columns render.
+  four steps (`upgradeStepper`), your copy beside the one on its way, *Cancel upgrade* then
+  *Close* last; Sources found is a selectable list so its columns render.
 - **Fallback** — the whole feature: `stats-grid` (played N of M, median time to start, kept
   files, sharers), the last resolve as a summary with the step trace and candidates behind
   *Show trace*, **Recent** (`resolveHistory`, storage, last 50, one small record per resolve
@@ -360,8 +374,10 @@ the fallback; download history matters less. Each rule replaced a complaint:
   shows none, which is why Recent (fallback) is selectable.
 - **Tab order**: Search · Upgrades · Fallback · Downloads · Settings. The Downloads count is
   `liveTransferCount` (attention + active + waiting) — counting finished files kept it lit forever.
-- **Upgrades**: Sources found is folded behind *Choose the source myself (N)*; the *Upgrade to*
-  row moved to the foot of the tab.
+- **Upgrades**: Sources found is folded behind *Choose the source myself (N)*. The *Upgrade to*
+  row went to the foot of the tab here and came back to the **top** on 2026-10-28: an MP3 library
+  left at the FLAC default read "Nothing better" everywhere with the reason below the fold. Its
+  description says new upgrades use it and running ones keep theirs.
 - **Fallback**: the top line is `fallbackStatusNode` — the plugin can't see whether the user
   switched it on or where it sits in the order (the host doesn't say), so it reports its own
   history and names where the switch lives. Recent resolves are track rows (`historyRows`) with

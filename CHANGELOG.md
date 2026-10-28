@@ -37,6 +37,16 @@ Needs Viboplr 1.0.113.
   plain text, like slskd.yml keeps them), so an install that failed can be
   tried again later without typing them again. *Remove* on the slskd card
   forgets them.
+- **The Upgrades tab is grouped by what each upgrade needs.** *Needs you*
+  (ready to replace, or a better copy below your target) comes first, with
+  *Replace all ready* even for one; then *In progress*; then *Didn't work out*,
+  with *Search all again* and *Clear*. Upgrades waiting for their turn to
+  search say "Waiting to search · 3 ahead" instead of all reading *Searching*.
+  The *Upgrade to* setting is back at the top, and says that new upgrades use
+  it. The details panel is titled by where the upgrade stands, can be closed,
+  and shows the time left on a download. Plainer words throughout: *Better copy
+  found* with a *Take MP3 320* button, "None of the 3 sources sent the file",
+  *Try another source*.
 - **Quitting Viboplr with "Keep slskd running" off** stops slskd through its
   own shutdown first.
 - "Don't allow" in Viboplr's "Run slskd in the background?" dialog returns to the

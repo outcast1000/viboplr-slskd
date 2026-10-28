@@ -6277,15 +6277,19 @@ var UPGRADE_BADGES = {
   downloading: { label: "Downloading", variant: "accent" },
   checking: { label: "Checking", variant: "accent" },
   ready: { label: "Ready", variant: "success" },
-  alternative: { label: "Below target", variant: "warning" },
+  alternative: { label: "Better copy found", variant: "warning" },
   none: { label: "Nothing better", variant: "muted" },
-  failed: { label: "Failed", variant: "error" },
+  failed: { label: "Didn't work", variant: "error" },
   cancelled: { label: "Cancelled", variant: "muted" },
   replaced: { label: "Replaced", variant: "success" },
   gone: { label: "Not in library", variant: "muted" }
 };
-function upgradeBadge(e, t) {
+// `ahead`: searches queued before this one (upgradeSearchQueue). slskd runs
+// one search at a time, so in a batch of thirty, twenty-nine are waiting —
+// all saying "Searching" read as stuck.
+function upgradeBadge(e, t, ahead) {
   if (!e) return null;
+  if (e.state === "searching" && ahead > 0) return { label: ahead === 1 ? "Up next" : "Waiting", variant: "muted" };
   if (e.state === "downloading") {
     var p = t ? transferPhase(t.state) : null;
     if (p !== "downloading" && p !== "starting") return { label: "Queued", variant: "warning" };
@@ -6771,7 +6775,7 @@ function render() {
       // What you came for first; the download history, which you rarely need
       // now that search rows carry their own state, after them.
       { id: "search", label: "Search" },
-      { id: "upgrades", label: "Upgrades", count: Object.keys(upgrades).filter(function (k) { return upgrades[k].state !== "replaced" && upgrades[k].state !== "gone"; }).length || undefined },
+      { id: "upgrades", label: "Upgrades", count: upgradesTabCount(upgrades) },
       { id: "fallback", label: "Fallback" },
       { id: "transfers", label: "Downloads", count: liveTransferCount(transfers) || undefined },
       { id: "settings", label: "Settings" }
@@ -7274,6 +7278,23 @@ function registerActions() {
     useUpgradeSource(ref.key, ref.index).catch(function (e) { console.error("slskd: switching the upgrade's source failed:", e); });
   });
 
+  api.ui.onAction("upgrade-panel-close", function () {
+    focusedUpgrade = false;
+    render();
+  });
+
+  api.ui.onAction("upgrade-retry-ended", function () {
+    Object.keys(upgrades).filter(function (k) { return upgradeGroup(upgrades[k]) === "ended"; }).forEach(function (k) {
+      retryUpgrade(k).catch(function (e) { console.error("slskd: retrying the upgrade failed:", e); });
+    });
+  });
+
+  api.ui.onAction("upgrade-clear-ended", function () {
+    Object.keys(upgrades).filter(function (k) { return upgradeGroup(upgrades[k]) === "ended"; }).forEach(function (k) {
+      removeUpgrade(k).catch(function (e) { console.error("slskd: removing the upgrade failed:", e); });
+    });
+  });
+
   api.ui.onAction("upgrade-history-toggle", function () {
     showUpgradeHistory = !showUpgradeHistory;
     render();
@@ -7750,6 +7771,7 @@ function registerActions() {
 // }
 var upgrades = {};
 var upgradeSearchRunning = false;
+var upgradeSearchKey = null;   // the entry whose search is running, for the waiting rows' "N ahead"
 var upgradeAdvancing = false;  // the poll and a click can both advance; one at a time
 var lastReadyUpgrade = null;   // which entry the "ready" toast's button opens
 var focusedUpgrade = null;     // the entry the Upgrades tab's panel describes (last one started here)
@@ -7998,9 +8020,10 @@ function setUpgradeState(e, state, message) {
 }
 
 // Pure: the second line of an Upgrades row.
-function upgradeLine(e, t) {
+function upgradeLine(e, t, ahead) {
   var target = UPGRADE_TARGETS[upgradeTargetOf(e.target)];
   var have = "your copy " + (e.currentLabel || "?");
+  if (e.state === "searching" && ahead > 0) return "Waiting to search · " + ahead + " ahead · " + have;
   if (e.state === "searching") return "Searching Soulseek for " + target + " · " + have;
   if (e.state === "downloading" && e.active) {
     var pick = e.active;
@@ -8010,8 +8033,11 @@ function upgradeLine(e, t) {
       var pct = transferProgress(t);
       bits.push(pct == null ? "downloading" : "downloading " + Math.round(pct * 100) + "%");
       if (t.averageSpeed) bits.push("↓ " + formatSpeed(t.averageSpeed));
+      var eta = transferEta(t);
+      if (eta) bits.push("about " + formatDurationSecs(eta) + " left");
     } else if (t && t.placeInQueue != null) {
-      bits.push("waiting in their queue · position " + t.placeInQueue);
+      var waited = waitedFor(t, nowMs());
+      bits.push("waiting in their queue · position " + t.placeInQueue + (waited ? " · " + waited : ""));
     } else {
       bits.push("queued");
     }
@@ -8227,6 +8253,7 @@ async function beginUpgrade(row, opts) {
 // `UPGRADE_SEARCH_MS`, queued behind any other search in `searchChain`.
 async function runUpgradeSearch(e) {
   upgradeSearchRunning = true;
+  upgradeSearchKey = upgradeKey(e.trackId);
   try {
     var prefs = viewPrefs({ knownDurationSecs: e.durationSecs });
     var ranked = await searchForTrack({ title: e.title, artist: e.artist, album: e.album }, prefs, null, null, nowMs() + UPGRADE_SEARCH_MS);
@@ -8239,7 +8266,7 @@ async function runUpgradeSearch(e) {
       ranked.length + " files, " + r.matched + " match, " + r.better + " better, " + r.picks.length + " at the target", "slskd");
     if (!e.candidates.length) {
       if (e.alternative) {
-        setUpgradeState(e, "alternative", "No copy at " + UPGRADE_TARGETS[upgradeTargetOf(e.target)] + " found; best better copy is " + qualityLabel(e.alternative));
+        setUpgradeState(e, "alternative", "No " + UPGRADE_TARGETS[upgradeTargetOf(e.target)] + " on Soulseek, but " + qualityLabel(e.alternative) + " beats your copy");
       } else {
         setUpgradeState(e, "none", r.matched ? "Nothing better than your copy on Soulseek right now" : noMatchMessage(ranked, e.artist, "this track"));
       }
@@ -8249,10 +8276,11 @@ async function runUpgradeSearch(e) {
     await startNextUpgradeCandidate(e);
   } catch (err) {
     console.error("slskd: upgrade search failed:", err);
-    setUpgradeState(e, "failed", "Search failed: " + ((err && err.message) || String(err)));
+    setUpgradeState(e, "failed", "Couldn't search Soulseek: " + ((err && err.message) || String(err)));
     await saveUpgrades();
   } finally {
     upgradeSearchRunning = false;
+    upgradeSearchKey = null;
     render();
   }
 }
@@ -8266,7 +8294,8 @@ async function startNextUpgradeCandidate(e) {
     if (await enqueueUpgradeCandidate(e, c)) return true;
   }
   e.active = null;
-  setUpgradeState(e, "failed", "No sharer delivered (" + e.triedUsers.length + " tried)");
+  setUpgradeState(e, "failed", e.triedUsers.length === 1 ? "The one source found didn't send the file"
+    : "None of the " + e.triedUsers.length + " sources sent the file");
   await saveUpgrades();
   return false;
 }
@@ -8460,7 +8489,7 @@ async function advanceUpgradeCheck(e) {
     e.lastRejected = verdict.note;
     await api.storage.set(stateKey("tracked"), tracked);
     await startNextUpgradeCandidate(e);
-    if (e.state === "failed") e.message = "No file held up (" + verdict.note + ")";
+    if (e.state === "failed") e.message = "No downloaded copy held up — the last one: " + verdict.note;
     await saveUpgrades();
     return;
   }
@@ -8753,18 +8782,50 @@ async function clearUpgradeHistory() {
   render();
 }
 
-function upgradeRows(history) {
+// Pure: which group of the Upgrades tab an entry sits in. What waits on you
+// comes first, so a Ready row can't hide among thirty searches; the dead ends
+// last, with one click to try them all again (UX pass, owner-approved
+// 2026-10-28 — one flat "Pending" list mixed all three).
+function upgradeGroup(e) {
+  if (!e) return null;
+  if (e.state === "ready" || e.state === "alternative") return "needs";
+  if (upgradeIsBusy(e)) return "progress";
+  if (upgradeIsHistory(e)) return "history";
+  return "ended";
+}
+
+// Pure: entry key → how many searches are queued before it. The running one
+// is 0; with none running (between polls) the first in line is 0 too, since
+// the next poll starts it. Searches start in key order (advanceUpgradesNow).
+function upgradeSearchQueue(all, runningKey) {
+  var out = {};
+  var n = 0;
+  var running = runningKey && all[runningKey] && all[runningKey].state === "searching" ? runningKey : null;
+  if (running) { out[running] = 0; n = 1; }
+  for (var k in all) {
+    if (k === running || !all[k] || all[k].state !== "searching") continue;
+    out[k] = n++;
+  }
+  return out;
+}
+
+// `group`: an upgradeGroup id; `shownKey`: the entry the panel describes,
+// whose row says so instead of offering Details.
+function upgradeRows(group, shownKey) {
+  var queue = upgradeSearchQueue(upgrades, upgradeSearchKey);
   return Object.keys(upgrades)
     .map(function (k) { return upgrades[k]; })
-    .filter(function (e) { return upgradeIsHistory(e) === !!history; })
+    .filter(function (e) { return upgradeGroup(e) === group; })
     .sort(function (a, b) { return (b.createdAt || 0) - (a.createdAt || 0); })
     .map(function (e) {
+      var key = upgradeKey(e.trackId);
       var t = e.active ? transferByKey(e.active.key) : null;
+      var line = upgradeLine(e, t, queue[key]);
       return {
-        id: upgradeKey(e.trackId),
+        id: key,
         title: e.title,
-        subtitle: upgradeLine(e, t),
-        badge: upgradeBadge(e, t) || undefined,
+        subtitle: key === shownKey ? "Shown above · " + line : line,
+        badge: upgradeBadge(e, t, queue[key]) || undefined,
         progress: upgradeRowProgress(e, t),
         album: e.album || undefined,
         duration: e.durationSecs != null ? formatDurationSecs(e.durationSecs) : undefined,
@@ -8772,7 +8833,7 @@ function upgradeRows(history) {
         artistName: e.artist,
         albumTitle: e.album,
         kind: "audio",
-        actions: upgradeRowActions(e)
+        actions: key === shownKey ? upgradeRowActions(e).filter(function (id) { return id !== "upgrade-show"; }) : upgradeRowActions(e)
       };
     });
 }
@@ -8785,7 +8846,9 @@ function displayPath(p) {
 
 // Pure: which entry the panel describes — the one last started here while it
 // still exists, else the newest one still in progress or waiting on you.
+// `focused` false: the user closed the panel; Details (or a new upgrade) opens it.
 function panelUpgrade(all, focused) {
+  if (focused === false) return null;
   if (focused && all[focused]) return all[focused];
   var best = null;
   for (var k in all) {
@@ -8825,7 +8888,7 @@ function compareSide(caption, lines) {
 // `t` is the active transfer, `ready` whether slskd is up, `asking` whether
 // the host's Replace dialog is open for it, `inPlace` whether this host
 // replaces behind its own dialog.
-function upgradePanel(e, t, ready, asking, inPlace) {
+function upgradePanel(e, t, ready, asking, inPlace, ahead) {
   var key = upgradeKey(e.trackId);
   var phase = t ? transferPhase(t.state) : null;
   var pct = t && (phase === "downloading" || phase === "starting") ? transferProgress(t) : null;
@@ -8845,7 +8908,9 @@ function upgradePanel(e, t, ready, asking, inPlace) {
   if (e.state === "searching") {
     theirs = compareSide("Looking for", [
       { type: "text", content: UPGRADE_TARGETS[upgradeTargetOf(e.target)] },
-      mutedText(ready ? "Searching Soulseek…" : "Waiting for slskd to be ready…")
+      mutedText(!ready ? "Waiting for slskd to be ready…"
+        : ahead > 0 ? "Waiting to search · " + ahead + " ahead — slskd runs one search at a time"
+        : "Searching Soulseek…")
     ]);
   } else if (e.state === "downloading" && e.active) {
     var a = e.active;
@@ -8855,16 +8920,19 @@ function upgradePanel(e, t, ready, asking, inPlace) {
         (sharerLabel(sharers[a.username]) ? " · " + sharerLabel(sharers[a.username]) : ""))
     ];
     if (pct != null) {
+      var etaSecs = transferEta(t);
       side.push({ type: "progress-bar", value: Math.round(pct * 100), max: 100,
-        label: Math.round(pct * 100) + "%" + (t.averageSpeed ? " · ↓ " + formatSpeed(t.averageSpeed) : "") });
+        label: Math.round(pct * 100) + "%" + (t.averageSpeed ? " · ↓ " + formatSpeed(t.averageSpeed) : "") +
+          (etaSecs ? " · about " + formatDurationSecs(etaSecs) + " left" : "") });
     } else if (t && t.placeInQueue != null) {
-      side.push(mutedText("Waiting in " + a.username + "'s queue · position " + t.placeInQueue));
+      var waitedLine = waitedFor(t, nowMs());
+      side.push(mutedText("Waiting in " + a.username + "'s queue · position " + t.placeInQueue + (waitedLine ? " · " + waitedLine : "")));
     } else {
       side.push(mutedText("Queued with " + a.username));
     }
-    if (e.triedUsers && e.triedUsers.length > 1) side.push(mutedText("Sharer " + e.triedUsers.length + " — the earlier ones didn't deliver, or you moved on."));
+    if (e.triedUsers && e.triedUsers.length > 1) side.push(mutedText("Source " + e.triedUsers.length + " — the earlier ones didn't send it, or you moved on."));
     theirs = compareSide("On its way", side);
-    if (nextUntriedSource(e)) buttons.push(actionButton("Try another sharer", "upgrade-skip", "secondary", { data: { itemId: key } }));
+    if (nextUntriedSource(e)) buttons.push(actionButton("Try another source", "upgrade-skip", "secondary", { data: { itemId: key } }));
   } else if (e.state === "checking") {
     theirs = compareSide("Downloaded", [{ type: "text", content: "Checking the downloaded file…" }]);
   } else if (e.state === "ready" && e.file) {
@@ -8878,7 +8946,7 @@ function upgradePanel(e, t, ready, asking, inPlace) {
     lines.push({ type: "text", content: "Replaced in your library." });
   } else {
     lines.push({ type: "text", content: e.message || e.state });
-    if (e.state === "alternative") buttons.push(actionButton("Take the best found", "upgrade-take-alternative", "accent", { data: { itemId: key } }));
+    if (e.state === "alternative") buttons.push(actionButton(e.alternative ? "Take " + qualityLabel(e.alternative) : "Take the better copy", "upgrade-take-alternative", "accent", { data: { itemId: key } }));
     if (e.state === "none" || e.state === "failed" || e.state === "alternative" || e.state === "cancelled") buttons.push(actionButton("Search again", "upgrade-retry", "secondary", { data: { itemId: key } }));
   }
   lines.push(theirs ? { type: "layout", direction: "horizontal", children: [mine, { type: "text", content: "→" }, theirs] } : mine);
@@ -8895,9 +8963,10 @@ function upgradePanel(e, t, ready, asking, inPlace) {
   } else if (!upgradeIsHistory(e) && e.state !== "ready" && e.state !== "searching") {
     buttons.push(actionButton("Search Soulseek myself…", "upgrade-choose", "secondary", { data: { itemId: key } }));
   }
-  // Cancel goes last, apart from the ways forward.
+  // Cancel goes last, apart from the ways forward; Close only folds the panel.
   if (upgradeIsBusy(e)) buttons.push(cancel);
-  if (buttons.length) lines.push(buttonRow(buttons));
+  buttons.push(actionButton("Close", "upgrade-panel-close", "secondary"));
+  lines.push(buttonRow(buttons));
   // Every file the search found for it, so the user can take a different
   // source than the automatic pick — a sharer with a shorter queue, a smaller
   // file, the one below the target. `selectable` is what makes the columns
@@ -8914,7 +8983,10 @@ function upgradePanel(e, t, ready, asking, inPlace) {
       actions: [{ id: "upgrade-use-source", label: "Use this", icon: "⬇" }]
     });
   }
-  return { type: "section", title: "Upgrading", children: lines };
+  // The title says where it stands, so a failed or ready entry doesn't read
+  // as "Upgrading".
+  var badge = upgradeBadge(e, t, ahead);
+  return { type: "section", title: badge ? badge.label : "Upgrade", children: lines };
 }
 
 var SOURCE_COLUMNS = [
@@ -8925,66 +8997,103 @@ var SOURCE_COLUMNS = [
 
 var sourcesOpen = {};   // upgrade key → its "Sources found" list is unfolded
 
+// The row actions each group's list declares, the likely one first.
+var UPGRADE_LIST_ACTIONS = {
+  needs: ["upgrade-replace", "upgrade-take-alternative", "upgrade-show", "upgrade-retry", "upgrade-remove"],
+  progress: ["upgrade-show", "upgrade-cancel", "upgrade-remove"],
+  ended: ["upgrade-retry", "upgrade-show", "upgrade-remove"]
+};
+
+function upgradeListActions(group, rows, inPlace) {
+  var defs = {
+    "upgrade-show": { id: "upgrade-show", label: "Details", icon: "☰" },
+    "upgrade-replace": { id: "upgrade-replace", label: inPlace ? "Replace…" : "Compare & replace…", icon: "⇪" },
+    "upgrade-take-alternative": { id: "upgrade-take-alternative", label: "Take the better copy", icon: "⬇" },
+    "upgrade-retry": { id: "upgrade-retry", label: "Search again", icon: "↻" },
+    "upgrade-cancel": { id: "upgrade-cancel", label: "Cancel", icon: "■" },
+    // Drops the entry; a downloaded file stays where it is.
+    "upgrade-remove": { id: "upgrade-remove", label: "Remove", icon: "✕" }
+  };
+  return declaredActions(UPGRADE_LIST_ACTIONS[group].map(function (id) { return defs[id]; }), rows);
+}
+
+// Pure: the Upgrades tab's count — what waits on you, else what is running.
+function upgradesTabCount(all) {
+  var needs = 0, progress = 0;
+  for (var k in all) {
+    var g = upgradeGroup(all[k]);
+    if (g === "needs") needs++;
+    else if (g === "progress") progress++;
+  }
+  return needs || progress || undefined;
+}
+
 function upgradesTab() {
-  var children = [];
   var inPlace = canReplaceInPlace();
+  // The setting that steers every upgrade, above them: an MP3 library left at
+  // the FLAC default otherwise read "Nothing better" everywhere with the why
+  // below the fold.
+  var children = [upgradeTargetRow()];
   if (!Object.keys(upgrades).length) {
     children.push({ type: "text", className: "plugin-muted",
-      content: "Nothing being upgraded. Choose Soulseek: Upgrade on a track in your library and a better copy is found, downloaded and checked here; you replace it after comparing the two." });
-  } else {
-    var shown = panelUpgrade(upgrades, focusedUpgrade);
-    if (shown) {
-      children.push(upgradePanel(shown, shown.active ? transferByKey(shown.active.key) : null,
-        readiness.state === "ready", !!replaceOffers[upgradeKey(shown.trackId)], inPlace));
-    }
-    var pending = upgradeRows(false);
-    if (pending.length) {
-      var ready = readyUpgradeKeys();
-      var bar = [];
-      if (replaceWalk) bar.push({ label: "Stop after this one", action: "upgrade-replace-stop", icon: "■" });
-      else if (ready.length > 1 && inPlace) bar.push({ label: "Replace all ready (" + ready.length + ")…", action: "upgrade-replace-all", variant: "accent", icon: "⇪" });
-      children.push({ type: "toolbar", title: "Pending", buttons: bar,
-        status: pending.length + (ready.length ? " · " + ready.length + " ready" : "") + (replaceWalk ? " · replacing one at a time" : "") });
+      content: "Nothing being upgraded. Right-click a track in your library and choose Soulseek: Upgrade: a better copy is found, downloaded and checked here, and you replace yours after comparing the two." });
+    return { type: "layout", direction: "vertical", children: children };
+  }
+  var shown = panelUpgrade(upgrades, focusedUpgrade);
+  var shownKey = shown ? upgradeKey(shown.trackId) : null;
+  if (shown) {
+    var queue = upgradeSearchQueue(upgrades, upgradeSearchKey);
+    children.push(upgradePanel(shown, shown.active ? transferByKey(shown.active.key) : null,
+      readiness.state === "ready", !!replaceOffers[shownKey], inPlace, queue[shownKey]));
+  }
+  function list(group, rows) {
+    // Selectable, so the actions reach many rows at once from the selection
+    // bar (their handlers take every id) — and only a selectable list draws
+    // a row's hover actions.
+    return { type: "track-row-list", items: rows, selectable: true, showHeader: false,
+      actions: upgradeListActions(group, rows, inPlace) };
+  }
+  var needs = upgradeRows("needs", shownKey);
+  var progress = upgradeRows("progress", shownKey);
+  var ended = upgradeRows("ended", shownKey);
+  if (needs.length) {
+    var ready = readyUpgradeKeys();
+    var bar = [];
+    if (replaceWalk) bar.push({ label: "Stop after this one", action: "upgrade-replace-stop", icon: "■" });
+    else if (ready.length && inPlace) bar.push({ label: "Replace all ready (" + ready.length + ")…", action: "upgrade-replace-all", variant: "accent", icon: "⇪" });
+    children.push({ type: "toolbar", title: "Needs you", buttons: bar,
+      status: needs.length + (ready.length ? " · " + ready.length + " ready" : "") + (replaceWalk ? " · replacing one at a time" : "") });
+    children.push(list("needs", needs));
+  }
+  if (progress.length) {
+    var searching = progress.filter(function (r) { return upgrades[r.id] && upgrades[r.id].state === "searching"; }).length;
+    children.push({ type: "toolbar", title: "In progress", buttons: [],
+      status: progress.length + (searching > 1 ? " · searches run one at a time" : "") });
+    children.push(list("progress", progress));
+  }
+  if (ended.length) {
+    children.push({ type: "toolbar", title: "Didn't work out", status: String(ended.length), buttons: [
+      { label: "Search all again", action: "upgrade-retry-ended", icon: "↻" },
+      { label: "Clear", action: "upgrade-clear-ended", icon: "✕" }] });
+    children.push(list("ended", ended));
+  }
+  if (!needs.length && !progress.length && !ended.length) children.push(mutedText("Nothing pending."));
+  // Finished upgrades are of little use once done: one folded line, and the
+  // list only on request.
+  var history = upgradeRows("history", null);
+  if (history.length) {
+    children.push({ type: "toolbar", title: "History", status: history.length + " finished",
+      buttons: [{ label: showUpgradeHistory ? "Hide" : "Show", action: "upgrade-history-toggle" },
+        { label: "Clear", action: "upgrade-history-clear", icon: "✕" }] });
+    if (showUpgradeHistory) {
       children.push({
         type: "track-row-list",
-        items: pending,
-        // Selectable, so Cancel / Search again / Remove / Replace reach many
-        // at once from the selection bar (their handlers take every id).
-        selectable: true,
+        items: history,
         showHeader: false,
-        actions: declaredActions([
-          { id: "upgrade-show", label: "Details", icon: "☰" },
-          { id: "upgrade-replace", label: inPlace ? "Replace…" : "Compare & replace…", icon: "⇪" },
-          { id: "upgrade-take-alternative", label: "Take the best found", icon: "⬇" },
-          { id: "upgrade-retry", label: "Search again", icon: "↻" },
-          { id: "upgrade-cancel", label: "Cancel", icon: "■" },
-          // Drops the entry; a downloaded file stays where it is.
-          { id: "upgrade-remove", label: "Remove", icon: "✕" }
-        ], pending)
+        actions: [{ id: "upgrade-remove", label: "Remove", icon: "✕" }]
       });
-    } else {
-      children.push(mutedText("Nothing pending."));
-    }
-    // Finished upgrades are of little use once done: one folded line, and the
-    // list only on request.
-    var history = upgradeRows(true);
-    if (history.length) {
-      children.push({ type: "toolbar", title: "History", status: history.length + " finished",
-        buttons: [{ label: showUpgradeHistory ? "Hide" : "Show", action: "upgrade-history-toggle" },
-          { label: "Clear", action: "upgrade-history-clear", icon: "✕" }] });
-      if (showUpgradeHistory) {
-        children.push({
-          type: "track-row-list",
-          items: history,
-          showHeader: false,
-          actions: [{ id: "upgrade-remove", label: "Remove", icon: "✕" }]
-        });
-      }
     }
   }
-  // The setting that steers every upgrade, under the upgrades it steers:
-  // the tab opens on what is happening, not on a dropdown.
-  children.push(upgradeTargetRow());
   return { type: "layout", direction: "vertical", children: children };
 }
 
@@ -8993,7 +9102,7 @@ function upgradesTab() {
 function upgradeTargetRow() {
   var t = upgradeTargetOf(settings.upgradeTarget);
   return { type: "settings-row", label: "Upgrade to",
-    description: UPGRADE_TARGET_HELP[t] + " Nothing in your library changes until you replace.",
+    description: UPGRADE_TARGET_HELP[t] + " New upgrades use this; ones already under way keep theirs. Nothing in your library changes until you replace.",
     control: { type: "select", action: "set-upgrade-target", value: t,
       options: Object.keys(UPGRADE_TARGETS).map(function (k) { return { value: k, label: UPGRADE_TARGETS[k] }; }) } };
 }
@@ -10047,6 +10156,9 @@ return {
   _upgradeSourceRows: upgradeSourceRows,
   _parseSourceId: parseSourceId,
   _upgradesTab: upgradesTab,
+  _upgradeGroup: upgradeGroup,
+  _upgradeSearchQueue: upgradeSearchQueue,
+  _upgradesTabCount: upgradesTabCount,
   _sameLibraryPath: sameLibraryPath,
   _setUpgradeTimings: function (searchMs, stallMs) { UPGRADE_SEARCH_MS = searchMs; if (stallMs != null) UPGRADE_STALL_MS = stallMs; },
   _startFill: startFill,
