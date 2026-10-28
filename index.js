@@ -3576,8 +3576,12 @@ var managed = { supported: false, dep: null, record: null, status: null, job: nu
 // What slskd itself shares (GET /api/v0/shares), read once slskd is ready;
 // null when not read.
 var slskdShared = null;
-// The install form; memory only, dropped once the install ends. The account
-// goes into slskd.yml and nowhere else. `autostart` (saved as
+// The install form. The Soulseek account is also kept in plugin storage
+// (ACCOUNT_KEY) as it is typed, so a restart — or an install that failed and
+// is tried again later — doesn't make the user type it again; it outlives a
+// finished install too, for the next one, until the card's Remove forgets it
+// (forgetAccount). It is stored in the clear, as
+// slskd.yml stores it. The rest of the form is memory only. `autostart` (saved as
 // settings.startWithViboplr once the install succeeds) defaults on: slskd is
 // meant to be running whenever Viboplr is; the user can turn that off here or
 // later.
@@ -3586,7 +3590,61 @@ var slskdShared = null;
 // behind everyone else.
 // `downloadsDir` starts as <Downloads>/Soulseek (prefillDownloadsDir), so the
 // form needs no picking before it works.
-var installForm = { username: "", password: "", downloadsDir: "", autostart: true, shareCollections: true };
+var installForm = freshInstallForm();
+var ACCOUNT_KEY = "soulseekAccount";
+// Writes chained so they land in typing order.
+var accountWrite = Promise.resolve();
+
+// The form as it starts: empty, except the account the user last typed.
+function freshInstallForm() {
+  return {
+    username: installForm ? installForm.username : "",
+    password: installForm ? installForm.password : "",
+    downloadsDir: "", autostart: true, shareCollections: true
+  };
+}
+
+// Pure: the stored account, or null for nothing worth keeping.
+function storedAccount(form) {
+  var username = String((form && form.username) || "");
+  var password = String((form && form.password) || "");
+  return username || password ? { username: username, password: password } : null;
+}
+
+// Written on every keystroke, not after a pause: deactivate can't wait for a
+// write, so a debounced one pending at quit would be lost. An emptied form
+// deletes the key rather than storing null.
+function saveAccount() {
+  var account = storedAccount(installForm);
+  // Taken now: a write still queued when deactivate clears `api` must land.
+  var storage = api.storage;
+  accountWrite = accountWrite.then(function () {
+    return account ? storage.set(ACCOUNT_KEY, account) : storage.delete(ACCOUNT_KEY);
+  }).catch(function (e) {
+    console.error("slskd: couldn't save the Soulseek account:", e);
+  });
+  return accountWrite;
+}
+
+// Remove forgets the account too: the user asked for slskd to be gone, and
+// the password shouldn't outlive it in the plugin's storage.
+function forgetAccount() {
+  installForm.username = "";
+  installForm.password = "";
+  return saveAccount();
+}
+
+async function loadAccount() {
+  try {
+    var a = await api.storage.get(ACCOUNT_KEY);
+    if (a && typeof a === "object") {
+      installForm.username = typeof a.username === "string" ? a.username : "";
+      installForm.password = typeof a.password === "string" ? a.password : "";
+    }
+  } catch (e) {
+    console.error("slskd: couldn't read the Soulseek account:", e);
+  }
+}
 
 // Pure: the program file inside a legacy store copy (slskd/<version>/).
 function slskdBinaryName(asset) {
@@ -3842,19 +3900,56 @@ function portLooksFree(error) {
   return /refused/i.test(String((error && error.message) || error || ""));
 }
 
-// The first web port nothing listens on. A refused connection answers at
-// once, so this costs little; anything that answers (even an error page) or
-// hangs is in use.
-async function pickFreePort() {
-  for (var i = 0; i < MANAGED_WEB_PORTS.length; i++) {
-    var port = MANAGED_WEB_PORTS[i];
-    try {
-      await api.network.fetch("http://127.0.0.1:" + port + "/", { method: "GET", timeoutMs: 800, headers: { "User-Agent": CLIENT_USER_AGENT } });
-    } catch (e) {
-      if (portLooksFree(e)) return port;
+// How long a port probe waits for its refusal. Windows doesn't refuse a
+// connection to a closed localhost port at once: it retries the SYN and
+// answers "actively refused" after about 2s (measured 2.1s). An 800ms budget
+// timed out on every port first, so a free computer read as "all taken".
+var PORT_PROBE_TIMEOUT_MS = 4000;
+
+// Probe every item at once and resolve with the first, in list order, whose
+// probe answers non-null — as soon as every item before it has answered null,
+// without waiting for the slower ones after it. Resolves null when none does.
+// Probing at once matters on Windows, where a closed localhost port refuses
+// only after ~2s: in turn, a dozen ports cost half a minute.
+function firstInOrder(items, probe) {
+  return new Promise(function (resolve) {
+    var answers = new Array(items.length);
+    var settled = new Array(items.length);
+    var done = false;
+    function check() {
+      if (done) return;
+      for (var i = 0; i < items.length; i++) {
+        if (!settled[i]) return;
+        if (answers[i] != null) { done = true; resolve(answers[i]); return; }
+      }
+      done = true;
+      resolve(null);
     }
-  }
-  return null;
+    if (!items.length) { resolve(null); return; }
+    items.forEach(function (item, i) {
+      Promise.resolve().then(function () { return probe(item); }).then(function (v) { answers[i] = v == null ? null : v; }, function (e) {
+        console.error("slskd: probe of", item, "failed:", e);
+        answers[i] = null;
+      }).then(function () { settled[i] = true; check(); });
+    });
+  });
+}
+
+// The first web port nothing listens on. Anything that answers (even an
+// error page) or hangs is in use; the lowest free port wins, not the first
+// to answer.
+function pickFreePort() {
+  return firstInOrder(MANAGED_WEB_PORTS, function (port) {
+    return api.network.fetch("http://127.0.0.1:" + port + "/", { method: "GET", timeoutMs: PORT_PROBE_TIMEOUT_MS, headers: { "User-Agent": CLIENT_USER_AGENT } })
+      .then(function () { return null; }, function (e) {
+        if (portLooksFree(e)) return port;
+        // A timeout or anything but a refusal: something may be there, so the
+        // port is skipped — logged, since a wrong budget once made every port
+        // look taken.
+        console.error("slskd: port " + port + " didn't refuse a connection, treating it as in use:", e);
+        return null;
+      });
+  });
 }
 
 // Make sure Viboplr has its copy of slskd: already there, or ask Viboplr to
@@ -3863,15 +3958,35 @@ async function pickFreePort() {
 // the tool's status, or null once `isCurrent()` says nobody is waiting any
 // more (Cancel, a deactivate). The host tells the plugin nothing when the
 // dialog closes, so a dialog turned down shows up as the wait running out.
-async function ensureHostTool(isCurrent) {
+// Polls with Viboplr still knowing nothing of slskd before the checklist says
+// so (~12s at the real poll rate). A definition waiting for the user's trust
+// also reads as null, so this can't fail at once: the consent dialog comes
+// first and may take a moment to answer.
+var NO_DEFINITION_HINT_POLLS = 4;
+var NO_DEFINITION_HINT = "Viboplr doesn't know how to install slskd yet, so it has no Install dialog to show. " +
+  "If it asked whether to trust this plugin's tool, answer that first. Otherwise its notifications (the bell) may say why — " +
+  "a development copy of this plugin needs a development build of Viboplr. You can also run slskd yourself and connect to it.";
+
+// `onNoDefinition(text | null)`: shown while Viboplr has no slskd definition
+// (getDependency answers null), cleared once it has one.
+// A require-dependency asked for while there is no definition is dropped by
+// the host (the trust prompt may still be open), so it is asked for again the
+// first time a definition appears; otherwise the user who answered the trust
+// prompt would never see an Install dialog and the wait would just run out.
+async function ensureHostTool(isCurrent, onNoDefinition) {
   var dep = await api.system.getDependency(SLSKD_TOOL);
   if (hostToolReady(dep)) return dep;
   if (dep && dep.installed && dep.origin === "system") {
     throw new Error("slskd is already installed on this computer outside Viboplr" + (dep.version ? " (" + dep.version + ")" : "") + ". Viboplr doesn't start that copy: start it the way you installed it and connect to it instead.");
   }
-  api.ui.requestAction("require-dependency", { name: SLSKD_TOOL, feature: "Running slskd for you" });
+  function requestInstall() {
+    api.ui.requestAction("require-dependency", { name: SLSKD_TOOL, feature: "Running slskd for you" });
+  }
+  requestInstall();
+  var defined = !!dep;
+  var hinted = false;
   var until = Date.now() + TOOL_WAIT_MS;
-  while (Date.now() < until) {
+  for (var polls = 1; Date.now() < until; polls++) {
     await sleep(TOOL_POLL_MS);
     if (!api || !isCurrent()) return null;
     try {
@@ -3880,7 +3995,22 @@ async function ensureHostTool(isCurrent) {
       console.error("slskd: couldn't read the slskd tool's status:", e);
       dep = null;
     }
+    if (dep && hinted) {
+      hinted = false;
+      if (onNoDefinition) onNoDefinition(null);
+    }
     if (hostToolReady(dep)) return dep;
+    if (dep && !defined) {
+      defined = true;
+      requestInstall();
+    } else if (!dep && !defined && !hinted && polls >= NO_DEFINITION_HINT_POLLS) {
+      hinted = true;
+      if (onNoDefinition) onNoDefinition(NO_DEFINITION_HINT);
+    }
+  }
+  if (!defined) {
+    throw new Error("Viboplr never offered to install slskd: it still has no definition for it. If it asked whether to trust this plugin's tool, answer that and try again " +
+      "(a development copy of this plugin needs a development build of Viboplr). You can also run slskd yourself and connect to it.");
   }
   throw new Error("slskd wasn't installed. Install it from Viboplr's dialog (or Extensions → Tools), then try again.");
 }
@@ -3936,7 +4066,7 @@ function setupChecklist(s) {
     if (step.id === "signin" && s.username) label = "Sign in to Soulseek as " + s.username;
     var detail = null;
     if (state === "failed") detail = s.failed.message;
-    else if (state === "active" && step.id === "approve") detail = "Viboplr asks before it installs anything: press Install in its dialog. Once installed, slskd appears in Extensions → Tools, where Viboplr keeps it up to date.";
+    else if (state === "active" && step.id === "approve") detail = s.progress || "Viboplr asks before it installs anything: press Install in its dialog. Once installed, slskd appears in Extensions → Tools, where Viboplr keeps it up to date.";
     else if (state === "active" && step.id === "signin" && s.progress) detail = s.progress;
     return { id: step.id, label: label, state: state, detail: detail };
   });
@@ -4043,7 +4173,10 @@ async function installSlskd() {
 
 async function installSteps(s, form) {
   managed.error = null;
-  var dep = await ensureHostTool(function () { return managed.setup === s; });
+  var dep = await ensureHostTool(function () { return managed.setup === s; }, function (hint) {
+    s.progress = hint;
+    render();
+  });
   if (!dep || managed.setup !== s) return;
   managed.dep = dep;
 
@@ -4126,7 +4259,7 @@ async function continueSetupSteps(s, from) {
     if (readiness.state === "ready") {
       api.log("info", "slskd set up and signed in as " + (readiness.username || "?"), "slskd");
       // Only now: until it works, Back returns to the form as the user filled it.
-      installForm = { username: "", password: "", downloadsDir: "", autostart: true, shareCollections: true };
+      installForm = freshInstallForm();
       managed.setup = null;
       render();
       renderSettings();
@@ -4278,7 +4411,10 @@ function moveManaged() {
   return runManagedJob("move", "Waiting for Viboplr to install slskd…", async function (job) {
     var legacy = managed.record;
     if (!legacy || isHostRecord(legacy)) return;
-    var dep = await ensureHostTool(function () { return managed.job === job; });
+    var dep = await ensureHostTool(function () { return managed.job === job; }, function (hint) {
+      job.line = hint || "Waiting for Viboplr to install slskd…";
+      render();
+    });
     if (!dep) return;
     managed.dep = dep;
     job.line = "Moving slskd to Viboplr's copy…";
@@ -4412,6 +4548,7 @@ async function removeManaged() {
   downloadsDir = null;
   incompleteDir = null;
   slskdShared = null;
+  await forgetAccount();
   await saveManagedRecord(null);
   if (settings.managedBy === "plugin") await releaseManagedConnection();
   await probeManaged();
@@ -4985,15 +5122,14 @@ async function discoverSlskd() {
   if (discovery.state === "looking") return;
   discovery = { state: "looking", found: null, keyInput: "", error: null };
   render();
-  var found = null;
-  var cands = discoveryCandidates();
-  for (var i = 0; i < cands.length && !found; i++) {
-    try {
-      var r = await fetchText(cands[i].url + "/api/v0/session/enabled", { method: "GET", timeoutMs: DISCOVERY_TIMEOUT_MS, insecure: cands[i].insecure, headers: { "Accept": "application/json" } });
-      var fp = slskdFingerprint(r.status, r.text);
-      if (fp) found = { url: cands[i].url, insecure: cands[i].insecure, authEnabled: fp.authEnabled };
-    } catch (e) { /* nothing on this port */ }
-  }
+  // All candidates at once, the most likely one still winning.
+  var found = await firstInOrder(discoveryCandidates(), function (cand) {
+    return fetchText(cand.url + "/api/v0/session/enabled", { method: "GET", timeoutMs: DISCOVERY_TIMEOUT_MS, insecure: cand.insecure, headers: { "Accept": "application/json" } })
+      .then(function (r) {
+        var fp = slskdFingerprint(r.status, r.text);
+        return fp ? { url: cand.url, insecure: cand.insecure, authEnabled: fp.authEnabled } : null;
+      }, function () { return null; });   // nothing on this port — the usual answer, not an error
+  });
   if (!found) {
     api.log("info", "no slskd found on this computer", "slskd");
     discovery = { state: "none", found: null, keyInput: "", error: null };
@@ -7465,6 +7601,7 @@ function registerActions() {
   function setField(key, value) {
     var was = installFormComplete(installForm);
     installForm[key] = value || "";
+    saveAccount();
     if (installFormComplete(installForm) !== was) render();
   }
   api.ui.onAction("install-set-user", function (data) { setField("username", data && data.value); });
@@ -9451,6 +9588,7 @@ async function loadSettings() {
     }
   }
   await loadManagedRecord();
+  await loadAccount();
   // "roadie" is from plugin versions that ran slskd through Roadie, which
   // Viboplr no longer carries: the address stays (it is just a slskd now),
   // and one the plugin installed needs its install record.
@@ -9776,6 +9914,8 @@ return {
   _downloadsFolderText: downloadsFolderText,
   _canInstallHere: canInstallHere,
   _portLooksFree: portLooksFree,
+  _pickFreePort: pickFreePort,
+  _storedAccount: storedAccount,
   _managedFailure: managedFailure,
   _managedCapable: managedCapable,
   _managedStartSpec: managedStartSpec,

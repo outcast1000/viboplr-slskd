@@ -234,6 +234,84 @@ test("a port is free only when the connection is refused, never when it just doe
   assert.equal(free(null), false);
 });
 
+test("the stored Soulseek account: what's worth keeping", () => {
+  const stored = plugin._storedAccount;
+  assert.deepEqual(stored({ username: "bj", password: "secret", downloadsDir: "/x" }), { username: "bj", password: "secret" });
+  assert.deepEqual(stored({ username: "bj", password: "" }), { username: "bj", password: "" });
+  assert.equal(stored({ username: "", password: "" }), null, "an emptied form drops the stored account");
+  assert.equal(stored(null), null);
+});
+
+test("integration: the typed Soulseek account survives a restart, and a finished install", async () => {
+  const comp = freeComputer();
+  let store;
+  await withPlugin(installHost(comp), async (host) => {
+    store = host.store;
+    await host.actions["setup-page"]({ page: "install-auto" });
+    await until(() => lastView(host).includes("install-set-user"));
+    await host.actions["install-set-user"]({ value: "bj" });
+    await host.actions["install-set-pass"]({ value: "secret" });
+  });
+  // Each keystroke is written at once: nothing waits on a timer at deactivate.
+  await until(() => store.soulseekAccount && store.soulseekAccount.password === "secret", 1000);
+  assert.deepEqual(store.soulseekAccount, { username: "bj", password: "secret" });
+
+  await withPlugin({ ...installHost(comp), store }, async (host, p) => {
+    p._setSigninTiming(2000, 5);
+    await host.actions["setup-page"]({ page: "install-auto" });
+    await until(() => lastView(host).includes("install-set-user"));
+    const form = lastView(host);
+    assert.ok(form.includes('"value":"bj"') && form.includes('"value":"secret"'), "the form comes back filled in");
+    await host.actions["install-pick-folder"]();
+    await host.actions["install"]();
+    await until(() => host.store.managedBy === "plugin", 3000);
+    assert.deepEqual(host.store.soulseekAccount, { username: "bj", password: "secret" }, "kept for the next install");
+  });
+});
+
+test("integration: an emptied form deletes the stored account instead of storing null", async () => {
+  await withPlugin(installHost(freeComputer()), async (host) => {
+    await host.actions["setup-page"]({ page: "install-auto" });
+    await until(() => lastView(host).includes("install-set-user"));
+    await host.actions["install-set-user"]({ value: "bj" });
+    await until(() => host.store.soulseekAccount, 1000);
+    await host.actions["install-set-user"]({ value: "" });
+    await until(() => !("soulseekAccount" in host.store), 1000);
+    assert.ok(!("soulseekAccount" in host.store), JSON.stringify(host.store.soulseekAccount));
+  });
+});
+
+test("the port picker doesn't wait on a hung port above the lowest free one", async () => {
+  const fetch = async (url) => {
+    const port = Number(/:(\d+)\//.exec(url)[1]);
+    if (port === 5038) return new Promise(() => {});   // hangs for good
+    throw new Error("Connection refused (os error 61)");
+  };
+  await withPlugin({ fetch, noViewHeader: true }, async (host, p) => {
+    const t = Date.now();
+    assert.equal(await p._pickFreePort(), 5030);
+    assert.ok(Date.now() - t < 500, "resolved as soon as 5030 refused");
+  });
+});
+
+test("the port picker waits out Windows' slow refusal and takes the lowest free port", async () => {
+  // Windows refuses a closed localhost port only after ~2s of SYN retries; a
+  // probe whose budget is shorter times out instead (which reads as "in use").
+  const fetch = async (url, init) => {
+    const port = Number(/:(\d+)\//.exec(url)[1]);
+    if (port === 5030) return { status: 200, text: async () => "<html>something else</html>" };
+    if (!init || !(init.timeoutMs > 2100)) throw new Error("Request timed out");
+    // 5033 refuses first; 5031 is still the one to take.
+    await new Promise((r) => setTimeout(r, port === 5031 ? 20 : 1));
+    throw new Error("No connection could be made because the target machine actively refused it. (os error 10061)");
+  };
+  await withPlugin({ fetch, noViewHeader: true }, async (host, p) => {
+    const before = host.calls.fetched.length;
+    assert.equal(await p._pickFreePort(), 5031);
+    assert.equal(host.calls.fetched.length - before, 10, "every port is probed, at once");
+  });
+});
+
 test("the card's version row: Viboplr's copy says where updates are; a legacy copy offers Move", () => {
   const dep = { installed: true, version: "0.26.1", origin: "managed" };
   const host = plugin._managedVersionRows({ source: "host", port: 5030 }, dep, null);
@@ -644,12 +722,63 @@ test("integration: Viboplr's install dialog closed without installing: the step 
     await host.actions["install"]();
     await until(() => lastView(host).includes("✗"), 2000);
     assert.ok(lastView(host).includes("slskd wasn't installed"), lastView(host).slice(0, 800));
+    assert.ok(!lastView(host).includes("no Install dialog"), "Viboplr knew slskd: its dialog was there to answer");
     assert.equal(host.store.managedSlskd, undefined, "nothing recorded");
     assert.equal(host.calls.programs.filter((c) => c.op === "start").length, 0);
     await host.actions["install-close"]();
     await host.actions["setup-page"]({ page: "install-auto" });
     const v = lastView(host);
     assert.ok(v.includes('"value":"bj"') && v.includes("/Users/me/Music/Soulseek"), "what the user typed is still there");
+  });
+});
+
+// A host with no slskd definition (a development copy of the plugin in a
+// release build) never shows a dialog. The wait used to say "press Install"
+// for five minutes; now it says why there is nothing to press, and fails so.
+test("integration: Viboplr has no slskd definition: the checklist says so, and the failure names it", async () => {
+  const comp = freeComputer();
+  await withPlugin(installHost(comp, { host: { tool: null, toolWaitMs: 300 } }), async (host) => {
+    await fill(host);
+    const done = host.actions["install"]();
+    await until(() => lastView(host).includes("no Install dialog"), 1000);
+    assert.ok(lastView(host).includes("no Install dialog"), lastView(host).slice(0, 800));
+    await done;
+    await until(() => lastView(host).includes("✗"), 2000);
+    assert.ok(lastView(host).includes("never offered to install slskd"), lastView(host).slice(0, 800));
+    assert.ok(lastView(host).includes("trust this plugin"), "the trust prompt is named first: a release user may simply not have answered it");
+    assert.equal(host.calls.programs.filter((c) => c.op === "start").length, 0);
+  });
+});
+
+// The trust prompt: until it is answered getDependency says null and the host
+// drops the require-dependency. Once the definition is in force the dialog is
+// asked for again — the user answered every prompt they were shown.
+test("integration: the definition appears after the trust prompt: the Install dialog is asked for again, the hint goes", async () => {
+  const comp = freeComputer();
+  await withPlugin(installHost(comp, { host: { tool: null, toolWaitMs: 3000 } }), async (host) => {
+    await fill(host);
+    const done = host.actions["install"]();
+    await until(() => lastView(host).includes("no Install dialog"), 1000);
+    assert.equal(host.calls.requestAction.filter((r) => r.action === "require-dependency").length, 1);
+    host.toolState.slskd = { name: "slskd", installed: false, version: null, origin: null, latest: "0.26.1" };
+    await until(() => host.calls.requestAction.filter((r) => r.action === "require-dependency").length === 2, 1000);
+    assert.equal(host.calls.requestAction.filter((r) => r.action === "require-dependency").length, 2, "asked again once Viboplr knows slskd");
+    await done;
+    await until(() => host.store.managedBy === "plugin", 3000);
+    assert.ok(!lastView(host).includes("no Install dialog"), "the hint is gone");
+  });
+});
+
+test("integration: the definition arrives already installed right after the hint: the hint still goes", async () => {
+  const comp = freeComputer();
+  await withPlugin(installHost(comp, { host: { tool: null, toolWaitMs: 3000 } }), async (host) => {
+    await fill(host);
+    const done = host.actions["install"]();
+    await until(() => lastView(host).includes("no Install dialog"), 1000);
+    host.toolState.slskd = { name: "slskd", installed: true, version: "0.26.1", origin: "managed", latest: "0.26.1" };
+    await until(() => !lastView(host).includes("no Install dialog"), 1000);
+    assert.ok(!lastView(host).includes("no Install dialog"), lastView(host).slice(0, 800));
+    await done;
   });
 });
 
@@ -896,7 +1025,7 @@ test("integration: Keep running off makes the next start tied to Viboplr", async
 test("integration: Remove stops slskd, deletes its folder and forgets the connection; downloads are not touched", async () => {
   const comp = freeComputer();
   comp.up = true;
-  await withPlugin({ store: managedStore(), files: { ...filesInstalled, "logs/slskd.log": "x" }, fetch: comp.fetch }, async (host) => {
+  await withPlugin({ store: { ...managedStore(), soulseekAccount: { username: "bj", password: "secret" } }, files: { ...filesInstalled, "logs/slskd.log": "x" }, fetch: comp.fetch }, async (host) => {
     await until(() => settingsView(host).includes("managed-remove-ask"), 1000);
     host.actions["managed-remove-ask"]();
     assert.ok(lastView(host).includes("Your downloads and shared folders stay where they are"));
@@ -907,6 +1036,7 @@ test("integration: Remove stops slskd, deletes its folder and forgets the connec
     assert.ok(host.calls.programs.some((c) => c.op === "files.remove" && c.path === "slskd"));
     assert.equal(host.store.managedSlskd, undefined);
     assert.equal(host.store.url, "");
+    assert.ok(!("soulseekAccount" in host.store), "the Soulseek password doesn't outlive slskd");
     assert.equal(host.calls.notifications.length, 0, "success is the view changing, not a toast");
   });
 });

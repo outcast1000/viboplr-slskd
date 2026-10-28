@@ -18,6 +18,25 @@ Needs Viboplr 1.0.113.
   installing; *Change…* opens the picker there. The row says whether finished
   files reach your library (only inside one of your collections) instead of
   telling you to pick a folder in one.
+- **Install works on Windows again.** *Install automatically* stopped with
+  "Ports 5030–5039 are all taken" on a computer where all of them were free:
+  Windows refuses a connection to a closed port only after about 2 seconds, and
+  the port check gave up after 0.8. It now waits up to 4 seconds and checks
+  every port at once, so finding a free one takes about 2 seconds. Looking for
+  a slskd already running checks its ports at once too, instead of one after
+  another (up to 18 seconds on Windows before the install options appeared).
+- **No more waiting on a dialog that never comes.** When Viboplr has no
+  definition for slskd — e.g. this plugin running from a development folder in
+  a release build of Viboplr — it shows no Install dialog. Setup used to say
+  "press Install" for five minutes and then fail with "slskd wasn't installed";
+  after a few seconds it now says why there is nothing to press, and the
+  failure names it. If the wait was Viboplr asking whether to trust this
+  plugin's tool, answering it now brings up the Install dialog.
+- **The install form remembers your Soulseek account.** The username and
+  password you type are kept across restarts (in the plugin's storage, as
+  plain text, like slskd.yml keeps them), so an install that failed can be
+  tried again later without typing them again. *Remove* on the slskd card
+  forgets them.
 - **Quitting Viboplr with "Keep slskd running" off** stops slskd through its
   own shutdown first.
 - "Don't allow" in Viboplr's "Run slskd in the background?" dialog returns to the
