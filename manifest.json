@@ -1,7 +1,7 @@
 {
   "id": "slskd",
   "name": "Soulseek",
-  "version": "0.26.1",
+  "version": "0.26.2",
   "author": "Viboplr",
   "description": "Search and download from the Soulseek network via a slskd daemon: ranked results, whole-album grabs, live transfer progress, finished files that play and reach your library, and a playback fallback that fetches a missing track from Soulseek.",
   "minAppVersion": "1.0.113",
@@ -78,11 +78,13 @@
         {
           "name": "status",
           "description": "Connection state (unconfigured / unreachable / unauthorized / disconnected / connecting / ready), the Soulseek username, slskd version, whether slskd shares anything, and where finished downloads land",
+          "readOnly": true,
           "categories": ["download"]
         },
         {
           "name": "search",
           "description": "Search the Soulseek network. Slow (5-30s, one search at a time). Returns ranked candidates: id, user, filename, folder, quality (format, bitrate, lossless), size, duration, and availability (free slot / queue length / upload speed). With upgradeFor each result also says where it came from — the album's own folder, another folder, or a compilation or vinyl rip (listed in that order) — and notAnUpgrade names a different recording or a multichannel mix. Feed ids to download",
+          "readOnly": true,
           "categories": ["download"],
           "inputSchema": {
             "type": "object",
@@ -133,6 +135,7 @@
         {
           "name": "list_downloads",
           "description": "The downloads slskd is managing, newest first (50 unless limit says otherwise): file, user, phase (requested / queued / starting / downloading / succeeded / failed / cancelled), progress (0-1), place in the other user's queue, speed, error, upgradeFor (the library track it was fetched to upgrade), and — once finished and slskd runs on this computer — the local path and a uri for Viboplr's replace_track_file / download_plugin_track. Filter to find one file instead of reading them all",
+          "readOnly": true,
           "categories": ["download"],
           "inputSchema": {
             "type": "object",
@@ -200,6 +203,7 @@
         {
           "name": "list_upgrades",
           "description": "The automatic upgrades: state (searching / downloading / checking / ready / alternative / none / failed / cancelled / replaced / gone), message, the library copy's quality, live download progress, and — when ready — the checked file's quality and the uri for Viboplr's replace_track_file. Replaced entries are left out unless includeReplaced is set; a file downloaded by hand for an upgrade (search with upgradeFor) takes over its track's entry once it lands",
+          "readOnly": true,
           "categories": ["download"],
           "inputSchema": {
             "type": "object",

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.26.2
+
+- The AI tools that only read — status, search, list_downloads and
+  list_upgrades — are now marked read-only, so an AI assistant can use them
+  without the "Plugin actions" permission and without asking you first.
+  Downloading and starting an upgrade still ask.
+
 ## 0.26.1
 
 - Each AI tool now says what it is about (its category), so Viboplr's in-app
