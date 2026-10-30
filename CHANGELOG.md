@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.26.1
+
+- Each AI tool now says what it is about (its category), so Viboplr's in-app
+  assistant can offer it alongside the app's own tools of the same kind instead
+  of sending every tool at once. Viboplr versions that don't know the field
+  ignore it.
+
 ## 0.26.0
 
 Needs Viboplr 1.0.113.
