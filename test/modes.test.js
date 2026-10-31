@@ -428,15 +428,18 @@ test("Fill: an album target without an id is looked up by name, and one with no 
 // tab shows only files that are this song, the best first, and the finished
 // file is offered to the library.
 
-test("the manifest offers Download… on tracks and keeps Search… for albums and artists", () => {
+test("the manifest offers Download (and its taken-over twin) on tracks and keeps Search… for albums and artists", () => {
   const manifest = JSON.parse(require("node:fs").readFileSync(require("node:path").join(__dirname, "..", "manifest.json"), "utf8"));
   const items = manifest.contributes.contextMenuItems;
   const dl = items.find((i) => i.id === "slskd-download");
   assert.ok(dl, "a Download item");
-  assert.equal(dl.label, "Download…", "no plugin name in the label — the host adds it");
+  assert.equal(dl.label, "Download", "no plugin name in the label — the host adds it; no … since it starts at once");
   assert.deepEqual(dl.targets, ["track"]);
-  assert.ok(!items.some((i) => i.id === "slskd-upgrade"), "a song's one Soulseek action is Download…");
-  assert.ok(!items.some((i) => i.targets.includes("track") && i.id !== "slskd-download"));
+  const choose = items.find((i) => i.id === "slskd-download-choose");
+  assert.equal(choose.label, "Download and let me choose…");
+  assert.deepEqual(choose.targets, ["track"]);
+  assert.ok(!items.some((i) => i.id === "slskd-upgrade"), "a song you have is a Download too");
+  assert.deepEqual(items.filter((i) => i.targets.includes("track")).map((i) => i.id), ["slskd-download", "slskd-download-choose"]);
   assert.deepEqual(items.find((i) => i.id === "slskd-search").targets, ["album", "artist"]);
 });
 

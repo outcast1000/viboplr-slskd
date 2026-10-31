@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.28.0
+
+- **Every download is a job that ends in your library.** Right-click a song →
+  **Soulseek: Download**, or type one on the **Downloads** tab. The job finds
+  the best file (at the **Look for** quality), downloads it — moving on to
+  the next sharer when one stalls — checks it, and saves it into your
+  library: next to the album or the artist you already have, else your
+  default collection, as Artist › Album › NN Title, tagged as the song you
+  asked for. One toast says it's there, with **Play**. No second "Add to
+  library" step, and nothing to look for on another tab. Saving on its own
+  needs a Viboplr with `api.library.importFile` (the release after
+  1.0.114-beta3); older versions open their Add to library dialog for it.
+- **A song you already have becomes a replace, never a duplicate.** A
+  Download on a song in your library as a file looks only for copies better
+  than yours; one whose copy turns up at the save step is offered the same
+  way. Either way the job waits under **Needs you** with **Compare &
+  replace** (Viboplr's dialog) and **Save as copy**. Nothing is replaced
+  without you.
+- **Take over any download.** **Take over** stops the automation where the
+  job is and waits for you at every step from there: pick the file from
+  what the search found, keep waiting on a stalled sharer or choose another,
+  and save when you say. **Let it run again** hands it back.
+  **Soulseek: Download and let me choose…** starts a job taken over.
+  Settings → **How far a download goes on its own**: all the way, stop
+  before saving, or always let me choose.
+- **Each row says where the file will go** ("→ Music · next to your
+  Radiohead tracks", or the file it replaces) from the moment it starts.
+- The **Downloads** tab is now the jobs (it was the Upgrades tab; upgrades
+  are jobs now) and comes first; slskd's own list of transfers is the
+  **Transfers** tab. Search is unchanged.
+- Finding your copy of a song now uses Viboplr's own library match (accents
+  and case ignored, a clearly different length left out) where Viboplr has
+  it.
+
 ## 0.27.0
 
 - **Download a song that isn't in your library from Soulseek.** The Download

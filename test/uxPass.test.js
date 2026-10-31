@@ -308,7 +308,7 @@ test("Search: Download keeps you on the results, the row turns Queued, and no to
     assert.deepEqual(queuedList.actions.map((a) => a.id), ["download-file", "cancel-transfer"], "Cancel joins once a file is on its way");
     const tabs = findNodes(lastView(h), (n) => n.type === "tabs")[0];
     assert.equal(tabs.activeTab, "search", "still on the results");
-    assert.deepEqual(tabs.tabs.map((t) => t.id), ["search", "upgrades", "fallback", "transfers", "settings"]);
+    assert.deepEqual(tabs.tabs.map((t) => t.id), ["upgrades", "search", "fallback", "transfers", "settings"]);
     assert.equal(h.calls.notifications.length, 0, "no toast: " + h.calls.notifications.join(" | "));
 
     // The same row offered again, from a selection, isn't queued twice.

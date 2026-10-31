@@ -447,7 +447,8 @@ test("the Upgrades panel shows the file you have, the file it is fetching and th
   assert.equal(findNodes(downloading, (n) => n.type === "progress-bar")[0].value, 50);
   assert.match(text(downloading), /✓ Search   ─   ● Download 50%   ─   ○ Check   ─   ○ Replace/, "the steps");
   const dButtons = findNodes(downloading, (n) => n.type === "button").map((b) => b.label);
-  assert.deepEqual(dButtons.slice(-2), ["Cancel upgrade", "Close"], "Cancel after the ways forward; Close only folds the panel");
+  assert.deepEqual(dButtons.slice(-2), ["Cancel download", "Close"], "Cancel after the ways forward; Close only folds the panel");
+  assert.equal(dButtons[0], "Take over", "a running job can be taken over");
   assert.ok(dButtons.includes("Try another source") || !dButtons.includes("Try another sharer"));
   assert.equal(downloading.title, "Downloading", "the panel's title is where it stands");
   assert.match(text(downloading), /about 0:38 left/, "how long it has to go");
@@ -609,7 +610,7 @@ test("integration: Cancel on a queued upgrade stops it in slskd and rests it, re
     const list = findNodes(lastView(h), (n) => n.type === "track-row-list" && n.items.some((i) => i.id === "t42"))[0];
     assert.ok(list.items[0].actions.includes("upgrade-retry"));
     const toggle = findNodes(lastView(h), (n) => n.type === "button" && n.action === "upgrade-sources-toggle")[0];
-    assert.ok(toggle && /^Choose the source myself \(2\)$/.test(toggle.label), "a cancelled upgrade still offers the sources it found");
+    assert.ok(toggle && /^Choose the file myself \(2\)$/.test(toggle.label), "a cancelled upgrade still offers the sources it found");
     h.actions["upgrade-sources-toggle"](toggle.data);
     const sources = findNodes(lastView(h), (n) => n.type === "track-row-list" && n.items.some((i) => i.id === "t42#1"))[0];
     assert.ok(sources, "and lists them on request");
@@ -685,7 +686,7 @@ test("the Upgrades tab lists what is pending; finished upgrades are folded into 
     let lists = findNodes(lastView(h), (n) => n.type === "track-row-list");
     assert.equal(lists.length, 1, "only the pending list; history folded");
     assert.deepEqual(lists[0].items.map((i) => i.id), ["t3"]);
-    assert.ok(findNodes(lastView(h), (n) => n.type === "toolbar" && n.title === "History" && n.status === "2 finished").length);
+    assert.ok(findNodes(lastView(h), (n) => n.type === "toolbar" && n.title === "Finished" && n.status === "2 done").length);
 
     h.actions["upgrade-history-toggle"]();
     lists = findNodes(lastView(h), (n) => n.type === "track-row-list");
@@ -711,7 +712,7 @@ test("integration: the Upgrade target is a setting, and Upgrade on a non-library
   await p.activate(h.api);
   try {
     h.actions["main-tab"]({ tabId: "upgrades" });
-    const select = findNodes(lastView(h), (n) => n.type === "settings-row" && n.label === "Upgrade to")[0];
+    const select = findNodes(lastView(h), (n) => n.type === "settings-row" && n.label === "Look for")[0];
     assert.ok(select, "the Upgrades tab shows the target");
     assert.deepEqual(select.control.options.map((o) => o.value), ["flac16", "hires", "lossless", "mp3_320", "high", "lossy256", "best"]);
     h.actions["set-upgrade-target"]({ value: "high" });
@@ -945,8 +946,9 @@ test("integration: the Upgrades tab groups entries; Replace all shows for one re
     assert.deepEqual(bars, ["Needs you", "Didn't work out"], "grouped, what needs you first");
     const needsBar = findNodes(view, (n) => n.type === "toolbar" && n.title === "Needs you")[0];
     assert.ok(needsBar.buttons.some((b) => b.action === "upgrade-replace-all" && /\(1\)/.test(b.label)), "Replace all ready shows even for one");
-    assert.equal(findNodes(view, (n) => n.type === "settings-row" && n.label === "Upgrade to").length, 1);
-    assert.equal(findNodes(view, (n) => n.type === "layout" && n.children && n.children[0] && n.children[0].label === "Upgrade to").length, 1, "the target comes first");
+    assert.equal(findNodes(view, (n) => n.type === "settings-row" && n.label === "Look for").length, 1);
+    assert.equal(findNodes(view, (n) => n.type === "layout" && n.children && n.children[0] && n.children[0].action === "job-new" &&
+      n.children[1] && n.children[1].label === "Look for").length, 1, "Download a song, then the target, come first");
     assert.equal(findNodes(view, (n) => n.type === "tabs")[0].tabs.find((t) => t.id === "upgrades").count, 2);
 
     const panelOf = (v) => findNodes(v, (n) => n.type === "section" && findNodes(n, (b) => b.action === "upgrade-panel-close").length)[0];

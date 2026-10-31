@@ -112,6 +112,7 @@ var FALLBACK_VIEW_CANDIDATES = 25;
 // Automatic upgrades (the Upgrades tab). Nobody is waiting on these, so the
 // clock is the sharer's queue, not a listener's patience.
 var UPGRADE_SUBDIR = "upgrades";             // DEST_ROOT/upgrades/<seq>-<label>
+var JOB_SUBDIR = "songs";                    // DEST_ROOT/songs/<seq>-<label>: a new song's job, until it is saved
 var UPGRADE_SEARCH_MS = 30000;               // one bounded search per upgrade
 var UPGRADE_STALL_MS = 10 * 60 * 1000;       // no bytes for this long → the next sharer
 var UPGRADE_MAX_TRIES = 4;                   // sharers asked per upgrade
@@ -134,7 +135,9 @@ var settings = {
   fallbackQuality: "fast", // "fast" | "best" | "lossless" | "high" — see FALLBACK_MODES; preferredFormats orders within it
   fallbackMaxGb: 0,         // automatic cleanup: keep at most this many GB of fallback files (0 = off)
   fallbackMaxAgeDays: 0,    // automatic cleanup: delete fallback files not played for this many days (0 = off)
-  upgradeTarget: "flac16", // a UPGRADE_TARGETS key — what an automatic upgrade looks for
+  upgradeTarget: "flac16", // a UPGRADE_TARGETS key — what a download job looks for
+  jobAutomation: "all",   // a JOB_AUTOMATION key — how far a download job goes on its own
+  jobSeq: 0,              // the last "g<seq>" job key handed out
   batchSeq: 0,
   managedBy: null,        // null | "plugin" — this plugin installed the slskd it talks to (see "Installing slskd")
   stopWithViboplr: false, // the installed slskd stops when Viboplr quits (default: it keeps running)
@@ -2468,7 +2471,9 @@ async function handleCompletions(finished) {
     var rec = tracked[trackKeyOf(finished[i])];
     var meta = (rec && rec.meta) || parseTrackMeta(finished[i].filename);
     names.push(meta.title || basenameRemote(finished[i].filename));
-    if (rec && rec.resolvedPath && tier === "local") {
+    // A new song's job saves its own file (`saveJob`), rescanning quietly
+    // when it landed inside a collection.
+    if (rec && rec.resolvedPath && tier === "local" && !(rec.upgrade && rec.upgrade.job)) {
       var c = collectionForPath(rec.resolvedPath, localCollections);
       if (c) byCollection[c.id] = c;
     }
@@ -6492,6 +6497,9 @@ function transferRowProgress(t) {
 // Pure: the chip on an Upgrades row, by state.
 var UPGRADE_BADGES = {
   searching: { label: "Searching", variant: "muted" },
+  choosing: { label: "Your pick", variant: "warning" },
+  saving: { label: "Saving", variant: "accent" },
+  saved: { label: "In your library", variant: "success" },
   downloading: { label: "Downloading", variant: "accent" },
   checking: { label: "Checking", variant: "accent" },
   ready: { label: "Ready", variant: "success" },
@@ -6992,10 +7000,12 @@ function render() {
     tabs: [
       // What you came for first; the download history, which you rarely need
       // now that search rows carry their own state, after them.
+      // Downloads (the jobs) first — what you came for — then Search for
+      // browsing by hand; Transfers is slskd's own list underneath both.
+      { id: "upgrades", label: "Downloads", count: upgradesTabCount(upgrades) },
       { id: "search", label: "Search" },
-      { id: "upgrades", label: "Upgrades", count: upgradesTabCount(upgrades) },
       { id: "fallback", label: "Fallback" },
-      { id: "transfers", label: "Downloads", count: liveTransferCount(transfers) || undefined },
+      { id: "transfers", label: "Transfers", count: liveTransferCount(transfers) || undefined },
       { id: "settings", label: "Settings" }
     ],
     activeTab: mainTab,
@@ -7079,6 +7089,10 @@ function settingsTab() {
     type: "section",
     title: "Downloads",
     children: [
+      { type: "settings-row", label: "How far a download goes on its own",
+        description: "You can take over any download at any step either way. A song you already have is replaced only after you compare the two.",
+        control: { type: "select", action: "set-job-automation", value: jobAutomationOf(settings.jobAutomation),
+          options: Object.keys(JOB_AUTOMATION).map(function (k) { return { value: k, label: JOB_AUTOMATION[k] }; }) } },
       { type: "settings-row", label: "Preferred formats",
         description: "Best first, e.g. “flac, mp3”. Empty ranks by quality.",
         control: { type: "text-input", placeholder: "flac, mp3", action: "set-formats", value: settings.preferredFormats } },
@@ -7093,7 +7107,7 @@ function settingsTab() {
     ]
   });
   if (!testServerActive) children.push(testServer);
-  children.push(mutedText("Upgrade and playback-fallback settings are on their own tabs."));
+  children.push(mutedText("What downloads look for is on the Downloads tab; the playback fallback's settings on its own tab."));
   return { type: "layout", direction: "vertical", children: children };
 }
 
@@ -7572,6 +7586,54 @@ function registerActions() {
     }
   });
 
+  // ---- download jobs (the Downloads tab) ----
+  api.ui.onAction("job-new", function (data) {
+    var song = parseSongQuery(data && data.query);
+    if (!song) return;
+    startJob({ kind: "track", title: song.title, artistName: song.artistName }, false)
+      .catch(function (e) { console.error("slskd: starting a download failed:", e); });
+  });
+
+  api.ui.onAction("job-take-over", function (data) {
+    var id = rowIds(data)[0];
+    if (id) takeOverJob(id).catch(function (e) { console.error("slskd: taking over the download failed:", e); });
+  });
+
+  api.ui.onAction("job-let-run", function (data) {
+    var id = rowIds(data)[0];
+    if (id) letJobRun(id).catch(function (e) { console.error("slskd: handing the download back failed:", e); });
+  });
+
+  api.ui.onAction("job-save", function (data) {
+    var ids = rowIds(data);
+    for (var i = 0; i < ids.length; i++) {
+      var e = upgrades[ids[i]];
+      if (e) saveJob(e, false).catch(function (err) { console.error("slskd: saving to the library failed:", err); });
+    }
+  });
+
+  api.ui.onAction("job-save-copy", function (data) {
+    var e = upgrades[rowIds(data)[0]];
+    if (e) saveJob(e, true).catch(function (err) { console.error("slskd: saving a copy failed:", err); });
+  });
+
+  api.ui.onAction("job-save-notice", function () {
+    var e = lastReadyUpgrade ? upgrades[lastReadyUpgrade] : null;
+    if (e) saveJob(e, false).catch(function (err) { console.error("slskd: saving to the library failed:", err); });
+  });
+
+  api.ui.onAction("job-play", function (data) {
+    playSavedJob(rowIds(data)[0]);
+  });
+
+  api.ui.onAction("job-play-notice", function () {
+    if (lastSavedJob) playSavedJob(lastSavedJob);
+  });
+
+  api.ui.onAction("set-job-automation", function (data) {
+    saveSetting("jobAutomation", jobAutomationOf(data && data.value));
+  });
+
   api.ui.onAction("set-upgrade-target", function (data) {
     saveSetting("upgradeTarget", upgradeTargetOf(data && data.value));
   });
@@ -7984,8 +8046,14 @@ function registerActions() {
       .catch(function (e) { console.error("slskd context search failed:", e); });
   });
 
+  // One job per click: it searches, downloads and saves (or offers to replace
+  // the copy you have) on its own; the second item starts it taken over.
   api.contextMenu.onAction("slskd-download", function (target) {
-    startDownload(target).catch(function (e) { console.error("slskd download failed:", e); });
+    return startJob(target, false).catch(function (e) { console.error("slskd download failed:", e); });
+  });
+
+  api.contextMenu.onAction("slskd-download-choose", function (target) {
+    return startJob(target, true).catch(function (e) { console.error("slskd download failed:", e); });
   });
 
   // No menu item names this any more: a song's one Soulseek action is
@@ -8123,6 +8191,12 @@ function upgradeQualityKey(c, target) {
   return [c.qualityTier, fmt, inner];
 }
 
+// Pure: is a file worth fetching for this job? An upgrade wants one better than
+// the copy in hand; a song you don't have takes any copy (the target filters).
+function beatsCopyInHand(c, entry) {
+  return entry && entry.current ? isUpgradeOver(c, entry.current) : !!c;
+}
+
 function compareKeys(a, b) {
   for (var i = 0; i < a.length; i++) {
     if (a[i] !== b[i]) return a[i] - b[i];
@@ -8144,7 +8218,7 @@ function rankUpgrade(ranked, entry) {
   // REPLACES the library copy, so a different recording is out entirely — and
   // so is a different MIX of it (see `upgradeSource`).
   var better = matches.filter(function (c) {
-    if (c.match.penalty || !isUpgradeOver(c, entry.current)) return false;
+    if (c.match.penalty || !beatsCopyInHand(c, entry)) return false;
     c.source = upgradeSource(c, entry);
     return !c.source.excluded;
   });
@@ -8249,7 +8323,7 @@ function checkUpgrade(entry, pick, measured) {
       measured.bitRate < pick.bitRate * UPGRADE_LABEL_TOLERANCE) {
     return { ok: false, note: "advertised " + pick.bitRate + " kbps, measured ≈" + measured.bitRate + " kbps" };
   }
-  if (!isUpgradeOver(measured, entry.current)) {
+  if (entry.current && !isUpgradeOver(measured, entry.current)) {
     return { ok: false, note: "measured " + qualityLabel(measured) + " — no better than your copy" };
   }
   if (!meetsQualityTarget(measured, entry.target)) {
@@ -8272,8 +8346,27 @@ function upgradeKey(trackId) {
   return "t" + trackId;
 }
 
+// Pure: the key a job is stored under. An upgrade is keyed by the library row
+// it replaces ("t<id>"); a song fetched new carries its own ("g<seq>"), kept on
+// the entry because its trackId only appears once it is in the library.
+function jobKeyOf(e) {
+  return e && e.key ? e.key : upgradeKey(e && e.trackId);
+}
+
 function upgradeIsBusy(e) {
-  return !!e && (e.state === "searching" || e.state === "downloading" || e.state === "checking");
+  return !!e && (e.state === "searching" || e.state === "downloading" || e.state === "checking" || e.state === "saving");
+}
+
+// Pure: a job for a song you don't have (vs. an upgrade of a library file).
+// It stays one after a save found the song already there and turned it into
+// a replace (`trackId` set).
+function isGetJob(e) {
+  return !!e && e.kind === "get";
+}
+
+// Pure: this job's file goes into the library as a new track (not a replace).
+function savesAsNew(e) {
+  return isGetJob(e) && e.trackId == null;
 }
 
 function upgradesNeedPoll() {
@@ -8295,7 +8388,13 @@ function setUpgradeState(e, state, message) {
 // Pure: the second line of an Upgrades row.
 function upgradeLine(e, t, ahead) {
   var target = UPGRADE_TARGETS[upgradeTargetOf(e.target)];
-  var have = "your copy " + (e.currentLabel || "?");
+  var have = !savesAsNew(e) ? "your copy " + (e.currentLabel || "?") : (jobDestination(e) || "new to your library");
+  if (e.state === "choosing") return (e.message || "Choose the file to download") + " · " + have;
+  if (e.state === "saving") return "Saving to your library…";
+  if (e.state === "saved") return "In your library" + (e.saved ? " · " + e.saved.collectionName + " · " + displayPath(e.saved.path) : "");
+  if (e.state === "ready" && e.file && savesAsNew(e)) {
+    return "Downloaded: " + qualityLabel(e.file.quality) + " · " + (e.message || "waiting for you to save it") + " · " + have;
+  }
   if (e.state === "searching" && ahead > 0) return "Waiting to search · " + ahead + " ahead · " + have;
   if (e.state === "searching") return "Searching Soulseek for " + target + " · " + have;
   if (e.state === "downloading" && e.active) {
@@ -8317,7 +8416,7 @@ function upgradeLine(e, t, ahead) {
     return bits.join("  ·  ");
   }
   if (e.state === "checking") return "Checking the file…";
-  if (e.state === "ready" && e.file && replaceOffers[upgradeKey(e.trackId)]) return "Ready: " + qualityLabel(e.file.quality) + " · waiting for your answer in the Replace dialog";
+  if (e.state === "ready" && e.file && replaceOffers[jobKeyOf(e)]) return "Ready: " + qualityLabel(e.file.quality) + " · waiting for your answer in the Replace dialog";
   if (e.state === "ready" && e.file) return "Ready: " + qualityLabel(e.file.quality) + " (" + have + ")" + (e.message ? " · " + e.message : "");
   if (e.state === "replaced") return "Replaced in your library";
   if (e.state === "gone") return e.message || "No longer in your library";
@@ -8328,7 +8427,8 @@ function upgradeLine(e, t, ahead) {
 function upgradeRowActions(e) {
   var ids = [];
   if (!upgradeIsHistory(e)) ids.push("upgrade-show");
-  if (e.state === "ready") ids.push("upgrade-replace");
+  if (e.state === "ready") ids.push(savesAsNew(e) ? "job-save" : "upgrade-replace");
+  if (e.state === "saved" && e.saved) ids.push("job-play");
   if (e.state === "alternative") ids.push("upgrade-take-alternative");
   if (e.state === "none" || e.state === "failed" || e.state === "alternative" || e.state === "cancelled") ids.push("upgrade-retry");
   // Try another sharer and Choose myself… are on the panel (Details), not on
@@ -8414,7 +8514,7 @@ async function queueUpgrades(trackIds) {
     if (e) started.push(e);
   }
   if (started.length) {
-    focusedUpgrade = upgradeKey(started[0].trackId);
+    focusedUpgrade = jobKeyOf(started[0]);
     await saveUpgrades();
     if (readiness.state === "ready") advanceUpgrades().catch(function (e) { console.error("slskd: advancing upgrades failed:", e); });
     schedulePoll(true);
@@ -8466,7 +8566,7 @@ async function replaceAllReady(keys) {
 function readyUpgradeKeys() {
   return Object.keys(upgrades).filter(function (k) {
     var e = upgrades[k];
-    return e && e.state === "ready" && e.file;
+    return e && e.state === "ready" && e.file && !savesAsNew(e);
   }).sort(function (a, b) { return (upgrades[a].createdAt || 0) - (upgrades[b].createdAt || 0); });
 }
 
@@ -8487,6 +8587,8 @@ async function beginUpgrade(row, opts) {
   }
   var current = libraryQuality(row);
   upgrades[key] = {
+    kind: "upgrade",
+    manual: !!(opts && opts.manual) || (origin !== "assistant" && jobAutomationOf(settings.jobAutomation) === "choose"),
     trackId: row.id,
     title: row.title,
     artist: row.artist_name || null,
@@ -8522,15 +8624,146 @@ async function beginUpgrade(row, opts) {
   return upgrades[key];
 }
 
+// A download job for a song that isn't in the library as a file: the same
+// search → download → check road as an upgrade (it shares the entry shape and
+// the poll), with no copy in hand to beat and a Save at the end (`saveJob`).
+// Keyed "g<seq>". Where it will be saved is asked of the host at once
+// (`planImport`), so the row can say it while the file is still on its way.
+// A busy job for the same song is shown instead of starting a second one.
+async function beginGetJob(song, opts) {
+  var wantT = normalizeText(song.title), wantA = normalizeText(song.artist || "");
+  for (var k in upgrades) {
+    var o = upgrades[k];
+    if (isGetJob(o) && upgradeIsBusy(o) && normalizeText(o.title) === wantT && normalizeText(o.artist || "") === wantA) {
+      focusedUpgrade = k;
+      return { entry: o, existing: true };
+    }
+  }
+  settings.jobSeq = (Number(settings.jobSeq) || 0) + 1;
+  api.storage.set("jobSeq", settings.jobSeq).catch(function (err) { console.error("slskd: couldn't save jobSeq:", err); });
+  var key = "g" + settings.jobSeq;
+  var e = upgrades[key] = {
+    key: key,
+    kind: "get",
+    manual: !!(opts && opts.manual) || jobAutomationOf(settings.jobAutomation) === "choose",
+    trackId: null,
+    title: song.title,
+    artist: song.artist || null,
+    album: song.album || null,
+    trackNumber: song.trackNumber || null,
+    durationSecs: song.durationSecs != null && song.durationSecs > 0 ? song.durationSecs : null,
+    path: null,
+    current: null,
+    currentLabel: null,
+    plan: null,
+    target: upgradeTargetOf(settings.upgradeTarget),
+    state: "searching",
+    message: null,
+    candidates: [],
+    alternative: null,
+    triedUsers: [],
+    active: null,
+    file: null,
+    replaceRequested: false,
+    origin: "user",
+    createdAt: nowMs(),
+    updatedAt: nowMs()
+  };
+  focusedUpgrade = key;
+  await saveUpgrades();
+  if (api.library && typeof api.library.planImport === "function") {
+    api.library.planImport({ title: e.title, artist: e.artist || "", album: e.album })
+      .then(function (plan) {
+        if (upgrades[key] !== e) return;
+        e.plan = plan || null;
+        saveUpgrades().catch(function (err) { console.error("slskd: couldn't save upgrades:", err); });
+        render();
+      })
+      .catch(function (err) { console.error("slskd: asking where “" + e.title + "” would be saved failed:", err); });
+  }
+  render();
+  if (readiness.state === "ready") advanceUpgrades().catch(function (err) { console.error("slskd: advancing jobs failed:", err); });
+  schedulePoll(true);
+  return { entry: e, existing: false };
+}
+
+// The context menu's Download (and "…and let me choose"): one job, and which
+// kind is the job's business, not the user's — a song you have as a file is
+// an upgrade (it looks only for copies that beat yours, and ends in the
+// Replace dialog), anything else a new song (it ends in your library). The
+// view doesn't open; a toast says the job exists, with Show.
+async function startJob(target, manual) {
+  var t = target || {};
+  if (!t.title) return plainSearch(t, null);
+  var row = await libraryRowForTarget(t);
+  var open = { label: "Show", id: "open-upgrades" };
+  if (row && row.path && String(row.path).indexOf("file://") === 0) {
+    var key = upgradeKey(row.id);
+    if (upgradeIsBusy(upgrades[key])) {
+      focusedUpgrade = key;
+      api.ui.showNotification("“" + row.title + "” is already being downloaded.", { action: open });
+      return;
+    }
+    focusedUpgrade = key;
+    await beginUpgrade(row, { origin: "user", manual: !!manual });
+    api.ui.showNotification("You have “" + row.title + "” already — looking on Soulseek for a better copy.", { action: open });
+    render();
+    return;
+  }
+  var r = await beginGetJob({
+    title: t.title, artist: t.artistName || null, album: t.albumTitle || null,
+    trackNumber: t.trackNumber || null,
+    durationSecs: t.durationSecs != null ? t.durationSecs : (row && row.duration_secs) || null
+  }, { manual: !!manual });
+  api.ui.showNotification(r.existing ? "“" + t.title + "” is already being downloaded."
+    : readiness.state === "ready" ? "Looking for “" + t.title + "” on Soulseek." : "“" + t.title + "” will be downloaded once slskd is ready.",
+    { action: open });
+}
+
+// "Download a song" on the Downloads tab: "Artist - Title" (or just a title).
+function parseSongQuery(q) {
+  var s = String(q || "").trim();
+  if (!s) return null;
+  var m = s.split(/\s+[-–—]\s+/);
+  if (m.length >= 2) return { artistName: m[0].trim(), title: m.slice(1).join(" - ").trim() };
+  return { title: s, artistName: null };
+}
+
+// Take over: the job stops where it is and waits for the user at every step
+// from here (`e.manual`); nothing running is cancelled. Let it run: hand the
+// rest back — a job waiting for a pick takes the next untried file, one
+// waiting to be saved is saved.
+async function takeOverJob(key) {
+  var e = upgrades[key];
+  if (!e || upgradeIsHistory(e)) return;
+  e.manual = true;
+  focusedUpgrade = key;
+  if (upgradeSources(e).length) sourcesOpen[key] = true;
+  await saveUpgrades();
+  render();
+}
+
+async function letJobRun(key) {
+  var e = upgrades[key];
+  if (!e) return;
+  e.manual = false;
+  if (e.active) e.active.stalled = false;
+  if (e.state === "choosing") await startNextUpgradeCandidate(e);
+  else if (e.state === "ready" && savesAsNew(e) && jobAutomationOf(settings.jobAutomation) === "all") await saveJob(e, false);
+  await saveUpgrades();
+  render();
+  schedulePoll(true);
+}
+
 // Run the search for one entry. Not awaited by the poll: it takes up to
 // `UPGRADE_SEARCH_MS`, queued behind any other search in `searchChain`.
 async function runUpgradeSearch(e) {
   upgradeSearchRunning = true;
-  upgradeSearchKey = upgradeKey(e.trackId);
+  upgradeSearchKey = jobKeyOf(e);
   try {
     var prefs = viewPrefs({ knownDurationSecs: e.durationSecs });
     var ranked = await searchForTrack({ title: e.title, artist: e.artist, album: e.album }, prefs, null, null, nowMs() + UPGRADE_SEARCH_MS);
-    if (upgrades[upgradeKey(e.trackId)] !== e || e.state !== "searching") return;   // removed meanwhile
+    if (upgrades[jobKeyOf(e)] !== e || e.state !== "searching") return;   // removed meanwhile
     if (ranked === null) return;   // slskd was busy; the next poll tries again
     var r = rankUpgrade(ranked, e);
     e.candidates = r.picks.slice(0, UPGRADE_KEEP_CANDIDATES).map(leanCandidate);
@@ -8560,7 +8793,18 @@ async function runUpgradeSearch(e) {
 
 // Queue the best candidate from a sharer not yet asked. Rests the entry in
 // "failed" when there is none, or the per-upgrade cap is reached.
-async function startNextUpgradeCandidate(e) {
+async function startNextUpgradeCandidate(e, why) {
+  // Taken over: the user picks the file (step 1's list), automation doesn't.
+  // This is where a search lands, and where a stall, a refusal or a file that
+  // failed its check would otherwise move on to the next sharer.
+  if (e.manual) {
+    e.active = null;
+    var n = upgradeSources(e).length;
+    setUpgradeState(e, "choosing", why || (n === 1 ? "1 file found — choose it or search again" : n + " files found — choose one"));
+    sourcesOpen[jobKeyOf(e)] = true;
+    await saveUpgrades();
+    return false;
+  }
   while (e.triedUsers.length < UPGRADE_MAX_TRIES) {
     var c = nextUntriedSource(e);
     if (!c) break;
@@ -8587,8 +8831,8 @@ async function enqueueUpgradeCandidate(e, c) {
   if (e.triedUsers.indexOf(c.username) < 0) e.triedUsers.push(c.username);
   var key = c.username + KEY_SEP + c.filename;
   try {
-    var out = await enqueueBatch(c.username, [c], (e.artist ? e.artist + " - " : "") + e.title, UPGRADE_SUBDIR, {
-      upgrade: { trackId: e.trackId, title: e.title, artist: e.artist, auto: true },
+    var out = await enqueueBatch(c.username, [c], (e.artist ? e.artist + " - " : "") + e.title, isGetJob(e) ? JOB_SUBDIR : UPGRADE_SUBDIR, {
+      upgrade: { trackId: e.trackId, title: e.title, artist: e.artist, auto: true, job: isGetJob(e) ? jobKeyOf(e) : undefined },
       meta: { title: e.title, artist: e.artist, album: e.album, track_number: e.trackNumber }
     });
     if (!out.queued.length) {
@@ -8618,7 +8862,7 @@ async function abandonUpgradeAttempt(e, t, reason, drop) {
   if (drop) delete tracked[a.key];
   e.active = null;
   await api.storage.set(stateKey("tracked"), tracked);
-  await startNextUpgradeCandidate(e);
+  await startNextUpgradeCandidate(e, a.username + " " + reason + " — choose another file");
 }
 
 // A file picked by hand for an upgrade (a search with upgradeFor, then a
@@ -8732,6 +8976,11 @@ async function advanceUpgradeDownload(e) {
     a.movedAt = nowMs();
     await saveUpgrades();
   } else if (nowMs() - a.movedAt > UPGRADE_STALL_MS) {
+    // Taken over: say so on the row and leave the choice to the user.
+    if (e.manual) {
+      if (!a.stalled) { a.stalled = true; await saveUpgrades(); }
+      return;
+    }
     ledgerCount(a.key, a.username, "stalled", 0, false);
     await abandonUpgradeAttempt(e, t, "no data for " + Math.round(UPGRADE_STALL_MS / 60000) + " min", true);
   }
@@ -8761,7 +9010,7 @@ async function advanceUpgradeCheck(e) {
     e.active = null;
     e.lastRejected = verdict.note;
     await api.storage.set(stateKey("tracked"), tracked);
-    await startNextUpgradeCandidate(e);
+    await startNextUpgradeCandidate(e, "The file didn't hold up: " + verdict.note + " — choose another");
     if (e.state === "failed") e.message = "No downloaded copy held up — the last one: " + verdict.note;
     await saveUpgrades();
     return;
@@ -8769,6 +9018,20 @@ async function advanceUpgradeCheck(e) {
   e.file.quality = measured || pick;
   setUpgradeState(e, "ready", verdict.note);
   await saveUpgrades();
+  // A song you didn't have: step 3 is Save, done for you unless you took the
+  // job over or asked downloads to stop before saving.
+  if (savesAsNew(e)) {
+    if (!e.manual && jobAutomationOf(settings.jobAutomation) === "all") {
+      await saveJob(e, false);
+    } else {
+      lastReadyUpgrade = jobKeyOf(e);
+      api.ui.showNotification("“" + e.title + "” is downloaded (" + qualityLabel(e.file.quality) + ").",
+        { kind: "success", action: { label: "Save to library", id: "job-save-notice" } });
+    }
+    return;
+  }
+  // Taken over: the replace waits for your click too.
+  if (e.manual) return;
   // One more question, and only one: the host's Replace dialog, straight away
   // for an upgrade the user started here. An assistant's upgrade is replaced
   // by the assistant; a batch's waits for "Replace all ready" (see
@@ -8778,9 +9041,128 @@ async function advanceUpgradeCheck(e) {
     offerReplace(e).catch(function (err) { console.error("slskd: offering the replace failed:", err); });
     return;
   }
-  lastReadyUpgrade = upgradeKey(e.trackId);
+  lastReadyUpgrade = jobKeyOf(e);
   api.ui.showNotification("A better copy of “" + e.title + "” is ready: " + qualityLabel(e.file.quality) + ".",
     { action: { label: "Compare & replace", id: "upgrade-replace-notice" } });
+}
+
+// How far a download job goes on its own (Settings): all the way, stop with
+// the file downloaded (you press Save), or stop after the search (you pick
+// the file — every job starts taken over). Replacing a song you have always
+// asks, whatever this says.
+var JOB_AUTOMATION = {
+  all: "All the way",
+  save: "Stop before saving",
+  choose: "Always let me choose"
+};
+
+function jobAutomationOf(v) {
+  return JOB_AUTOMATION[v] ? v : "all";
+}
+
+// Pure: this host files a downloaded song into a collection itself, without
+// its download modal (`api.library.importFile`, after Viboplr 1.0.114-beta3).
+function canImportHeadless() {
+  return !!(api && api.library && typeof api.library.importFile === "function");
+}
+
+var lastSavedJob = null;   // which job the "in your library" toast's Play plays
+
+// Step 3 of a new song: hand the checked file to the host, which picks the
+// collection (next to the album, the artist, or the default), copies it in
+// under Artist › Album, tags it and adds it to the library. The host answers
+// "exists" when the song is already there as a file: the job then becomes a
+// replace, and the Replace dialog (or Save as copy) is the user's call.
+// `asCopy`: Save as copy — import beside the copy you have.
+async function saveJob(e, asCopy) {
+  var key = jobKeyOf(e);
+  if (!e || !e.file || (e.state !== "ready" && e.state !== "checking")) return;
+  // slskd's folder is inside a collection: the library picks the file up where
+  // it is (a rescan), and a copy on top would be the same song twice.
+  var landed = !asCopy && tier === "local" ? collectionForPath(e.file.path, localCollections) : null;
+  if (landed) {
+    if (api.collections && typeof api.collections.resync === "function") {
+      try { await api.collections.resync(landed.id); } catch (err) { console.error("slskd: could not rescan collection " + landed.id + ":", err); }
+    }
+    e.saved = { trackId: null, path: e.file.path, collectionName: landed.name, placement: "slskd" };
+    setUpgradeState(e, "saved");
+    await saveUpgrades();
+    render();
+    lastSavedJob = key;
+    api.ui.showNotification("“" + e.title + "” is downloaded into “" + landed.name + "” and on its way into your library.",
+      { kind: "success", action: { label: "Play", id: "job-play-notice" } });
+    return;
+  }
+  if (!canImportHeadless()) {
+    // Older host: its download modal does the same, one dialog later.
+    setUpgradeState(e, "ready", "Save it through Viboplr's Add to library dialog");
+    await saveUpgrades();
+    openImport([e.file.key]);
+    render();
+    return;
+  }
+  setUpgradeState(e, "saving");
+  render();
+  var r = null;
+  try {
+    r = await api.library.importFile({
+      path: e.file.path, title: e.title, artist: e.artist || "", album: e.album || null,
+      trackNumber: e.trackNumber || null, asCopy: !!asCopy
+    });
+  } catch (err) {
+    console.error("slskd: saving “" + e.title + "” to the library failed:", err);
+    if (upgrades[key] !== e) return;
+    setUpgradeState(e, "ready", "Couldn't save it: " + ((err && err.message) || String(err)));
+    await saveUpgrades();
+    render();
+    return;
+  }
+  if (upgrades[key] !== e) return;   // removed while saving
+  if (r && r.status === "exists") {
+    await becomeReplace(e, r);
+    return;
+  }
+  e.trackId = r.trackId;
+  e.saved = { trackId: r.trackId, path: r.path, collectionName: r.collectionName, placement: r.placement };
+  setUpgradeState(e, "saved");
+  await saveUpgrades();
+  render();
+  api.log("info", "job: “" + e.title + "” saved to " + r.collectionName + " — " + r.path, "slskd");
+  lastSavedJob = key;
+  api.ui.showNotification("“" + e.title + "” is in your library (" + qualityLabel(e.file.quality) + ", " + r.collectionName + ").",
+    { kind: "success", action: { label: "Play", id: "job-play-notice" } });
+}
+
+// The song turned out to be in the library already: this job now replaces
+// that copy (the closest in length), through the host's Replace dialog, or
+// saves beside it (Save as copy). Measured against your copy like an upgrade,
+// so a download no better than what you have says so.
+async function becomeReplace(e, r) {
+  var row = null;
+  try { row = await api.library.getTrackById(r.trackId); } catch (err) { console.error("slskd: could not read library track " + r.trackId + ":", err); }
+  e.trackId = r.trackId;
+  e.path = row ? row.path : "file://" + r.path;
+  e.current = row ? libraryQuality(row) : null;
+  e.currentLabel = e.current ? currentLabelFor(e.current) + (e.current.size ? " · " + formatBytes(e.current.size) : "") : null;
+  var better = e.current && e.file && e.file.quality ? isUpgradeOver(e.file.quality, e.current) : true;
+  var copies = r.copies > 1 ? " (you have " + r.copies + " copies; this is the closest in length)" : "";
+  setUpgradeState(e, "ready", (better ? "You already have it" : "You already have it, and your copy is as good") + copies);
+  await saveUpgrades();
+  render();
+  lastReadyUpgrade = jobKeyOf(e);
+  api.ui.showNotification("You already have “" + e.title + "”. Compare the two, or save the new one as a copy.",
+    { action: { label: "Compare & replace", id: "upgrade-replace-notice" } });
+}
+
+function playSavedJob(key) {
+  var e = upgrades[key];
+  if (!e || !e.saved) return;
+  var p = String(e.saved.path);
+  api.playback.playTrack({
+    path: p.indexOf("file://") === 0 ? p : "file://" + p,
+    title: e.title, artist_name: e.artist || null, album_title: e.album || null,
+    track_number: e.trackNumber || null, duration_secs: e.durationSecs || null, kind: "audio"
+  });
 }
 
 // Pure: this host swaps a library file itself, behind its own dialog.
@@ -8797,7 +9179,7 @@ var replaceOffers = {};
 // and resuming the track if it is the one playing). "Keep current" leaves the
 // upgrade ready, with Replace… on its row.
 async function offerReplace(e) {
-  var key = upgradeKey(e.trackId);
+  var key = jobKeyOf(e);
   if (!e || e.state !== "ready" || !e.file || replaceOffers[key]) return;
   replaceOffers[key] = true;
   render();
@@ -8910,7 +9292,8 @@ async function takeUpgradeAlternative(key) {
   e.candidates = [e.alternative];
   e.alternative = null;
   e.triedUsers = [];
-  await startNextUpgradeCandidate(e);
+  // "Take it" is the user's pick, so a job taken over downloads it too.
+  if (!(await enqueueUpgradeCandidate(e, e.candidates[0]))) await startNextUpgradeCandidate(e);
   render();
   schedulePoll(true);
 }
@@ -8965,7 +9348,7 @@ function upgradeSources(e) {
 // Pure: the user may pick a source while one is downloading, or once the
 // upgrade has come to rest without a file.
 function canPickUpgradeSource(e) {
-  return !!e && (e.state === "downloading" || e.state === "alternative" || e.state === "failed" ||
+  return !!e && (e.state === "downloading" || e.state === "choosing" || e.state === "alternative" || e.state === "failed" ||
     e.state === "cancelled" || e.state === "none") && upgradeSources(e).length > 0;
 }
 
@@ -9002,7 +9385,7 @@ async function skipUpgradeSource(key) {
 
 // Pure: one row of the "Other sources" list.
 function upgradeSourceRows(e) {
-  var key = upgradeKey(e.trackId);
+  var key = jobKeyOf(e);
   return upgradeSources(e).map(function (c, i) {
     var active = !!(e.active && e.state === "downloading" && e.active.username === c.username && e.active.filename === c.filename);
     var tried = !active && (e.triedUsers || []).indexOf(c.username) >= 0;
@@ -9040,7 +9423,21 @@ function parseSourceId(id) {
 
 // Pure: an upgrade that is over — kept only as history.
 function upgradeIsHistory(e) {
-  return !!e && (e.state === "replaced" || e.state === "gone");
+  return !!e && (e.state === "replaced" || e.state === "gone" || e.state === "saved");
+}
+
+// Pure: where a job's file will go, for its row — "→ Music · next to
+// Mezzanine", or the copy it replaces. Null before the host has said.
+function jobDestination(e) {
+  if (!e) return null;
+  if (!savesAsNew(e)) return e.path ? "→ replaces " + displayPath(e.path) : null;
+  var p = e.plan;
+  if (!p) return null;
+  var why = p.placement === "album" && e.album ? "next to " + e.album
+    : p.placement === "artist" && e.artist ? "next to your " + e.artist + " tracks"
+    : p.placement === "default" ? "default collection"
+    : "";
+  return "→ " + p.collectionName + (why ? " · " + why : "");
 }
 
 var showUpgradeHistory = false;   // the History list on the Upgrades tab, folded by default
@@ -9061,7 +9458,7 @@ async function clearUpgradeHistory() {
 // 2026-10-28 — one flat "Pending" list mixed all three).
 function upgradeGroup(e) {
   if (!e) return null;
-  if (e.state === "ready" || e.state === "alternative") return "needs";
+  if (e.state === "ready" || e.state === "alternative" || e.state === "choosing") return "needs";
   if (upgradeIsBusy(e)) return "progress";
   if (upgradeIsHistory(e)) return "history";
   return "ended";
@@ -9091,7 +9488,7 @@ function upgradeRows(group, shownKey) {
     .filter(function (e) { return upgradeGroup(e) === group; })
     .sort(function (a, b) { return (b.createdAt || 0) - (a.createdAt || 0); })
     .map(function (e) {
-      var key = upgradeKey(e.trackId);
+      var key = jobKeyOf(e);
       var t = e.active ? transferByKey(e.active.key) : null;
       var line = upgradeLine(e, t, queue[key]);
       return {
@@ -9142,10 +9539,11 @@ function panelUpgrade(all, focused) {
 // ○ to come — or null for a state that isn't on that road (nothing found,
 // failed, cancelled, gone). It answers "where is it?" without reading.
 var UPGRADE_STEPS = ["Search", "Download", "Check", "Replace"];
-function upgradeStepper(state, pct) {
-  var at = { searching: 0, downloading: 1, checking: 2, ready: 3, replaced: 4 }[state];
+var GET_STEPS = ["Search", "Download", "Check", "Save"];
+function upgradeStepper(state, pct, saves) {
+  var at = { searching: 0, choosing: 0, downloading: 1, checking: 2, ready: 3, saving: 3, replaced: 4, saved: 4 }[state];
   if (at == null) return null;
-  return UPGRADE_STEPS.map(function (label, i) {
+  return (saves ? GET_STEPS : UPGRADE_STEPS).map(function (label, i) {
     var mark = i < at ? "✓" : i === at ? "●" : "○";
     return mark + " " + label + (i === 1 && i === at && pct != null ? " " + Math.round(pct * 100) + "%" : "");
   }).join("   ─   ");
@@ -9162,23 +9560,51 @@ function compareSide(caption, lines) {
 // the host's Replace dialog is open for it, `inPlace` whether this host
 // replaces behind its own dialog.
 function upgradePanel(e, t, ready, asking, inPlace, ahead) {
-  var key = upgradeKey(e.trackId);
+  var key = jobKeyOf(e);
   var phase = t ? transferPhase(t.state) : null;
   var pct = t && (phase === "downloading" || phase === "starting") ? transferProgress(t) : null;
   var lines = [
     { type: "text", content: "“" + e.title + "”" + (e.artist ? " · " + e.artist : ""), className: "plugin-heading" }
   ];
-  var steps = upgradeStepper(e.state, pct);
+  var steps = upgradeStepper(e.state, pct, savesAsNew(e) || e.state === "saved");
   if (steps) lines.push(mutedText(steps));
+  // Who is driving: automation, with Take over; or you, with Let it run.
+  if (e.manual && !upgradeIsHistory(e)) {
+    lines.push({ type: "layout", direction: "horizontal", className: "ds-banner", children: [
+      { type: "text", content: "✋ You're in charge of this download: it waits for you at every step from here." },
+      actionButton("Let it run again", "job-let-run", "secondary", { data: { itemId: key } })] });
+  }
 
-  var mine = compareSide("Your copy", [
+  var mine = !savesAsNew(e) ? compareSide("Your copy", [
     { type: "text", content: e.currentLabel || "?" },
     mutedText(displayPath(e.path))
+  ]) : compareSide("Goes to", [
+    { type: "text", content: e.saved ? e.saved.collectionName : (jobDestination(e) || "Your library").replace(/^→ /, "") },
+    mutedText(e.saved ? displayPath(e.saved.path) : "Artist › Album › Title, tagged as the song you asked for")
   ]);
   var theirs = null;
   var buttons = [];
-  var cancel = actionButton("Cancel upgrade", "upgrade-cancel", "secondary", { data: { itemId: key } });
-  if (e.state === "searching") {
+  var cancel = actionButton("Cancel download", "upgrade-cancel", "secondary", { data: { itemId: key } });
+  if (upgradeIsBusy(e) && !e.manual && e.state !== "saving") {
+    buttons.push(actionButton("Take over", "job-take-over", "secondary", { data: { itemId: key } }));
+  }
+  if (e.state === "choosing") {
+    theirs = compareSide("Your pick", [
+      { type: "text", content: e.message || "Choose the file to download" },
+      mutedText("The files the search found are below, best first.")
+    ]);
+  } else if (e.state === "saving") {
+    theirs = compareSide("Downloaded", [{ type: "text", content: "Saving to your library…" }]);
+  } else if (e.state === "saved") {
+    lines.push({ type: "text", content: "In your library." });
+    buttons.push(actionButton("Play", "job-play", "accent", { data: { itemId: key } }));
+  } else if (e.state === "ready" && e.file && savesAsNew(e)) {
+    var dl = [{ type: "text", content: "Downloaded: " + qualityLabel(e.file.quality) + (e.file.size ? " · " + formatBytes(e.file.size) : "") },
+      mutedText(displayPath(e.file.path))];
+    if (e.message) dl.push(mutedText(e.message));
+    theirs = compareSide("Ready to save", dl);
+    buttons.push(actionButton("Save to library", "job-save", "accent", { data: { itemId: key } }));
+  } else if (e.state === "searching") {
     theirs = compareSide("Looking for", [
       { type: "text", content: UPGRADE_TARGETS[upgradeTargetOf(e.target)] },
       mutedText(!ready ? "Waiting for slskd to be ready…"
@@ -9203,6 +9629,7 @@ function upgradePanel(e, t, ready, asking, inPlace, ahead) {
     } else {
       side.push(mutedText("Queued with " + a.username));
     }
+    if (a.stalled) side.push(mutedText("No data for " + Math.round(UPGRADE_STALL_MS / 60000) + " min. Choose another file below, or keep waiting."));
     if (e.triedUsers && e.triedUsers.length > 1) side.push(mutedText("Source " + e.triedUsers.length + " — the earlier ones didn't send it, or you moved on."));
     theirs = compareSide("On its way", side);
     if (nextUntriedSource(e)) buttons.push(actionButton("Try another source", "upgrade-skip", "secondary", { data: { itemId: key } }));
@@ -9215,6 +9642,8 @@ function upgradePanel(e, t, ready, asking, inPlace, ahead) {
     theirs = compareSide("Replaces it", r);
     if (asking) lines.push({ type: "text", content: "Waiting for your answer in the Replace dialog…" });
     else buttons.push(actionButton(inPlace ? "Replace…" : "Compare & replace…", "upgrade-replace", "accent", { data: { itemId: key } }));
+    // A new song that turned out to be in the library: keep both instead.
+    if (isGetJob(e) && !asking && canImportHeadless()) buttons.push(actionButton("Save as copy", "job-save-copy", "secondary", { data: { itemId: key } }));
   } else if (e.state === "replaced") {
     lines.push({ type: "text", content: "Replaced in your library." });
   } else {
@@ -9232,8 +9661,8 @@ function upgradePanel(e, t, ready, asking, inPlace, ahead) {
   var open = pickable && !!sourcesOpen[key];
   if (pickable) {
     var n = upgradeSources(e).length;
-    buttons.push(actionButton(open ? "Hide sources" : "Choose the source myself (" + n + ")", "upgrade-sources-toggle", "secondary", { data: { itemId: key } }));
-  } else if (!upgradeIsHistory(e) && e.state !== "ready" && e.state !== "searching") {
+    buttons.push(actionButton(open ? "Hide the files found" : "Choose the file myself (" + n + ")", "upgrade-sources-toggle", "secondary", { data: { itemId: key } }));
+  } else if (!isGetJob(e) && !upgradeIsHistory(e) && e.state !== "ready" && e.state !== "searching" && e.state !== "saving") {
     buttons.push(actionButton("Search Soulseek myself…", "upgrade-choose", "secondary", { data: { itemId: key } }));
   }
   // Cancel goes last, apart from the ways forward; Close only folds the panel.
@@ -9259,7 +9688,7 @@ function upgradePanel(e, t, ready, asking, inPlace, ahead) {
   // The title says where it stands, so a failed or ready entry doesn't read
   // as "Upgrading".
   var badge = upgradeBadge(e, t, ahead);
-  return { type: "section", title: badge ? badge.label : "Upgrade", children: lines };
+  return { type: "section", title: badge ? badge.label : "Download", children: lines };
 }
 
 var SOURCE_COLUMNS = [
@@ -9272,7 +9701,7 @@ var sourcesOpen = {};   // upgrade key → its "Sources found" list is unfolded
 
 // The row actions each group's list declares, the likely one first.
 var UPGRADE_LIST_ACTIONS = {
-  needs: ["upgrade-replace", "upgrade-take-alternative", "upgrade-show", "upgrade-retry", "upgrade-remove"],
+  needs: ["job-save", "upgrade-replace", "upgrade-take-alternative", "upgrade-show", "upgrade-retry", "upgrade-remove"],
   progress: ["upgrade-show", "upgrade-cancel", "upgrade-remove"],
   ended: ["upgrade-retry", "upgrade-show", "upgrade-remove"]
 };
@@ -9280,6 +9709,7 @@ var UPGRADE_LIST_ACTIONS = {
 function upgradeListActions(group, rows, inPlace) {
   var defs = {
     "upgrade-show": { id: "upgrade-show", label: "Details", icon: "☰" },
+    "job-save": { id: "job-save", label: "Save to library", icon: "＋" },
     "upgrade-replace": { id: "upgrade-replace", label: inPlace ? "Replace…" : "Compare & replace…", icon: "⇪" },
     "upgrade-take-alternative": { id: "upgrade-take-alternative", label: "Take the better copy", icon: "⬇" },
     "upgrade-retry": { id: "upgrade-retry", label: "Search again", icon: "↻" },
@@ -9306,14 +9736,21 @@ function upgradesTab() {
   // The setting that steers every upgrade, above them: an MP3 library left at
   // the FLAC default otherwise read "Nothing better" everywhere with the why
   // below the fold.
-  var children = [upgradeTargetRow()];
+  var children = [{
+    type: "search-input",
+    placeholder: "Download a song: Artist - Title",
+    action: "job-new",
+    value: "",
+    submitOnly: true,
+    buttonLabel: "Download"
+  }, upgradeTargetRow()];
   if (!Object.keys(upgrades).length) {
     children.push({ type: "text", className: "plugin-muted",
-      content: "Nothing being upgraded. Right-click a track in your library and choose Soulseek: Upgrade: a better copy is found, downloaded and checked here, and you replace yours after comparing the two." });
+      content: "Nothing downloading. Right-click any song and choose Soulseek: Download, or type one above. Each download finds the best file, fetches it and puts it in your library — or, for a song you already have, offers to replace your copy. Take over any of them to choose the file yourself." });
     return { type: "layout", direction: "vertical", children: children };
   }
   var shown = panelUpgrade(upgrades, focusedUpgrade);
-  var shownKey = shown ? upgradeKey(shown.trackId) : null;
+  var shownKey = shown ? jobKeyOf(shown) : null;
   if (shown) {
     var queue = upgradeSearchQueue(upgrades, upgradeSearchKey);
     children.push(upgradePanel(shown, shown.active ? transferByKey(shown.active.key) : null,
@@ -9355,7 +9792,7 @@ function upgradesTab() {
   // list only on request.
   var history = upgradeRows("history", null);
   if (history.length) {
-    children.push({ type: "toolbar", title: "History", status: history.length + " finished",
+    children.push({ type: "toolbar", title: "Finished", status: history.length + " done",
       buttons: [{ label: showUpgradeHistory ? "Hide" : "Show", action: "upgrade-history-toggle" },
         { label: "Clear", action: "upgrade-history-clear", icon: "✕" }] });
     if (showUpgradeHistory) {
@@ -9363,7 +9800,7 @@ function upgradesTab() {
         type: "track-row-list",
         items: history,
         showHeader: false,
-        actions: [{ id: "upgrade-remove", label: "Remove", icon: "✕" }]
+        actions: declaredActions([{ id: "job-play", label: "Play", icon: "▶" }, { id: "upgrade-remove", label: "Remove", icon: "✕" }], history)
       });
     }
   }
@@ -9374,8 +9811,8 @@ function upgradesTab() {
 // steers rather than three tabs away in Settings.
 function upgradeTargetRow() {
   var t = upgradeTargetOf(settings.upgradeTarget);
-  return { type: "settings-row", label: "Upgrade to",
-    description: UPGRADE_TARGET_HELP[t] + " New upgrades use this; ones already under way keep theirs. Nothing in your library changes until you replace.",
+  return { type: "settings-row", label: "Look for",
+    description: UPGRADE_TARGET_HELP[t] + " New downloads use this; ones already under way keep theirs. A song you have is replaced only after you compare the two.",
     control: { type: "select", action: "set-upgrade-target", value: t,
       options: Object.keys(UPGRADE_TARGETS).map(function (k) { return { value: k, label: UPGRADE_TARGETS[k] }; }) } };
 }
@@ -9403,6 +9840,18 @@ async function libraryRowForTarget(t) {
 }
 
 async function libraryRowByName(title, artist, durationSecs) {
+  // The host's own match (accents and case ignored, local copies first, a
+  // clearly different length left out) — the rule for every library lookup.
+  // Older hosts: the full-text search and our own comparison below.
+  if (title && artist && api.library && typeof api.library.findTrack === "function") {
+    try {
+      var rows = await api.library.findTrack({ title: title, artist: artist, durationSecs: durationSecs || null });
+      return rows && rows.length ? rows[0] : null;
+    } catch (e) {
+      console.error("slskd: library lookup for “" + title + "” failed:", e);
+      return null;
+    }
+  }
   if (!title || !api.library || typeof api.library.ftsTracks !== "function") return null;
   var wantTitle = normalizeText(title);
   var wantArtist = artist ? normalizeText(artist) : null;
@@ -9990,7 +10439,7 @@ function schedulePoll(fast) {
 // Lifecycle
 // ---------------------------------------------------------------------------
 async function loadSettings() {
-  var keys = ["url", "apiKey", "tierOverride", "insecure", "preferredFormats", "fallbackQuality", "fallbackMaxGb", "fallbackMaxAgeDays", "upgradeTarget", "batchSeq", "managedBy", "stopWithViboplr", "startWithViboplr", "debugServer", "debugUrl"];
+  var keys = ["url", "apiKey", "tierOverride", "insecure", "preferredFormats", "fallbackQuality", "fallbackMaxGb", "fallbackMaxAgeDays", "upgradeTarget", "jobAutomation", "jobSeq", "batchSeq", "managedBy", "stopWithViboplr", "startWithViboplr", "debugServer", "debugUrl"];
   for (var i = 0; i < keys.length; i++) {
     try {
       var v = await api.storage.get(keys[i]);
@@ -10458,6 +10907,9 @@ return {
   _checkUpgrade: checkUpgrade,
   _upgradeLine: upgradeLine,
   _upgradePanel: upgradePanel,
+  _parseSongQuery: parseSongQuery,
+  _jobDestination: jobDestination,
+  _jobKeyOf: jobKeyOf,
   _panelUpgrade: panelUpgrade,
   _displayPath: displayPath,
   _upgradeRowActions: upgradeRowActions,
