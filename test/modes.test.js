@@ -422,3 +422,208 @@ test("Fill: an album target without an id is looked up by name, and one with no 
     p.deactivate();
   }
 });
+
+// --- Download mode ------------------------------------------------------------
+// "Download…" on a track the library doesn't hold as a local file: the Search
+// tab shows only files that are this song, the best first, and the finished
+// file is offered to the library.
+
+test("the manifest offers Download… on tracks and keeps Search… for albums and artists", () => {
+  const manifest = JSON.parse(require("node:fs").readFileSync(require("node:path").join(__dirname, "..", "manifest.json"), "utf8"));
+  const items = manifest.contributes.contextMenuItems;
+  const dl = items.find((i) => i.id === "slskd-download");
+  assert.ok(dl, "a Download item");
+  assert.equal(dl.label, "Download…", "no plugin name in the label — the host adds it");
+  assert.deepEqual(dl.targets, ["track"]);
+  assert.ok(!items.some((i) => i.id === "slskd-upgrade"), "a song's one Soulseek action is Download…");
+  assert.ok(!items.some((i) => i.targets.includes("track") && i.id !== "slskd-download"));
+  assert.deepEqual(items.find((i) => i.id === "slskd-search").targets, ["album", "artist"]);
+});
+
+test("songMatches keeps the files that are the song, closest first, the search's order within a tie", () => {
+  const want = plugin._downloadWant("Karma Police", "Radiohead", "OK Computer");
+  const mk = (filename) => ({ filename });
+  const results = [
+    mk("m\\Radiohead\\OK Computer\\02 - Paranoid Android.flac"),
+    mk("m\\Radiohead\\OK Computer\\06 - Karma Police (Live).flac"),
+    mk("m\\Radiohead\\OK Computer\\06 - Karma Police.flac"),
+    mk("m\\Coldplay\\Karma Police.mp3"),
+    mk("m\\Radiohead\\OK Computer\\06 - Karma Police.mp3")
+  ];
+  for (const c of results) {
+    c.match = plugin._scoreFallbackCandidate(c, want);
+    c.isSong = plugin._isSongMatch(c.match, want);
+  }
+  const out = plugin._songMatches(results).map((c) => c.filename);
+  assert.deepEqual(out.slice(0, 2), [results[2].filename, results[4].filename], "exact matches first, in the search's quality order");
+  assert.ok(!out.includes(results[0].filename), "another song is not shown");
+  assert.ok(!out.includes(results[3].filename), "another artist is not shown");
+
+  // A folder named like the album doesn't vouch for the artist on this search:
+  // another artist's cover filed under "OK Computer" is not the song.
+  const cover = mk("m\\OK Computer\\06 - Karma Police.flac");
+  cover.match = plugin._scoreFallbackCandidate(cover, want);
+  assert.equal(plugin._isSongMatch(cover.match, want), false);
+  if (out.includes(results[1].filename)) {
+    assert.equal(out[out.length - 1], results[1].filename, "a live version ranks below the studio copies");
+  }
+});
+
+// A share laid out the usual way, artist and album in the path — the matcher
+// reads the artist off the folders, as the playback fallback does.
+const DL_FILES = [
+  { filename: "m\\Radiohead\\OK Computer\\06 - Karma Police.flac", size: 30e6, length: 264, bitDepth: 16, sampleRate: 44100 },
+  { filename: "m\\Radiohead\\OK Computer\\06 - Karma Police.mp3", size: 6e6, length: 264, bitRate: 192 },
+  { filename: "m\\Radiohead\\OK Computer\\06 - Karma Police (320).mp3", size: 10e6, length: 264, bitRate: 320 }
+];
+
+test("Download: shows only this song with the best match marked, and tags the fetch as the song", async () => {
+  const p = loadPlugin();
+  const OTHER = { filename: "m\\Radiohead\\OK Computer\\07 - Fitter Happier.flac", size: 20e6, length: 117, bitDepth: 16, sampleRate: 44100 };
+  const KARMA_FILES = DL_FILES;
+  const { h, posts } = modeHost({
+    library: { tracks: [] },
+    bodies: [{ username: "peer", hasFreeUploadSlot: true, queueLength: 0, uploadSpeed: 1000, files: KARMA_FILES.concat([OTHER]) }]
+  });
+  await p.activate(h.api);
+  try {
+    await p._startDownload({ kind: "track", title: "Karma Police", artistName: "Radiohead", albumTitle: "OK Computer" });
+
+    let view = lastView(h);
+    const header = findNodes(view, (n) => n.type === "text" && /^Downloading “Karma Police” by Radiohead/.test(n.content || ""));
+    assert.equal(header.length, 1, "download mode, not a plain search");
+    let list = findNodes(view, (n) => n.type === "track-row-list")[0];
+    assert.ok(list, "results rendered");
+    assert.equal(list.items.length, 3, "the other song is hidden");
+    assert.equal(list.items[0].title, "06 - Karma Police.flac", "lossless first");
+    assert.deepEqual(list.items[0].badge, { label: "Best match", variant: "accent" });
+    assert.ok(!list.items[1].badge, "only the first row is marked");
+    const bar = findNodes(view, (n) => n.type === "toolbar" && /matching files/.test(n.title || ""))[0];
+    assert.ok(bar, "the toolbar counts matching files");
+    assert.ok(!bar.buttons.some((b) => b.action === "result-mode"), "no Folders view for one song");
+
+    h.actions["mode-show-all"]();
+    list = findNodes(lastView(h), (n) => n.type === "track-row-list")[0];
+    assert.equal(list.items.length, 4, "everything found");
+    assert.ok(!list.items.some((i) => i.badge && i.badge.label === "Best match"), "no Best match over the unfiltered list");
+    h.actions["mode-show-all"]();
+
+    const key = "peer" + SEP + KARMA_FILES[0].filename;
+    h.actions["download-file"]({ itemId: "f:" + key });
+    await waitFor(() => h.store.tracked && h.store.tracked[key]);
+    assert.equal(posts.length, 1);
+    const rec = h.store.tracked[key];
+    assert.deepEqual(rec.download, { title: "Karma Police", artist: "Radiohead" });
+    assert.equal(rec.meta.title, "Karma Police");
+    assert.equal(rec.meta.album, "OK Computer");
+    assert.equal(rec.upgrade, undefined);
+
+    // Another song taken from "Show everything found" keeps its own names —
+    // it isn't the song that was asked for.
+    h.actions["mode-show-all"]();
+    const otherKey = "peer" + SEP + OTHER.filename;
+    await h.actions["download-file"]({ itemId: "f:" + otherKey });
+    await waitFor(() => h.store.tracked && h.store.tracked[otherKey]);
+    const otherRec = h.store.tracked[otherKey];
+    assert.equal(otherRec.download, undefined, "no song stamp on another song");
+    assert.equal(otherRec.meta.title, "Fitter Happier", "named from its own file");
+  } finally {
+    p.deactivate();
+  }
+});
+
+test("Download on a song already here is a download too; the header says the choice comes at Add to library", async () => {
+  const p = loadPlugin();
+  const { h } = modeHost({
+    library: { tracks: [LIBRARY_MP3] },
+    bodies: [{ username: "peer", hasFreeUploadSlot: true, queueLength: 0, uploadSpeed: 1000, files: DL_FILES }]
+  });
+  await p.activate(h.api);
+  try {
+    await p._startDownload({ kind: "track", trackId: 42, title: "Karma Police", artistName: "Radiohead" });
+    const header = findNodes(lastView(h), (n) => n.type === "text" && /^Downloading “Karma Police”/.test(n.content || ""));
+    assert.equal(header.length, 1, "download mode, not the Upgrades tab");
+    assert.match(header[0].content, /You already have it: .*replace your copy or keep both/);
+    assert.deepEqual(Object.keys(p._upgrades()), [], "no upgrade started");
+  } finally {
+    p.deactivate();
+  }
+});
+
+test("Add to library on a finished file: the host's compare dialog when the song is here as a file, a plain add otherwise", async () => {
+  const p = loadPlugin();
+  const { h } = modeHost({ library: { tracks: [LIBRARY_MP3] }, bodies: [] });
+  await p.activate(h.api);
+  try {
+    const have = "peer" + SEP + DL_FILES[0].filename;
+    p._setTracked(have, { resolvedPath: "/Users/me/Downloads/slskd/1/06 - Karma Police.flac",
+      meta: { title: "Karma Police", artist: "Radiohead", durationSecs: 264 }, download: { title: "Karma Police", artist: "Radiohead" } });
+    h.actions["import-transfer"]({ itemId: have });
+    await waitFor(() => h.calls.requestAction.length === 1);
+    let r = h.calls.requestAction[0].payload;
+    assert.equal(r.tracks[0].libraryTrackId, 42, "the library copy to compare against — Replace or Save as copy is the user's");
+    assert.equal(r.purpose, undefined, "the compare flow, not the plain add");
+
+    const fresh = "peer" + SEP + "m\\Radiohead\\Kid A\\01 - Everything In Its Right Place.flac";
+    p._setTracked(fresh, { resolvedPath: "/Users/me/Downloads/slskd/2/01 - Everything In Its Right Place.flac",
+      meta: { title: "Everything In Its Right Place", artist: "Radiohead" }, download: { title: "Everything In Its Right Place", artist: "Radiohead" } });
+    h.actions["import-transfer"]({ itemId: fresh });
+    await waitFor(() => h.calls.requestAction.length === 2);
+    r = h.calls.requestAction[1].payload;
+    assert.equal(r.purpose, "import");
+    assert.equal(r.tracks[0].libraryTrackId, undefined);
+  } finally {
+    p.deactivate();
+  }
+});
+
+test("a finished Download offers the file to the library; one landing in a collection says it's on its way", async () => {
+  const p = loadPlugin();
+  const { h } = modeHost({ library: { tracks: [] }, bodies: [] });
+  await p.activate(h.api);
+  try {
+    const key = "peer" + SEP + DL_FILES[0].filename;
+    const outside = "/Users/me/Downloads/slskd/viboplr/1-x/06 - Karma Police.flac";
+    h.store.tracked = h.store.tracked || {};
+    p._setTracked(key, { resolvedPath: outside, meta: { title: "Karma Police", artist: "Radiohead" },
+      download: { title: "Karma Police", artist: "Radiohead" } });
+    await p._handleCompletions([{ username: "peer", filename: DL_FILES[0].filename, state: "Completed, Succeeded", size: 30e6 }]);
+    const n = h.calls.notices[h.calls.notices.length - 1];
+    assert.match(n.message, /^“Karma Police” is downloaded/);
+    assert.equal(n.options.action.label, "Add to library…");
+    await h.actions[n.options.action.id]();
+    const r = h.calls.requestAction[h.calls.requestAction.length - 1];
+    assert.equal(r.action, "download-tracks");
+    assert.equal(r.payload.purpose, "import");
+    assert.equal(r.payload.tracks[0].title, "Karma Police");
+
+    // Inside a collection the rescan brings it in: no button to press.
+    p._setTracked(key, { resolvedPath: "/Users/me/Music/slskd/x/06 - Karma Police.flac", meta: { title: "Karma Police" },
+      download: { title: "Karma Police", artist: "Radiohead" } });
+    await p._handleCompletions([{ username: "peer", filename: DL_FILES[0].filename, state: "Completed, Succeeded", size: 30e6 }]);
+    const m = h.calls.notices.filter((x) => /Karma Police/.test(x.message)).pop();
+    assert.match(m.message, /on its way into your library/);
+    assert.ok(!(m.options && m.options.action), "no button when the scan does it");
+  } finally {
+    p.deactivate();
+  }
+});
+
+test("Download: nothing that is clearly the song says so, and offers the full list", async () => {
+  const p = loadPlugin();
+  const { h } = modeHost({
+    library: { tracks: [] },
+    bodies: [{ username: "peer", hasFreeUploadSlot: true, queueLength: 0, uploadSpeed: 1000,
+      files: [{ filename: "m\\RH\\07 - Fitter Happier.flac", size: 20e6, length: 117 }] }]
+  });
+  await p.activate(h.api);
+  try {
+    await p._startDownload({ kind: "track", title: "Karma Police", artistName: "Radiohead" });
+    const view = lastView(h);
+    assert.equal(findNodes(view, (n) => n.type === "track-row-list").length, 0);
+    assert.equal(findNodes(view, (n) => n.type === "text" && /is clearly this song/.test(n.content || "")).length, 1);
+    assert.ok(findNodes(view, (n) => n.type === "button" && n.action === "mode-show-all" && n.label === "Show everything found").length);
+  } finally {
+    p.deactivate();
+  }
+});

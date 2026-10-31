@@ -220,16 +220,85 @@ test("Download on a track the fallback played resolves by metadata to the kept c
     const download = h.resolvers["download-meta:" + plugin._PROVIDER_ID];
     assert.equal(typeof download, "function", "registered on the download provider");
 
-    // Nothing kept yet: null, and no search on the user's behalf.
-    assert.equal(await download("Karma Police", "Radiohead", null, null, "original"), null);
-    assert.equal(calls.searches, 0);
-
     const played = await h.resolvers["meta:" + plugin._FALLBACK_ID]("Karma Police (Remastered 2009)", "Radiohead", "OK Computer", 264, {});
+    // "original" is what an older host remembered for this provider: still the kept copy.
     const out = await download("Karma Police (Remastered 2009)", "Radiohead", "OK Computer", 264, "original");
     assert.ok(out, "resolved");
     assert.equal(out.url, played.url, "the very file that played");
     assert.equal(out.ext, "mp3");
     assert.equal(calls.searches, 1, "only the fallback's own search");
+  } finally {
+    plugin.deactivate();
+  }
+});
+
+test("the manifest offers Soulseek for songs with no source (findsByName), with real quality choices", async () => {
+  const plugin = loadPlugin();
+  const { h } = fallbackHost();
+  await plugin.activate(h.api);
+  try {
+    const manifest = JSON.parse(require("node:fs").readFileSync(require("node:path").join(__dirname, "..", "manifest.json"), "utf8"));
+    assert.notEqual(manifest.contributes.downloadProviders[0].findsByName, false);
+    const q = h.resolvers["qualities:" + plugin._PROVIDER_ID]();
+    assert.deepEqual(q.map((o) => o.value), ["best", "lossless", "high"]);
+    assert.equal(plugin._downloadModeOf("original"), "best");
+    assert.equal(plugin._downloadModeOf("lossless"), "lossless");
+  } finally {
+    plugin.deactivate();
+  }
+});
+
+test("Download on a song with no source searches Soulseek, fetches the best match, reports progress and answers with the file", async () => {
+  const plugin = loadPlugin();
+  const { h, calls } = fallbackHost();
+  await plugin.activate(h.api);
+  try {
+    const download = h.resolvers["download-meta:" + plugin._PROVIDER_ID];
+    const out = await download("Karma Police", "Radiohead", "OK Computer", 264, "best");
+    assert.ok(out, "resolved");
+    assert.match(out.url, /^file:\/\/.*\/viboplr\/fallback\/.*03 - Karma Police\.mp3$/);
+    assert.equal(out.ext, "mp3");
+    assert.match(out.quality, /from peer$/);
+    assert.equal(calls.searches, 1);
+    assert.equal(calls.batches.length, 1);
+    assert.equal(calls.batches[0].username, "peer");
+
+    const labels = h.calls.progress.map((p) => p.label);
+    assert.ok(labels.includes("Searching Soulseek…"), labels.join(" / "));
+    assert.ok(h.calls.progress.some((p) => p.percent != null), "a determinate bar while bytes move");
+
+    // Kept in the fallback index: the next play or download uses it with no search.
+    const again = await download("Karma Police", "Radiohead", null, null, "best");
+    assert.equal(again.url, out.url);
+    assert.equal(calls.searches, 1);
+    // The Fallback tab's history counts plays, not downloads.
+    assert.equal((h.store.resolveHistory || []).length, 0);
+  } finally {
+    plugin.deactivate();
+  }
+});
+
+test("Lossless only with no lossless copy shared says so and fetches nothing", async () => {
+  const plugin = loadPlugin();
+  const { h, calls } = fallbackHost();
+  await plugin.activate(h.api);
+  try {
+    const download = h.resolvers["download-meta:" + plugin._PROVIDER_ID];
+    await assert.rejects(download("Karma Police", "Radiohead", null, 264, "lossless"), /No lossless copy on Soulseek .*Best available/);
+    assert.equal(calls.batches.length, 0);
+  } finally {
+    plugin.deactivate();
+  }
+});
+
+test("Download on a song nobody shares answers null (the modal says nothing was found)", async () => {
+  const plugin = loadPlugin();
+  const { h, calls } = fallbackHost();
+  await plugin.activate(h.api);
+  try {
+    const download = h.resolvers["download-meta:" + plugin._PROVIDER_ID];
+    assert.equal(await download("Some Other Song", "Nobody", null, null, "best"), null);
+    assert.equal(calls.batches.length, 0);
   } finally {
     plugin.deactivate();
   }

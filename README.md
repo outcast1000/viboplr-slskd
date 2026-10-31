@@ -55,9 +55,7 @@ Viboplr quits, and the plugin starts it again whenever Viboplr opens, unless you
 turn either off. Viboplr doesn't add slskd to your login items; to have it run
 without Viboplr, add it there yourself. The Settings tab's *slskd on this
 computer* card has Start / Restart, its version, sharing more folders, where its
-files are, and Remove. A slskd an older version of this plugin installed keeps
-working and offers **Move slskd to Viboplr's copy**, so Viboplr can keep it up
-to date. Typing an address by hand stops using it. The view tells you which of
+files are, and Remove. Typing an address by hand stops using it. The view tells you which of
 four things is wrong until it isn't: not set up, slskd not reachable, key
 rejected, or slskd not signed in to Soulseek — each with the fix.
 
@@ -75,10 +73,17 @@ rejected, or slskd not signed in to Soulseek — each with the fix.
   thumbnail — FLAC 16/44, FLAC 24/96, MP3 320 — tinted by quality; a folder
   mixing lossless and lossy says MIX.
 - **Recent searches** sit under the box, one click each.
-- **Right-click → Soulseek: Search…** on any track, album or artist in
-  Viboplr, and Cmd+K offers Soulseek as a source for whatever you typed.
-- **Right-click → Soulseek: Upgrade** on a library track finds a better copy
-  on its own and follows it in the **Upgrades** tab. It searches once, keeps
+- **Right-click → Soulseek: Download…** on any song in Viboplr shows only the
+  files that are that song, the best one marked **Best match**; when the file
+  arrives it's offered to your library. It is a song's only Soulseek action:
+  for a song you already have, **Add to library…** opens Viboplr's comparison
+  of the two copies, where you **Replace** yours or **Save as copy**.
+- **Right-click → Soulseek: Search…** on an album or artist, and Cmd+K offers
+  Soulseek as a source for whatever you typed.
+- **Automatic upgrades** — started by the AI assistant's `upgrade` tool (the
+  menu item that started them is gone) — find a better copy of a library
+  track on their own and follow it in the **Upgrades** tab. An upgrade
+  searches once, keeps
   only files that are the same recording (same length, no *live*/*remix* you
   didn't ask for) and beat your copy (lossless over lossy, or a clearly higher
   bitrate), and downloads the best one from a sharer likely to deliver. A

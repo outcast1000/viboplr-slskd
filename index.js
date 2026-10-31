@@ -1141,6 +1141,15 @@ function folderQualityLabel(files) {
 
 // Pure: the advertised quality fields a tile needs, or null when the file
 // came without them (a retry rebuilt from slskd's transfer record).
+// Pure: a tracked file's quality in a search candidate's terms (extension +
+// tier + what the sharer advertised), so `meetsQualityTarget` can judge a file
+// we queued earlier the way it judges a search result.
+function trackedQuality(key, rec) {
+  var q = (rec && rec.quality) || {};
+  var f = { filename: String(key || "").split(KEY_SEP)[1] || "", bitRate: q.bitRate, bitDepth: q.bitDepth, sampleRate: q.sampleRate };
+  return { extension: fileExtension(f), qualityTier: qualityTier(f), bitRate: q.bitRate || null, bitDepth: q.bitDepth || null, sampleRate: q.sampleRate || null };
+}
+
 function qualitySnapshot(f) {
   if (!f || (f.bitRate == null && f.bitDepth == null && f.sampleRate == null)) return null;
   return { bitRate: f.bitRate != null ? f.bitRate : null, bitDepth: f.bitDepth != null ? f.bitDepth : null,
@@ -1393,8 +1402,45 @@ function annotateForMode(ranked, mode) {
       c.source = upgradeSource(c, mode);
     } else if (mode.kind === "fill") {
       c.owned = !!ownedTrackFor(c, mode.owned);
+    } else if (mode.kind === "download") {
+      c.match = scoreFallbackCandidate(c, mode.want);
+      c.isSong = isSongMatch(c.match, mode.want);
     }
   }
+}
+
+// Pure: whether a scored file is the song a download asked for — the playback
+// fallback's bar, so "matching" means the same thing in both places.
+function isSongMatch(m, want) {
+  if (!m) return false;
+  if (m.title < FALLBACK_MIN_TITLE_MATCH) return false;
+  if (want.artist.length && m.artist < FALLBACK_MIN_ARTIST_MATCH) return false;
+  return m.score > 0;
+}
+
+// Pure: the files a download shows — the song's matches, closest first, the
+// search's own quality / sharer order kept within each tenth of a point (the
+// same bucketing `rankFallback` uses, so one word's difference in a long title
+// doesn't outrank a free slot).
+function songMatches(results) {
+  var out = [];
+  for (var i = 0; i < (results || []).length; i++) {
+    if (results[i].isSong) out.push({ c: results[i], at: i });
+  }
+  out.sort(function (a, b) {
+    var sa = Math.round(a.c.match.score * 10), sb = Math.round(b.c.match.score * 10);
+    return sa !== sb ? sb - sa : a.at - b.at;
+  });
+  return out.map(function (x) { return x.c; });
+}
+
+// What a download mode matches against, from the song's names. Never the
+// album: `scoreFallbackCandidate` lets album words stand in for the artist,
+// which is right only for the results of an album + title search (Soulseek
+// blocks some artist names) — on this artist + title search it let another
+// artist's cover, filed in a folder named like the album, read as the song.
+function downloadWant(title, artist) {
+  return { title: titleWords(title), artist: artistWords(artist), album: null };
 }
 
 // Identity of a request, for the kept-file index: what the host's `sameSong`
@@ -2200,6 +2246,7 @@ async function enqueueBatch(username, files, label, subdir, recExtra) {
       queuedAt: nowMs()
     };
     if (extra.upgrade) rec.upgrade = extra.upgrade;
+    if (extra.download) rec.download = extra.download;
     tracked[username + KEY_SEP + files[i].filename] = rec;
     queued.push(files[i]);
   }
@@ -2404,6 +2451,12 @@ async function readTagsForResolved() {
   await job;
 }
 
+// The toast button on a finished "Download…" — copies that file into the
+// library through the host's download modal. The id is fixed (a toast action
+// names one handler), so the file it means is kept here.
+var FINISHED_DOWNLOAD_IMPORT_ACTION = "import-finished-download";
+var lastFinishedDownload = null;
+
 // Announce what just finished and, when it landed inside a collection, rescan
 // that collection so the files reach the library without a click. Deduped by
 // collection: an album finishing is a dozen files and must not queue a dozen
@@ -2421,7 +2474,23 @@ async function handleCompletions(finished) {
     }
   }
   var upgradeRec = finished.length === 1 ? tracked[trackKeyOf(finished[0])] : null;
-  if (upgradeRec && upgradeRec.upgrade && upgradeRec.upgrade.auto) {
+  var downloadRec = upgradeRec && upgradeRec.download ? upgradeRec : null;
+  if (downloadRec) {
+    // A song asked for from its own menu. Landing inside a collection, the
+    // rescan below brings it in; otherwise the toast offers the one step left
+    // (the Downloads tab keeps the same button for after the toast is gone).
+    var scanned = downloadRec.resolvedPath && tier === "local" && collectionForPath(downloadRec.resolvedPath, localCollections);
+    var song = "“" + (downloadRec.download.title || names[0]) + "”";
+    if (scanned) {
+      api.ui.showNotification(song + " is downloaded and on its way into your library.", { kind: "success" });
+    } else if (importTrackFor(trackKeyOf(finished[0]))) {
+      lastFinishedDownload = trackKeyOf(finished[0]);
+      api.ui.showNotification(song + " is downloaded — it's on the Downloads tab.",
+        { kind: "success", action: { label: "Add to library…", id: FINISHED_DOWNLOAD_IMPORT_ACTION } });
+    } else {
+      api.ui.showNotification(song + " is downloaded — it's on the Downloads tab.", { kind: "success" });
+    }
+  } else if (upgradeRec && upgradeRec.upgrade && upgradeRec.upgrade.auto) {
     // An automatic upgrade announces itself once the file passed its check
     // (advanceUpgradeCheck) — "ready" before that could be a mislabelled file.
   } else if (upgradeRec && upgradeRec.upgrade) {
@@ -2934,8 +3003,8 @@ function downloadAnswer(path, meta) {
   return out;
 }
 
-// The download modal's by-metadata resolve: the copy the fallback kept for this
-// song, wherever it is now, or null. Same key the fallback stored it under.
+// The copy the fallback kept for this song, wherever it is now, or null. Same
+// key the fallback stored it under.
 async function resolveKeptDownload(title, artistName) {
   if (!title) return null;
   var entry = fallback[fallbackKey(title, artistName)];
@@ -2944,6 +3013,171 @@ async function resolveKeptDownload(title, artistName) {
   if (!path) return null;
   var rec = tracked[entry.ref];
   return downloadAnswer(path, rec && rec.meta);
+}
+
+// ---- Download by name -------------------------------------------------------
+// The download modal's by-metadata resolve. It serves two cases: "Download…" on
+// a track the playback fallback played (the kept copy answers at once), and the
+// Download button on a song with no source at all — a detail page's "Not in
+// library" row. For the second it does the fallback's work with a download's
+// patience: one search, the best-matching file at the quality the user picked,
+// fetched from sharers in turn. The modal shows our progress and an elapsed
+// counter, so minutes are fine where playback had 55 seconds.
+//
+// The fetch lands in the fallback folder and the fallback index, like a played
+// one: the next play of the song uses it, and an abandoned fetch (the user
+// cancelled — the host can't stop an HTTP provider, so slskd keeps going)
+// answers the next Download at once.
+var DOWNLOAD_SEARCH_MS = 30000;              // one search, a little longer than playback's
+var DOWNLOAD_BUDGET_MS = 15 * 60 * 1000;     // then give up and leave the transfer running
+var DOWNLOAD_STALL_MS = 90 * 1000;           // no bytes for this long → the next sharer
+var DOWNLOAD_MAX_TRIES = 6;
+
+// The modal's quality choices. `best` also accepts the kept copy as it is.
+var DOWNLOAD_QUALITIES = [
+  { value: "best", label: "Best available", description: "Lossless when someone shares it, else the best lossy copy. A song already on this computer is copied untouched." },
+  { value: "lossless", label: "Lossless only", description: "FLAC and other lossless files only — nothing is downloaded when no one shares one." },
+  { value: "high", label: "MP3 320 / V0 only", description: "High-bitrate MP3 first, never lossless or low-bitrate files." }
+];
+
+// Pure: why a finished file can't be added under the quality option the modal
+// sent (the options are the provider's, so "Add to library…" shows them too),
+// or null. Refuses only on what is known: the extension settles lossless, and
+// "MP3 320 / V0 only" needs the advertised bitrate — a file with none passes.
+function finishedFileRefusal(key, rec, mode) {
+  if (!fallbackModeFilters(mode)) return null;
+  var q = trackedQuality(key, rec);
+  var known = mode === "lossless" || (rec && rec.quality && rec.quality.bitRate != null) || q.qualityTier === T_LOSSLESS;
+  if (!known || meetsQualityTarget(q, mode)) return null;
+  var what = qualityLabel(q) || (q.extension ? q.extension.toUpperCase() : "this file");
+  return "This file is " + what + ", so “" + FALLBACK_MODES[mode] + "” doesn't take it. Choose Best available to add it as it is.";
+}
+
+// Pure: the ranking mode a modal format asks for. "original" is what older
+// hosts remembered for this provider, from when it offered only that.
+function downloadModeOf(format) {
+  return format === "lossless" || format === "high" ? format : "best";
+}
+
+function reportDownload(progress) {
+  if (api && api.downloads && typeof api.downloads.reportProgress === "function") api.downloads.reportProgress(progress);
+}
+
+// Pure: what the modal shows while a transfer runs.
+function downloadProgressOf(t, c) {
+  var phase = transferPhase(t && t.state);
+  var user = (c && c.username) || (t && t.username) || "a sharer";
+  var pct = transferProgress(t);
+  var out = { detail: transferSubtitle(t, null, "local") };
+  if (phase === "downloading" || phase === "starting") {
+    out.label = "Downloading from " + user;
+    if (pct != null) out.percent = Math.round(pct * 100);
+    var eta = transferEta(t);
+    if (eta) out.etaSecs = eta;
+  } else {
+    out.label = "Waiting in " + user + "'s queue";
+  }
+  return out;
+}
+
+function downloadQualityLine(c) {
+  if (!c) return null;
+  var q = qualityLabel(c);
+  return (q ? q + " · " : "") + "from " + c.username;
+}
+
+async function resolveDownloadByName(title, artistName, albumName, durationSecs, format) {
+  if (!title) return null;
+  var mode = downloadModeOf(format);
+  var fkey = fallbackKey(title, artistName);
+  var meta = { title: title, artist: artistName || null, album: albumName || null };
+
+  // 1. A copy already here — the file the fallback played, most often.
+  if (mode === "best") {
+    var kept = await resolveKeptDownload(title, artistName);
+    if (kept) return kept;
+  }
+
+  if (readiness.state !== "ready") throw new Error("Soulseek isn't connected — open the Soulseek view to see why.");
+  if (tier !== "local") throw new Error("Downloading from Soulseek needs slskd running on this computer.");
+
+  var deadline = nowMs() + DOWNLOAD_BUDGET_MS;
+
+  // 2. Still on its way from an earlier attempt (a timed-out play, a cancelled download)?
+  // Only when it is what the user asked for: a playback fallback picks for a
+  // fast start, so its file can be an MP3 where "Lossless only" was chosen.
+  var pending = fallback[fkey];
+  if (pending && pending.state === "pending" && fallbackModeFilters(mode)
+      && !meetsQualityTarget(trackedQuality(pending.ref, tracked[pending.ref]), mode)) {
+    api.log("info", "download: the earlier transfer of “" + title + "” isn't " + mode + " — searching for one that is", "slskd");
+    pending = null;
+  }
+  if (pending && pending.state === "pending") {
+    try { transfers = (await fetchTransfers()) || transfers; } catch (e) { console.error("slskd: couldn't read transfers:", e); }
+    var earlier = transferByKey(pending.ref);
+    var phase0 = earlier ? transferPhase(earlier.state) : null;
+    if (earlier && phase0 !== "failed" && phase0 !== "cancelled") {
+      api.log("info", "download: “" + title + "” is still downloading from an earlier attempt — waiting on it", "slskd");
+      var c0 = { username: earlier.username };
+      var w0 = await waitForTransfer(pending.ref, deadline, function (t) { reportDownload(downloadProgressOf(t, c0)); }, DOWNLOAD_STALL_MS);
+      if (w0.state === "done") {
+        var p0 = await locateFinished(w0.transfer, tracked[pending.ref]);
+        if (p0) {
+          pending.state = "kept"; pending.path = p0; pending.lastUsedAt = nowMs();
+          await saveFallbackIndex();
+          return downloadAnswer(p0, (tracked[pending.ref] || {}).meta || meta);
+        }
+      }
+      if (w0.state === "timeout") {
+        throw new Error("Still waiting on " + earlier.username + " — slskd keeps downloading it; try Download again later.");
+      }
+      // Failed or stalled: search afresh below.
+    }
+  }
+
+  // 3. Search.
+  var query = fallbackQuery(title, artistName);
+  reportDownload({ label: "Searching Soulseek…", detail: "“" + query + "”" });
+  var ranked = await searchForTrack({ title: title, artist: artistName, album: albumName },
+    viewPrefs({ knownDurationSecs: durationSecs }), null, null, Math.min(deadline, nowMs() + DOWNLOAD_SEARCH_MS));
+  if (ranked === null) throw new Error("slskd is busy with another search — try again in a moment.");
+  var preferred = parsePreferredFormats(settings.preferredFormats);
+  var byAlbum = ranked.byAlbum ? albumName : null;
+  var matches = rankFallback(ranked, title, artistName, preferred, mode, byAlbum);
+  api.log("info", "download: “" + (ranked.byAlbum || query) + "” → " + ranked.length + " files, " + matches.length + " match (" + mode + ")", "slskd");
+  if (!matches.length) {
+    if (fallbackModeFilters(mode)) {
+      var others = rankFallback(ranked, title, artistName, preferred, "best", byAlbum).length;
+      if (others) {
+        throw new Error("No " + (mode === "lossless" ? "lossless" : "MP3 320 / V0") + " copy on Soulseek — " + others +
+          " other matching file" + (others === 1 ? "" : "s") + ". Pick Best available to take one.");
+      }
+    }
+    if (ranked.artistBlocked) throw new Error(noMatchMessage(ranked, artistName, ""));
+    return null;   // the modal says nothing was found
+  }
+
+  // 4. Fetch — the playback race, with a download's patience.
+  reportDownload({ label: "Asking " + matches[0].username + " for the file…", detail: basenameRemote(matches[0].filename) });
+  var rec = { at: nowMs(), title: title, artist: artistName || null, steps: [], candidates: [], tried: [], picked: null, chosen: null };
+  var race = await raceSharers(rec, matches, {
+    fkey: fkey, title: title, artistName: artistName, query: ranked.byAlbum || query, deadline: deadline,
+    stallMs: DOWNLOAD_STALL_MS, maxTries: DOWNLOAD_MAX_TRIES,
+    onTick: function (t, c) { reportDownload(downloadProgressOf(t, c)); }
+  });
+  schedulePoll(true);
+  if (race.state === "done") {
+    var answer = downloadAnswer(race.path, (tracked[race.attempt.key] || {}).meta || meta);
+    var q = downloadQualityLine(race.attempt.c);
+    if (q) answer.quality = q;
+    return answer;
+  }
+  if (race.state === "unlocated") throw new Error("The download finished, but its file couldn't be found in slskd's downloads folder.");
+  if (race.state === "timeout") {
+    throw new Error("Still waiting on " + race.attempt.c.username + " after " + Math.round(DOWNLOAD_BUDGET_MS / 60000) +
+      " minutes — slskd keeps downloading it; try Download again later.");
+  }
+  throw new Error(race.state === "none" ? "Every sharer refused the download." : "No sharer sent the file — try again later.");
 }
 
 // While a fallback transfer runs, the tab shows the same line the Downloads
@@ -2991,6 +3225,10 @@ function liveLine(rec) {
 // transfer left running for next time) | { state: "unlocated" } | { state:
 // "exhausted" } (every sharer tried and dropped) | { state: "none" } (nothing
 // could even be queued).
+//
+// `ctx.stallMs` / `ctx.maxTries` / `ctx.onTick` let a caller with more patience
+// than a listener (a download the user asked for) widen the playback limits and
+// watch the leading transfer; the playback fallback passes none of them.
 async function raceSharers(rec, matches, ctx) {
   var live = [];
   var next = 0;
@@ -2998,6 +3236,8 @@ async function raceSharers(rec, matches, ctx) {
   var tried = 0;
   var lastStartAt = 0;
   var leader = null;
+  var stallMs = ctx.stallMs || FALLBACK_START_MS;
+  var maxTries = ctx.maxTries || FALLBACK_MAX_TRIES;
 
   function indexEntry(attempt, state, path) {
     fallback[ctx.fkey] = { ref: attempt.key, title: ctx.title, artist: ctx.artistName || null, query: ctx.query,
@@ -3012,7 +3252,7 @@ async function raceSharers(rec, matches, ctx) {
   // Queue the next candidate from a sharer not yet tried. False when there is
   // none left (or the per-resolve cap is reached).
   async function startNext() {
-    while (next < matches.length && tried < FALLBACK_MAX_TRIES) {
+    while (next < matches.length && tried < maxTries) {
       var c = matches[next++];
       if (users[c.username]) continue;
       users[c.username] = 1;
@@ -3123,8 +3363,8 @@ async function raceSharers(rec, matches, ctx) {
           for (var m = 0; m < losers.length; m++) await drop(losers[m], "another sharer started sending first");
         }
       }
-      if (nowMs() - a.movedAt > FALLBACK_START_MS) {
-        await drop(a, "no data for " + Math.round(FALLBACK_START_MS / 1000) + "s", "warn", "stalled");
+      if (nowMs() - a.movedAt > stallMs) {
+        await drop(a, "no data for " + Math.round(stallMs / 1000) + "s", "warn", "stalled");
       }
     }
 
@@ -3137,7 +3377,10 @@ async function raceSharers(rec, matches, ctx) {
     if (!live.length) return { state: "exhausted" };
 
     var primary = leader || live[0];
-    if (primary.transfer) liveTransferTick(rec, primary.key)(primary.transfer);
+    if (primary.transfer) {
+      liveTransferTick(rec, primary.key)(primary.transfer);
+      if (ctx.onTick) ctx.onTick(primary.transfer, primary.c);
+    }
   }
 
   // Out of time. Keep ONE transfer running for next time — the leader if any,
@@ -3537,11 +3780,7 @@ function whatIsThisUrl(apiKey, collections) {
 //                               the store has to be created for slskd)
 //   logs/slskd.log              slskd's output (the host writes it)
 //
-// The program itself is Viboplr's, in its shared tools folder. Plugin versions
-// up to 0.25.0 downloaded slskd into this store instead (slskd/<version>/): a
-// record without `source: "host"` is such a copy. It keeps starting from there
-// and offers one row, Move, which switches it to Viboplr's copy; it gets no
-// updates until it moves.
+// The program itself is Viboplr's, in its shared tools folder.
 //
 // The permission it needs (`programs:run`) is an OPTIONAL one in the manifest:
 // a user who runs their own slskd is never asked for it. Nothing here runs
@@ -3567,9 +3806,8 @@ var TOOL_WAIT_MS = 5 * 60 * 1000;
 // the host says about that tool (api.system.getDependency: { installed,
 // version, origin, latest }, or null when no definition is in force); record:
 // what the install left (storage `managedSlskd`: { source: "host", port,
-// webUsername, webPassword, downloadsDir, installedAt } — a legacy store copy
-// has { version, asset } instead of source); status: the host's last
-// api.system.programs.status; job: a start / stop / move / share the user
+// webUsername, webPassword, downloadsDir, installedAt }); status: the host's last
+// api.system.programs.status; job: a start / stop / share the user
 // started ({ kind, line, percent }); error: the last failure, shown until the
 // next attempt; setup: the install checklist while it runs.
 var managed = { supported: false, dep: null, record: null, status: null, job: null, error: null, setup: null };
@@ -3644,16 +3882,6 @@ async function loadAccount() {
   } catch (e) {
     console.error("slskd: couldn't read the Soulseek account:", e);
   }
-}
-
-// Pure: the program file inside a legacy store copy (slskd/<version>/).
-function slskdBinaryName(asset) {
-  return /^win-/.test(String(asset || "")) ? "slskd.exe" : "slskd";
-}
-
-// Pure: the record is Viboplr's copy of slskd, not a legacy store copy.
-function isHostRecord(record) {
-  return !!(record && record.source === "host");
 }
 
 // Pure: the tool is installed as Viboplr's own copy (a system copy on PATH is
@@ -3758,7 +3986,7 @@ function installFormComplete(form) {
 // Pure: what a failed program call means to the user. The host rejects an
 // install the user turned down with "Install declined", and a permission they
 // refused with a PermissionError naming it.
-// `kind` is what was being done ("start", "restart", "move"…); a refused
+// `kind` is what was being done ("start", "restart"…); a refused
 // permission means something different for a start than for an install.
 function managedFailure(e, kind) {
   var msg = String((e && e.message) || e || "");
@@ -3817,7 +4045,7 @@ function usesManaged(cfg, m) {
 async function loadManagedRecord() {
   try {
     var r = await api.storage.get(MANAGED_RECORD_KEY);
-    managed.record = r && typeof r === "object" && (r.version || r.source === "host") ? r : null;
+    managed.record = r && typeof r === "object" && r.source === "host" ? r : null;
   } catch (e) {
     console.error("slskd: couldn't read the install record:", e);
     managed.record = null;
@@ -3866,12 +4094,10 @@ async function storePath(segments, ensureDir) {
 
 // Pure: what api.system.programs.start gets, from paths already resolved.
 // Viboplr's copy is named by the tool (the host finds it, and its working
-// folder is this plugin's store); a legacy store copy by its path.
-function managedStartSpec(record, paths, outliveApp) {
-  var where = isHostRecord(record)
-    ? { dependency: SLSKD_TOOL }
-    : { path: [MANAGED_DIR, record.version, slskdBinaryName(record.asset)] };
-  return Object.assign(where, {
+// folder is this plugin's store).
+function managedStartSpec(paths, outliveApp) {
+  return {
+    dependency: SLSKD_TOOL,
     args: ["--app-dir", paths.app, "--config", paths.config, "--no-logo"],
     env: {
       // .NET unpacks a single-file app on first run; keep that inside the
@@ -3881,7 +4107,7 @@ function managedStartSpec(record, paths, outliveApp) {
       DOTNET_NOLOGO: "1"
     },
     outliveApp: outliveApp !== false
-  });
+  };
 }
 
 async function managedPaths() {
@@ -4350,7 +4576,7 @@ function setupProgressView() {
 // running after Viboplr quits unless the user said otherwise.
 async function startManagedProcess() {
   var paths = await managedPaths();
-  return api.system.programs.start(MANAGED_NAME, managedStartSpec(managed.record, paths, !settings.stopWithViboplr));
+  return api.system.programs.start(MANAGED_NAME, managedStartSpec(paths, !settings.stopWithViboplr));
 }
 
 // slskd's own shutdown first — it finishes writing its database — then the
@@ -4399,42 +4625,6 @@ function restartManaged() {
     await stopManagedProcess();
     signinWhy = null;
     await startManagedProcess();
-    await awaitSlskdUp();
-  });
-}
-
-// A legacy store copy (slskd/<version>/ from plugin ≤ 0.25.0) moves to
-// Viboplr's copy: Viboplr installs it (it asks), the old one stops, the same
-// slskd.yml and data start on Viboplr's copy, and the old folder goes. If the
-// new copy won't start, the old one starts again and nothing is deleted.
-function moveManaged() {
-  return runManagedJob("move", "Waiting for Viboplr to install slskd…", async function (job) {
-    var legacy = managed.record;
-    if (!legacy || isHostRecord(legacy)) return;
-    var dep = await ensureHostTool(function () { return managed.job === job; }, function (hint) {
-      job.line = hint || "Waiting for Viboplr to install slskd…";
-      render();
-    });
-    if (!dep) return;
-    managed.dep = dep;
-    job.line = "Moving slskd to Viboplr's copy…";
-    render();
-    await stopManagedProcess();
-    var moved = Object.assign({}, legacy, { source: "host" });
-    delete moved.version;
-    delete moved.asset;
-    await saveManagedRecord(moved);
-    try {
-      await startManagedProcess();
-    } catch (e) {
-      console.error("slskd: Viboplr's copy didn't start; back to the old one:", e);
-      await saveManagedRecord(legacy);
-      try { await startManagedProcess(); } catch (e2) { console.error("slskd: the old copy didn't start either:", e2); }
-      throw e;
-    }
-    try { await api.storage.files.remove([MANAGED_DIR, legacy.version]); } catch (e) { console.error("slskd: couldn't remove the old copy:", e); }
-    api.log("info", "slskd moved from the plugin's copy (" + legacy.version + ") to Viboplr's (" + (dep.version || "?") + ")", "slskd");
-    managedPlaces = null;
     await awaitSlskdUp();
   });
 }
@@ -4509,9 +4699,7 @@ function managedRemoveRows(rm, job) {
   if (rm.asking) {
     return [
       { type: "settings-row", label: "Remove slskd?",
-        description: isHostRecord(managed.record)
-          ? "slskd stops, and its settings, data and Soulseek login are deleted. Your downloads and shared folders stay where they are. Viboplr's copy of the program stays in Extensions → Tools; remove it there if nothing else uses it."
-          : "slskd stops and is deleted from this computer, with its settings and Soulseek login. Your downloads and shared folders stay where they are." },
+        description: "slskd stops, and its settings, data and Soulseek login are deleted. Your downloads and shared folders stay where they are. Viboplr's copy of the program stays in Extensions → Tools; remove it there if nothing else uses it." },
       buttonRow([
         actionButton("Remove slskd", "managed-remove", "accent"),
         actionButton("Cancel", "managed-remove-cancel")
@@ -4921,9 +5109,7 @@ async function loadManagedPlaces() {
   var places = [];
   var cfg = await get([MANAGED_DIR, "data", "slskd.yml"]);
   if (cfg) places.push({ label: "Settings file", path: cfg, reveal: true });
-  // Viboplr's copy lives in its tools folder (Extensions → Tools).
-  var bin = isHostRecord(managed.record) ? null : await get([MANAGED_DIR, managed.record.version]);
-  if (bin) places.push({ label: "Installed in", path: bin, reveal: false });
+  // The program itself is Viboplr's, in its tools folder (Extensions → Tools).
   var data = await get([MANAGED_DIR, "data", "app"]);
   if (data) places.push({ label: "Data folder", path: data, reveal: false });
   var log = await get(["logs", MANAGED_NAME + ".log"]);
@@ -4975,19 +5161,12 @@ function managedJobNodes() {
   return nodes;
 }
 
-// Pure: the card's version line (Viboplr's copy: where its updates are) or,
-// for a legacy store copy, the row that moves it to Viboplr's copy. `dep` is
-// the host's tool status.
-function managedVersionRows(record, dep, job) {
+// Pure: the card's version line: Viboplr's copy, and where its updates are.
+// `dep` is the host's tool status.
+function managedVersionRows(record, dep) {
   if (!record) return [];
-  if (isHostRecord(record)) {
-    var v = dep && dep.version ? "slskd " + dep.version : "slskd";
-    return [{ type: "settings-row", label: "Version", description: v + " · Viboplr's copy. Updates appear in Extensions → Tools and in Viboplr's update notice; slskd restarts on the new version and keeps its settings." }];
-  }
-  if (job && job.kind === "move") return [];
-  return [optionRow("Move slskd to Viboplr's copy",
-    "This slskd (" + (record.version || "?") + ") was installed by an older version of this plugin and gets no updates. Moving it lets Viboplr keep it up to date in Extensions → Tools. slskd keeps its settings, data and Soulseek account.",
-    actionButton("Move…", "managed-move", "accent", { disabled: !!job }))];
+  var v = dep && dep.version ? "slskd " + dep.version : "slskd";
+  return [{ type: "settings-row", label: "Version", description: v + " · Viboplr's copy. Updates appear in Extensions → Tools and in Viboplr's update notice; slskd restarts on the new version and keeps its settings." }];
 }
 
 // ---------------------------------------------------------------------------
@@ -5452,7 +5631,7 @@ function managedConnectionSection() {
   var st = managed.status;
   // Remove goes last: the one destructive row sits below everything else.
   var rows = [optionRow("Address", settings.url + " · " + statusLine(), checkButton("Test"))]
-    .concat(managedVersionRows(managed.record, managed.dep, managed.job))
+    .concat(managedVersionRows(managed.record, managed.dep))
     .concat([autostartRow("managed-autostart", settings.startWithViboplr), keepRunningRow()])
     .concat(sharingRows(localCollections, managed.job, shareChange, slskdShared))
     .concat(managedFileRows(managedPlaces, canOpenPaths(), managedShowFiles))
@@ -5597,7 +5776,14 @@ function visibleResults() {
   if (!m || m.showAll) return search.results;
   if (m.kind === "upgrade") return search.results.filter(function (c) { return c.better; });
   if (m.kind === "fill") return search.results.filter(function (c) { return !c.owned; });
+  if (m.kind === "download") return songMatches(search.results);
   return search.results;
+}
+
+// A track's download and its upgrade are one-file jobs: no Folders view, whose
+// only offer for a song would be whole albums.
+function singleFileMode(mode) {
+  return !!mode && (mode.kind === "upgrade" || mode.kind === "download");
 }
 
 function visibleFolders() {
@@ -5717,7 +5903,14 @@ function resultRow(c, prefix, owned) {
 }
 
 function resultRows() {
-  return sortedResults().map(function (c) { return resultRow(c, "f:", false); });
+  var rows = sortedResults().map(function (c) { return resultRow(c, "f:", false); });
+  // A download's first row is the one to take — said on the row, as long as
+  // the list is still in that order and the row isn't already on its way.
+  var m = search.mode;
+  if (m && m.kind === "download" && !m.showAll && !search.sortColumn && rows.length && !rows[0].badge) {
+    rows[0].badge = { label: "Best match", variant: "accent" };
+  }
+  return rows;
 }
 
 // Pure: of `all` (a list's possible actions), the ones some row offers, plus
@@ -6019,13 +6212,19 @@ function folderSubtitle(g) {
 // them, Files / Folders read as more navigation, and users never found
 // Folders at all (owner, 2026-10-06). The action and payload are the old
 // tabs' (`result-mode`, `{ tabId }`).
-function resultsToolbar(fileCount, folderCount, upgrading) {
+function resultsToolbar(fileCount, folderCount, singleFile) {
   var folders = activeTab === "folders";
-  var title = upgrading
-    ? formatCount(fileCount) + (fileCount === 1 ? " better file" : " better files")
-    : formatCount(folderCount) + (folderCount === 1 ? " folder" : " folders") + " · " + formatCount(fileCount) + (fileCount === 1 ? " file" : " files");
+  var m = search.mode;
+  var title;
+  if (singleFile && m.kind === "download") {
+    title = formatCount(fileCount) + (m.showAll ? "" : " matching") + (fileCount === 1 ? " file" : " files");
+  } else if (singleFile) {
+    title = formatCount(fileCount) + (fileCount === 1 ? " better file" : " better files");
+  } else {
+    title = formatCount(folderCount) + (folderCount === 1 ? " folder" : " folders") + " · " + formatCount(fileCount) + (fileCount === 1 ? " file" : " files");
+  }
   var buttons = [];
-  if (!upgrading) {
+  if (!singleFile) {
     buttons.push({ label: "Files", action: "result-mode", variant: folders ? "secondary" : "accent", data: { tabId: "files" } });
     buttons.push({ label: "Folders", action: "result-mode", variant: folders ? "accent" : "secondary", data: { tabId: "folders" } });
   }
@@ -6095,8 +6294,16 @@ function modeHeader() {
     out.push({ type: "text", content: "Filling “" + m.albumTitle + "”" + (m.artistName ? " by " + m.artistName : "") +
       " — you have " + m.owned.length + (m.owned.length === 1 ? " track" : " tracks") + " of it. " +
       (m.showAll ? "Showing every file and folder found." : "Showing only files you don't have; open a folder to download just those."), className: "plugin-muted" });
+  } else if (m.kind === "download") {
+    out.push({ type: "text", content: "Downloading “" + m.title + "”" + (m.artist ? " by " + m.artist : "") + " — " +
+      (m.showAll ? "showing every file found." : "showing the files that are this song, the best one first.") +
+      (m.haveLocal
+        ? " You already have it: when the new file arrives, Add to library lets you compare and replace your copy or keep both."
+        : " When it arrives you can add it to your library."),
+      className: "plugin-muted" });
   }
-  out.push({ type: "button", label: m.showAll ? "Only what's missing" : "Show everything found", action: "mode-show-all", variant: "secondary" });
+  var backLabel = m.kind === "download" ? "Only this song" : "Only what's missing";
+  out.push({ type: "button", label: m.showAll ? backLabel : "Show everything found", action: "mode-show-all", variant: "secondary" });
   return out;
 }
 
@@ -6112,6 +6319,14 @@ function modeRecExtra(mode) {
     };
   }
   if (m.kind === "fill") return { meta: { album: m.albumTitle, album_artist: m.artistName } };
+  // The file is tagged and imported as the song it was fetched for, and the
+  // completion knows to offer it to the library.
+  if (m.kind === "download") {
+    return {
+      download: { title: m.title, artist: m.artist },
+      meta: { title: m.title, artist: m.artist, album: m.album }
+    };
+  }
   return null;
 }
 
@@ -6181,17 +6396,20 @@ function searchTab() {
   // what's out there, or the album is already complete.
   // A single track's upgrade is a file job; the Folders view would only offer
   // whole albums for a song, so it isn't shown in that mode.
+  var singleFile = singleFileMode(mode);
   var upgrading = mode && mode.kind === "upgrade";
-  if (upgrading && activeTab === "folders") activeTab = "search";
+  if (singleFile && activeTab === "folders") activeTab = "search";
   var files = visibleResults();
-  var folders = upgrading ? [] : visibleFolders();
+  var folders = singleFile ? [] : visibleFolders();
   if (mode && !mode.showAll && !files.length && !folders.length) {
     children.push({ type: "text", className: "plugin-muted", content: upgrading
       ? "Nothing better than your copy turned up among " + formatCount(search.matchCount) + " files. Show everything found to see them anyway."
-      : "Every file found is already in your library. Show everything found to browse the folders anyway." });
+      : mode.kind === "download"
+        ? "None of the " + formatCount(search.matchCount) + " files found is clearly this song — the names don't match its title and artist. Show everything found to look anyway."
+        : "Every file found is already in your library. Show everything found to browse the folders anyway." });
     return { type: "layout", direction: "vertical", children: children };
   }
-  children.push(resultsToolbar(files.length, folders.length, upgrading));
+  children.push(resultsToolbar(files.length, folders.length, singleFile));
 
   var trimmed = truncationNote();
   if (trimmed) children.push({ type: "text", content: trimmed, className: "plugin-muted" });
@@ -6964,6 +7182,38 @@ function openImport(keys) {
   api.ui.requestAction("download-tracks", { providerId: PROVIDER_KEY, providerName: PROVIDER_NAME, tracks: tracks, purpose: "import" });
 }
 
+// "Add to library…" — the one step from a finished file to the library, with
+// the choice the user should have at that moment: a single file whose song is
+// already in the library as a local file goes to the host's compare dialog
+// (Replace / Save as copy / Cancel, via `libraryTrackId`), anything else is a
+// plain copy in. Replacing is never done here — the host's dialog decides.
+async function addToLibrary(keys) {
+  if (keys.length === 1) {
+    var key = keys[0];
+    var rec = tracked[key];
+    var tr = importTrackFor(key);
+    if (rec && tr) {
+      var trackId = await localCopyOf(rec, tr);
+      if (trackId != null) {
+        tr.libraryTrackId = trackId;
+        api.ui.requestAction("download-tracks", { providerId: PROVIDER_KEY, providerName: PROVIDER_NAME, tracks: [tr] });
+        return;
+      }
+    }
+  }
+  openImport(keys);
+}
+
+// The library row (id) a finished file could replace: the one an upgrade was
+// fetched for, else a local file with the same title and artist, nearest in
+// length. Null when the library has no local copy of the song.
+async function localCopyOf(rec, tr) {
+  if (rec.upgrade && rec.upgrade.trackId != null) return rec.upgrade.trackId;
+  var meta = rec.meta || {};
+  var row = await libraryRowByName(meta.title || tr.title, meta.artist || tr.artist_name, tr.durationSecs);
+  return row && row.path && String(row.path).indexOf("file://") === 0 ? row.id : null;
+}
+
 function playTransfer(key) {
   var rec = tracked[key];
   if (!rec || !rec.resolvedPath) return;
@@ -7030,7 +7280,7 @@ function registerActions() {
       var e = fallback[keys[i]];
       if (e && e.state === "kept") refs.push(e.ref);
     }
-    openImport(refs);
+    return addToLibrary(refs).catch(function (err) { console.error("slskd: add to library failed:", err); });
   });
 
   api.ui.onAction("delete-kept", function (data) {
@@ -7138,6 +7388,17 @@ function registerActions() {
     // A selection can hold rows already on their way; only the rest go.
     picked = notYetQueued(picked);
     if (!picked.length) return;
+    // In download mode only the files that ARE the song are tagged as it: one
+    // picked from "Show everything found" can be another song entirely, and
+    // stamping it would import it under the wrong title.
+    if (search.mode && search.mode.kind === "download") {
+      var songs = picked.filter(function (c) { return c.isSong; });
+      var others = picked.filter(function (c) { return !c.isSong; });
+      var chain = Promise.resolve();
+      if (songs.length) chain = chain.then(function () { return downloadCandidates(songs, modeRecExtra()); });
+      if (others.length) chain = chain.then(function () { return downloadCandidates(others, null); });
+      return chain.catch(function (e) { console.error("slskd enqueue failed:", e); });
+    }
     downloadCandidates(picked, modeRecExtra())
       .catch(function (e) { console.error("slskd enqueue failed:", e); });
   });
@@ -7315,6 +7576,11 @@ function registerActions() {
     saveSetting("upgradeTarget", upgradeTargetOf(data && data.value));
   });
 
+  api.ui.onAction(FINISHED_DOWNLOAD_IMPORT_ACTION, function () {
+    if (!lastFinishedDownload) return;
+    return addToLibrary([lastFinishedDownload]).catch(function (err) { console.error("slskd: add to library failed:", err); });
+  });
+
   api.ui.onAction("mode-show-all", function () {
     if (!search.mode) return;
     search.mode.showAll = !search.mode.showAll;
@@ -7359,8 +7625,10 @@ function registerActions() {
   // One row, a selection, or the Finished group's "Add all" — from Downloads
   // (plain keys) or a search list (`f:` / `o:` ids, which transferKeys strips).
   // openImport skips whatever hasn't finished, so a mixed selection is fine.
+  // The handlers return their promise: the host ignores it, a caller (a test)
+  // can wait on it.
   api.ui.onAction("import-transfer", function (data) {
-    openImport(transferKeys(data));
+    return addToLibrary(transferKeys(data)).catch(function (err) { console.error("slskd: add to library failed:", err); });
   });
 
   // Re-queue with the same user. slskd retries a failed transfer on its own
@@ -7541,9 +7809,6 @@ function registerActions() {
   api.ui.onAction("managed-restart", function () {
     restartManaged().catch(function (e) { console.error("slskd: restart failed:", e); });
   });
-  api.ui.onAction("managed-move", function () {
-    moveManaged().catch(function (e) { console.error("slskd: moving to Viboplr's copy failed:", e); });
-  });
   api.ui.onAction("managed-autostart", function (data) {
     setStartWithViboplr(!!(data && data.value)).then(function () {
       render();
@@ -7719,6 +7984,14 @@ function registerActions() {
       .catch(function (e) { console.error("slskd context search failed:", e); });
   });
 
+  api.contextMenu.onAction("slskd-download", function (target) {
+    startDownload(target).catch(function (e) { console.error("slskd download failed:", e); });
+  });
+
+  // No menu item names this any more: a song's one Soulseek action is
+  // Download…, and replacing happens at Add to library. The automatic upgrade
+  // it starts stays reachable from the Upgrades tab and the assistant's
+  // `upgrade` tool, and a host listing older manifests' items may still send it.
   api.contextMenu.onAction("slskd-upgrade", function (target) {
     if (target && target.kind === "multi-track") {
       return queueUpgrades(target.trackIds || []).catch(function (e) { console.error("slskd batch upgrade failed:", e); });
@@ -9201,6 +9474,36 @@ async function startUpgrade(target) {
   await runSearch(searchQueryForTarget({ kind: "track", title: row.title, artistName: row.artist_name }), extra);
 }
 
+// "Download…" on a track — the plugin's one track action. Opens the Search tab
+// in download mode: only files that are this song, the best first, tagged as
+// the song when fetched and offered to the library when they land. A song the
+// library already has as a local file is downloaded the same way; the choice
+// to replace that copy or keep both comes at "Add to library…" (`addToLibrary`
+// → the host's compare dialog), once the user can see what arrived.
+async function startDownload(target) {
+  var t = target || {};
+  if (!t.title) return plainSearch(t, null);
+  api.ui.navigateToView(VIEW_ID);
+  var row = await libraryRowForTarget(t);
+  var haveLocal = !!(row && row.path && String(row.path).indexOf("file://") === 0);
+  var title = t.title;
+  var artist = t.artistName || null;
+  var album = t.albumTitle || null;
+  var duration = t.durationSecs != null ? t.durationSecs : (row && row.duration_secs) || null;
+  var mode = {
+    kind: "download",
+    title: title,
+    artist: artist,
+    album: album,
+    want: downloadWant(title, artist),
+    haveLocal: haveLocal,
+    showAll: false
+  };
+  var extra = { mode: mode };
+  if (duration) extra.knownDurationSecs = duration;
+  await runSearch(fallbackQuery(title, artist), extra);
+}
+
 // The album's library rows. An album target normally carries its id; one built
 // from names alone (the control API's plugin-action route) is looked up by
 // title + artist through the library's FTS.
@@ -9885,26 +10188,27 @@ async function activate(hostApi) {
   // The download modal's provider for slsk:// — "Download…" on any of our rows
   // and the Add to library button both land here. The transfer already
   // finished, so this resolve is an instant local copy, well inside any budget.
-  api.downloads.onResolveByUri(PROVIDER_ID, async function (uri) {
+  api.downloads.onResolveByUri(PROVIDER_ID, async function (uri, format) {
     var ref = decodeRef(String(uri || "").replace(/^slsk:\/\//, ""));
     var rec = findTrackedByRef(ref);
+    var refusal = finishedFileRefusal(ref, rec, downloadModeOf(format));
+    if (refusal) throw new Error(refusal);
     var path = await currentPath(ref, rec);
     if (!path) return null;
     return downloadAnswer(path, rec.meta);
   });
 
-  // A track the playback fallback played has no slsk:// URI, so the host's
-  // download modal asks by metadata. That answers ONLY from the fallback's kept
-  // copy — the file that is already playing. It never searches: a download the
-  // user asked for by hand deserves a picked file, not the fallback's best guess.
+  // By metadata: a track the playback fallback played (its kept copy answers at
+  // once) and a song with no source at all — the "Not in library" rows'
+  // Download, which searches Soulseek and fetches. See "Download by name".
   if (typeof api.downloads.onResolveByMetadata === "function") {
-    api.downloads.onResolveByMetadata(PROVIDER_ID, function (title, artistName) {
-      return resolveKeptDownload(title, artistName);
+    api.downloads.onResolveByMetadata(PROVIDER_ID, function (title, artistName, albumName, durationSecs, format) {
+      return resolveDownloadByName(title, artistName, albumName, durationSecs, format);
     });
   }
 
   api.downloads.onGetQualities(PROVIDER_ID, function () {
-    return [{ value: "original", label: "Original file", description: "Copies the file Soulseek delivered, untouched." }];
+    return DOWNLOAD_QUALITIES;
   });
 
   // Asked only while a program of ours that shouldn't outlive Viboplr runs:
@@ -9993,6 +10297,9 @@ return {
   _transferTile: transferTile,
   _availabilityTier: availabilityTier,
   _rankResults: rankResults,
+  _downloadModeOf: downloadModeOf,
+  _downloadProgressOf: downloadProgressOf,
+  _downloadQualityLine: downloadQualityLine,
   _groupByFolder: groupByFolder,
   _resultLabel: resultLabel,
   _resultSource: resultSource,
@@ -10016,8 +10323,6 @@ return {
   _collectionPaths: collectionPaths,
   _installShares: installShares,
   _renderSlskdYml: renderSlskdYml,
-  _slskdBinaryName: slskdBinaryName,
-  _isHostRecord: isHostRecord,
   _hostToolReady: hostToolReady,
   _defaultDownloadsDir: defaultDownloadsDir,
   _downloadsFolderText: downloadsFolderText,
@@ -10126,9 +10431,17 @@ return {
   _ownedTrackFor: ownedTrackFor,
   _missingFiles: missingFiles,
   _startUpgrade: startUpgrade,
+  _startDownload: startDownload,
+  _songMatches: songMatches,
+  _isSongMatch: isSongMatch,
+  _downloadWant: downloadWant,
+  _trackedQuality: trackedQuality,
+  _finishedFileRefusal: finishedFileRefusal,
   _queueUpgrade: queueUpgrade,
   _advanceUpgrades: advanceUpgrades,
   _upgrades: function () { return upgrades; },
+  _setTracked: function (key, rec) { tracked[key] = rec; },
+  _handleCompletions: handleCompletions,
   _upgradeSource: upgradeSource,
   _exceedsStereo: exceedsStereo,
   _filterTransfers: filterTransfers,

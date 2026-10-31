@@ -14,7 +14,7 @@ function fakeHost(opts) {
   const actions = {};
   const tools = {};
   const resolvers = {};
-  const calls = { requestAction: [], notifications: [], notices: [], navigated: [], badges: [], resync: [], played: [], fetched: [], views: [], exec: [], opened: [], headers: [], programs: [] };
+  const calls = { requestAction: [], notifications: [], notices: [], navigated: [], badges: [], resync: [], played: [], fetched: [], views: [], exec: [], opened: [], headers: [], programs: [], progress: [] };
   // The plugin's own file store (api.storage.files), as path → text. Folders
   // exist implicitly; `getPath` answers for anything at or under a written path.
   const files = Object.assign({}, o.files || {});
@@ -140,7 +140,8 @@ function fakeHost(opts) {
     downloads: {
       onResolveByUri: (id, fn) => { resolvers["download:" + id] = fn; },
       onResolveByMetadata: (id, fn) => { resolvers["download-meta:" + id] = fn; },
-      onGetQualities: (id, fn) => { resolvers["qualities:" + id] = fn; }
+      onGetQualities: (id, fn) => { resolvers["qualities:" + id] = fn; },
+      reportProgress: (p) => { calls.progress.push(p); }
     },
     contextMenu: { onAction: (id, fn) => { actions["ctx:" + id] = fn; } },
     collections: {

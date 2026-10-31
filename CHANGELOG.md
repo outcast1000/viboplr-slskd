@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.27.0
+
+- **Download a song that isn't in your library from Soulseek.** The Download
+  button on an artist's or album's "Not in library" rows now offers Soulseek
+  (when it comes first among your playback sources in Settings → Providers):
+  it searches Soulseek, fetches the best-matching file and adds it like any
+  other download, with live progress in the download dialog. Pick **Best
+  available**, **Lossless only** or **MP3 320 / V0 only**. A song already
+  fetched for playback is copied as it is. A sharer who hasn't sent a byte
+  in 90 seconds is dropped for the next one (up to six). After 15 minutes the
+  dialog gives up, but slskd keeps downloading, and the next Download of that
+  song uses the file.
+- **Right-click → Soulseek: Download…** on a song replaces *Search…* for
+  tracks. It opens the Search tab showing only the files that are that song
+  (other songs, other artists and live versions you didn't ask for are left
+  out), with the best one marked **Best match**; **Show everything found**
+  lifts the filter. The file is tagged as the song you asked for, and when it
+  arrives a notification offers **Add to library…** (or says it's on its way
+  in, when slskd's folder is inside a collection). Albums and artists keep
+  **Search…**.
+- **Download… is a song's only Soulseek action** — the **Upgrade** menu item
+  is gone. Downloading a song you already have works the same way, and the
+  choice comes when the file arrives: **Add to library…** on a song you
+  already have as a file opens Viboplr's comparison of the two copies, where
+  you **Replace** yours or **Save as copy**. That applies anywhere you add a
+  single finished file (Downloads tab, the notification, kept fallback
+  files). Upgrades already under way carry on in the **Upgrades** tab, and
+  the AI assistant's `upgrade` tool can still start an automatic one; there
+  is no menu item to start one yourself any more.
+- The **Move slskd to Viboplr's copy** step for a slskd installed by plugin
+  0.25.0 or older is gone. Such a copy is no longer started; the plugin shows
+  its setup page and installs Viboplr's copy instead.
+
 ## 0.26.2
 
 - The AI tools that only read — status, search, list_downloads and

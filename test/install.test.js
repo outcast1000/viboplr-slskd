@@ -120,10 +120,6 @@ test("Viboplr's copy: what counts as installed, and which record is which", () =
   assert.equal(plugin._hostToolReady({ installed: true, origin: "system", version: "0.26.1" }), false, "a system copy is the user's");
   assert.equal(plugin._hostToolReady({ installed: false, origin: null }), false);
   assert.equal(plugin._hostToolReady(null), false);
-  assert.equal(plugin._isHostRecord({ source: "host", port: 5030 }), true);
-  assert.equal(plugin._isHostRecord({ version: "0.26.1", asset: "osx-arm64" }), false, "a copy plugin 0.25.0 installed in its store");
-  assert.equal(plugin._slskdBinaryName("win-x64"), "slskd.exe");
-  assert.equal(plugin._slskdBinaryName("osx-arm64"), "slskd");
 });
 
 test("the downloads folder starts as <Downloads>/Soulseek, and says whether files reach the library", () => {
@@ -200,18 +196,16 @@ test("a start the user refused: the banner says why, and Start asks again", () =
   assert.deepEqual(clickable(b), ["managed-start"]);
 });
 
-test("the start spec: Viboplr's copy by name, a legacy copy by its path; everything .NET writes kept in the plugin's folder", () => {
-  const host = plugin._managedStartSpec({ source: "host", port: 5030 }, { app: "a", config: "c", extract: "e" }, true);
+test("the start spec: Viboplr's copy by name; everything .NET writes kept in the plugin's folder", () => {
+  const host = plugin._managedStartSpec({ app: "a", config: "c", extract: "e" }, true);
   assert.equal(host.dependency, "slskd");
   assert.equal(host.path, undefined, "the host finds its own copy");
   assert.equal(host.cwd, undefined, "the working folder defaults to the plugin's store");
-  const spec = plugin._managedStartSpec({ version: "0.26.1", asset: "win-x64" }, { app: "C:\\s\\app", config: "C:\\s\\slskd.yml", extract: "C:\\s\\extract" }, false);
-  assert.deepEqual(spec.path, ["slskd", "0.26.1", "slskd.exe"]);
-  assert.equal(spec.dependency, undefined);
+  const spec = plugin._managedStartSpec({ app: "C:\\s\\app", config: "C:\\s\\slskd.yml", extract: "C:\\s\\extract" }, false);
   assert.deepEqual(spec.args, ["--app-dir", "C:\\s\\app", "--config", "C:\\s\\slskd.yml", "--no-logo"]);
   assert.equal(spec.env.DOTNET_BUNDLE_EXTRACT_BASE_DIR, "C:\\s\\extract");
   assert.equal(spec.outliveApp, false);
-  assert.equal(plugin._managedStartSpec({ version: "0.26.1", asset: "osx-arm64" }, { app: "a", config: "c", extract: "e" }).outliveApp, true, "independent unless the setting says otherwise");
+  assert.equal(plugin._managedStartSpec({ app: "a", config: "c", extract: "e" }).outliveApp, true, "independent unless the setting says otherwise");
 });
 
 test("a host that can't install slskd as its tool offers only the guide and connecting", () => {
@@ -312,15 +306,12 @@ test("the port picker waits out Windows' slow refusal and takes the lowest free 
   });
 });
 
-test("the card's version row: Viboplr's copy says where updates are; a legacy copy offers Move", () => {
+test("the card's version row: Viboplr's copy says where updates are", () => {
   const dep = { installed: true, version: "0.26.1", origin: "managed" };
-  const host = plugin._managedVersionRows({ source: "host", port: 5030 }, dep, null);
+  const host = plugin._managedVersionRows({ source: "host", port: 5030 }, dep);
   assert.deepEqual(clickable(host), [], "updates are Viboplr's, not a button here");
   assert.match(JSON.stringify(host), /slskd 0.26.1 · Viboplr's copy/);
-  assert.deepEqual(clickable(plugin._managedVersionRows({ version: "0.26.1", asset: "osx-arm64" }, dep, null)), ["managed-move"]);
-  assert.equal(plugin._managedVersionRows({ version: "0.26.1" }, null, null)[0].control.disabled, false, "a definition waiting for consent is asked for by the move itself");
-  assert.deepEqual(plugin._managedVersionRows({ version: "0.26.1" }, dep, { kind: "move" }), [], "while it moves, the job line says so");
-  assert.deepEqual(plugin._managedVersionRows(null, dep, null), []);
+  assert.deepEqual(plugin._managedVersionRows(null, dep), []);
 });
 
 // ---- The hub and the not-ready screens -----------------------------------
@@ -875,8 +866,6 @@ const managedStore = (extra = {}) => ({
   managedSlskd: { source: "host", port: 5030, webUsername: "viboplr", webPassword: "w".repeat(24), downloadsDir: "/Users/me/Music/Soulseek", installedAt: 1 },
   ...extra
 });
-// A copy plugin ≤ 0.25.0 installed in its own store.
-const legacyRecord = { version: "0.26.0", asset: "osx-arm64", port: 5030, webUsername: "viboplr", webPassword: "w".repeat(24), downloadsDir: "/Users/me/Music/Soulseek", installedAt: 1 };
 const filesInstalled = { "slskd/data/slskd.yml": "x" };
 
 test("integration: at launch a stopped installed slskd shows the banner, no toast, and Start starts it", async () => {
@@ -932,62 +921,6 @@ test("integration: the card — version, start with Viboplr, keep running, files
     await host.actions["managed-files-toggle"]();
     await until(() => lastView(host).includes("Show in folder"));
     assert.ok(lastView(host).includes("holds your Soulseek password"));
-  });
-});
-
-test("integration: a legacy store copy keeps starting from the store, and Move switches it to Viboplr's copy", async () => {
-  const comp = freeComputer();
-  comp.up = true;
-  await withPlugin({ store: managedStore({ managedSlskd: legacyRecord }), files: { ...filesInstalled, "slskd/0.26.0/slskd": "bin" }, fetch: comp.fetch,
-    programs: { start: async () => { comp.up = true; return { name: "slskd", registered: true, running: true }; } } }, async (host, p) => {
-    p._setSigninTiming(2000, 5, 20);
-    await until(() => settingsView(host).includes("managed-move"), 1000);
-    assert.ok(settingsView(host).includes("gets no updates"));
-    await host.actions["managed-move"]();
-    await until(() => host.store.managedSlskd.source === "host", 2000);
-    assert.deepEqual(host.calls.requestAction.filter((r) => r.action === "require-dependency").map((r) => r.payload.name), ["slskd"]);
-    const order = ops(host).filter((o) => ["stop", "start"].includes(o));
-    assert.deepEqual(order, ["stop", "start"]);
-    assert.equal(host.calls.programs.find((c) => c.op === "start").args[1].dependency, "slskd", "the same settings, on Viboplr's copy");
-    assert.equal(host.store.managedSlskd.version, undefined);
-    assert.equal(host.store.managedSlskd.port, 5030, "the rest of the record is kept");
-    assert.ok(host.calls.programs.some((c) => c.op === "files.remove" && c.path === "slskd/0.26.0"), "the old copy is deleted");
-    assert.ok(!host.calls.programs.some((c) => c.op === "files.remove" && c.path === "slskd/data"), "its settings and data stay");
-    assert.ok(!settingsView(host).includes("managed-move"), "nothing left to move");
-  });
-});
-
-test("integration: a legacy copy starts from its store path", async () => {
-  const comp = freeComputer();
-  await withPlugin({ store: managedStore({ managedSlskd: legacyRecord }), files: { ...filesInstalled, "slskd/0.26.0/slskd": "bin" }, fetch: comp.fetch,
-    programs: { start: async () => { comp.up = true; return { name: "slskd", registered: true, running: true }; } } }, async (host, p) => {
-    p._setSigninTiming(2000, 5, 20);
-    await until(() => bannerOf(host));
-    host.actions["managed-start"]();
-    await until(() => host.calls.programs.some((c) => c.op === "start"), 1000);
-    assert.deepEqual(host.calls.programs.find((c) => c.op === "start").args[1].path, ["slskd", "0.26.0", "slskd"]);
-    await until(() => !bannerOf(host), 1000);
-  });
-});
-
-test("integration: a Move whose new copy won't start goes back to the old one and deletes nothing", async () => {
-  const comp = freeComputer();
-  comp.up = true;
-  await withPlugin({ store: managedStore({ managedSlskd: legacyRecord }), files: { ...filesInstalled, "slskd/0.26.0/slskd": "bin" }, fetch: comp.fetch,
-    programs: { start: async (name, spec) => {
-      if (spec.dependency) throw new Error("slskd exited as soon as it started:\nbad config");
-      comp.up = true;
-      return { name: "slskd", registered: true, running: true };
-    } } }, async (host, p) => {
-    p._setSigninTiming(2000, 5, 20);
-    await until(() => settingsView(host).includes("managed-move"), 1000);
-    await host.actions["managed-move"]();
-    await until(() => settingsView(host).includes("bad config"), 2000);
-    assert.equal(host.store.managedSlskd.version, "0.26.0", "the legacy record is back");
-    const starts = host.calls.programs.filter((c) => c.op === "start").map((c) => c.args[1]);
-    assert.equal(starts.length, 2);
-    assert.deepEqual(starts[1].path, ["slskd", "0.26.0", "slskd"], "the old copy runs again");
-    assert.ok(!host.calls.programs.some((c) => c.op === "files.remove" && c.path === "slskd/0.26.0"));
   });
 });
 

@@ -54,8 +54,9 @@ call's shape.
 | Stream resolver `slskd-fallback` | `api.playback.onStreamResolve` | the **playback fallback**, see below |
 | URI scheme `slsk://` | `api.playback.onResolveStreamByUri` | plays a finished download |
 | Download provider `slskd-import` | `api.downloads.onResolveByUri` | "Add to library…" via the host modal |
-| Context menu `slskd-search` | track / album / artist | "Search…" (shown as "Soulseek: Search…") |
-| Context menu `slskd-upgrade` | track, multi-track | "Upgrade" (shown as "Soulseek: Upgrade") — **automatic**: `queueUpgrade` adds an entry to the Upgrades tab, which finds, downloads and checks a better copy (see *Automatic upgrades* below); "Choose the source myself (N)" (`upgrade-sources-toggle`, per-entry `sourcesOpen`) unfolds the entry's own sources; only an entry at rest with **no** sources offers "Search Soulseek myself…", the old interactive search (`startUpgrade`, filtered by `isUpgradeOver`). Both stamp the download `upgrade: { trackId }`, and "Compare & replace…" / the Downloads row's "Replace in library…" hand the host modal `libraryTrackId` |
+| Context menu `slskd-download` | track | "Download…" (shown as "Soulseek: Download…") — a song's **only** Soulseek menu action (owner decision: no Upgrade item, replacing is decided at Add to library). `startDownload` opens the Search tab in **download mode** for every song, owned or not (`mode.haveLocal` only changes the header) (`mode.kind === "download"`): `annotateForMode` scores each file with the playback fallback's matcher (`scoreFallbackCandidate` / `isSongMatch`), `songMatches` shows only the song closest-first with the first row badged "Best match", no Folders view (`singleFileMode`). The fetch carries `download: { title, artist }` + the song's names as `meta`; `handleCompletions` then toasts "Add to library…" (`FINISHED_DOWNLOAD_IMPORT_ACTION`), or "on its way into your library" when it landed in a collection. Every "Add to library…" (Downloads row, that toast, kept fallback files) goes through `addToLibrary`: a single file whose song is in the library as a local file (`localCopyOf`: the upgrade's row, else `libraryRowByName`) is handed to the host with `libraryTrackId`, so the host's compare dialog asks Replace or Save as copy; otherwise `openImport` |
+| Context menu `slskd-search` | album / artist | "Search…" (shown as "Soulseek: Search…"); its handler still accepts a track target (the control API can name one) |
+| Action `slskd-upgrade` (no menu item any more — handler kept for the automatic-upgrade flow and its tests; the assistant's `upgrade` tool is now the only user-reachable way to **start** one, the Upgrades tab only follows them) | track, multi-track | **automatic**: `queueUpgrade` adds an entry to the Upgrades tab, which finds, downloads and checks a better copy (see *Automatic upgrades* below); "Choose the source myself (N)" (`upgrade-sources-toggle`, per-entry `sourcesOpen`) unfolds the entry's own sources; only an entry at rest with **no** sources offers "Search Soulseek myself…", the old interactive search (`startUpgrade`, filtered by `isUpgradeOver`). Both stamp the download `upgrade: { trackId }`, and "Compare & replace…" / the Downloads row's "Replace in library…" hand the host modal `libraryTrackId` |
 | Context menu `slskd-fill-album` | album | "Fill missing tracks…" (shown as "Soulseek: Fill missing tracks…") — folders compared against the album's library rows (`ownedTrackFor`); "Fill" downloads only the missing files |
 | Assistant tools | `status`, `search` (+ `upgradeFor`), `download`, `list_downloads` (+ `uri`), `upgrade`, `list_upgrades` | for the host's control API / MCP; uris are `toolUri` (percent-encoded), resolvers `decodeRef` them |
 
@@ -160,13 +161,10 @@ Owner decisions that must hold:
     web login → `DELETE /api/v0/application`) before the host's signal.
   - **The record**: `{ source: "host", port, webUsername, webPassword, downloadsDir, installedAt }`.
     The version is the host's (`managed.dep.version`), shown on the card's Version row.
-  - **Legacy store copies** (plugin ≤ 0.25.0 downloaded slskd into `slskd/<version>/` itself; the
-    record has `version` + `asset`, no `source`) keep starting from the store by `path`. The card
-    shows **Move slskd to Viboplr's copy** (`managedVersionRows` → `moveManaged`): install via the
-    host as above, stop the old copy, rewrite the record to `source: "host"`, start by `dependency`
-    with the same `slskd.yml` and data, then delete `slskd/<old>/`. If the new copy won't start, the
-    legacy record comes back and the old copy starts again; nothing is deleted. A legacy copy gets
-    no updates until it moves.
+  - **No legacy store copies.** Plugin ≤ 0.25.0 downloaded slskd into `slskd/<version>/` itself
+    (a record with `version` + `asset`, no `source`); 0.26.x offered a one-time Move to Viboplr's
+    copy, which was removed in the next release. A record without `source: "host"` now reads as
+    not installed, so a straggler sees the setup hub and installs again.
   - **Downloads folder**: starts as `<Downloads>/Soulseek` (`api.system.userFolders`,
     `prefillDownloadsDir`), so the form needs no picking; *Change…* opens the picker on the current
     one. The row says whether finished files reach the library (`downloadsFolderText`: only inside

@@ -192,7 +192,9 @@ test("Add to library opens the host download modal with the provider key and sls
   });
   await p.activate(h.api);
   try {
-    h.actions["import-transfer"]({ itemId: key });
+    // Async: Add to library first asks the library whether the song is already
+    // here (then it's the compare dialog instead — see modes.test.js).
+    await h.actions["import-transfer"]({ itemId: key });
     assert.equal(h.calls.requestAction.length, 1);
     const r = h.calls.requestAction[0];
     assert.equal(r.action, "download-tracks");
@@ -217,9 +219,55 @@ test("Add to library opens the host download modal with the provider key and sls
     assert.equal(h.calls.played[0].kind, "audio");
     const url = await h.resolvers["stream:slsk"](key);
     assert.equal(url, "file:///Users/me/Music/slskd/viboplr/1-OK_Computer/03 - Karma Police.flac");
+
+    // The provider's quality options show in this modal too: "Lossless only"
+    // takes this FLAC…
+    const lossless = await h.resolvers["download:slskd-import"]("slsk://" + key, "lossless");
+    assert.equal(lossless.ext, "flac");
   } finally {
     p.deactivate();
   }
+});
+
+test("Adding a finished MP3 under “Lossless only” says why instead of adding it anyway", async () => {
+  const p = loadPlugin();
+  const key = "peer" + SEP + "@@x\\Music\\OK Computer\\03 - Karma Police.mp3";
+  const h = fakeHost({
+    store: {
+      tracked: {
+        [key]: {
+          destination: "viboplr/1-OK_Computer", b64: null,
+          resolvedPath: "/Users/me/Music/slskd/viboplr/1-OK_Computer/03 - Karma Police.mp3",
+          meta: { title: "Karma Police", artist: "Radiohead" }, size: 6000000, length: 264,
+          quality: { bitRate: 192, bitDepth: null, sampleRate: 44100, isVariableBitRate: false }
+        }
+      }
+    }
+  });
+  await p.activate(h.api);
+  try {
+    const resolve = h.resolvers["download:slskd-import"];
+    await assert.rejects(resolve("slsk://" + key, "lossless"), /This file is MP3 192kbps, so “Lossless only” doesn't take it\. Choose Best available/);
+    await assert.rejects(resolve("slsk://" + key, "high"), /MP3 320 \/ V0 only/);
+    const ok = await resolve("slsk://" + key, "best");
+    assert.equal(ok.ext, "mp3", "Best available adds it as it is");
+    assert.equal((await resolve("slsk://" + key, "original")).ext, "mp3", "an older host's remembered value is Best available");
+  } finally {
+    p.deactivate();
+  }
+});
+
+test("finishedFileRefusal refuses only on what is known", () => {
+  const p = plugin;
+  const SEPX = p._KEY_SEP;
+  const mp3NoRate = "u" + SEPX + "a\\b.mp3";
+  assert.equal(p._finishedFileRefusal(mp3NoRate, { quality: null }, "high"), null, "no advertised bitrate: not refused");
+  assert.match(p._finishedFileRefusal(mp3NoRate, { quality: null }, "lossless"), /This file is MP3/, "the extension settles lossless");
+  assert.equal(p._finishedFileRefusal("u" + SEPX + "a\\b.flac", { quality: null }, "lossless"), null);
+  assert.equal(p._finishedFileRefusal(mp3NoRate, { quality: null }, "best"), null);
+  const q = p._trackedQuality("u" + SEPX + "a\\b.flac", { quality: { bitDepth: 24, sampleRate: 96000 } });
+  assert.equal(q.extension, "flac");
+  assert.equal(q.qualityTier, 0, "lossless");
 });
 
 test("Add to library on a remote-tier slskd explains instead of opening the modal", async () => {
