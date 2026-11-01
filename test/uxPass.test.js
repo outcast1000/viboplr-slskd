@@ -80,9 +80,9 @@ test("rowTransferStatus: a result until queued, then Queued → Downloading → 
   const d = s({ state: "InProgress", size: 100, bytesTransferred: 42 }, {}, false, now);
   assert.deepEqual([d.badge.label, d.progress, d.actions], ["Downloading 42%", 0.42, ["cancel-transfer"]]);
   const done = s({ state: "Completed, Succeeded" }, { resolvedPath: "/x" }, true, now);
-  assert.deepEqual([done.badge.label, done.actions, done.action], ["Done", ["play-transfer", "import-transfer"], "play-transfer"]);
-  assert.deepEqual(s({ state: "Completed, Succeeded" }, {}, false, now).actions, [], "done but not playable here (remote slskd)");
-  assert.deepEqual(s({ state: "Completed, Errored" }, {}, false, now).actions, ["retry-transfer"]);
+  assert.deepEqual([done.badge.label, done.actions, done.action], ["Done", ["play-transfer", "show-job"], "play-transfer"]);
+  assert.deepEqual(s({ state: "Completed, Succeeded" }, {}, false, now).actions, ["show-job"], "done but not playable here (remote slskd)");
+  assert.deepEqual(s({ state: "Completed, Errored" }, {}, false, now).actions, ["show-job"], "its job says why and what's next");
   assert.equal(s({ state: "Completed, Cancelled" }, {}, false, now), null);
 });
 
@@ -99,13 +99,6 @@ test("declaredActions: only what some row offers (the host greys out the rest in
   assert.deepEqual(plugin._declaredActions(all, [{ actions: ["b", "a"] }]).map((x) => x.id), ["a", "b"], "in the declared order");
 });
 
-test("liveTransferCount: what is moving or needs you; finished and cancelled are history", () => {
-  const c = plugin._liveTransferCount;
-  assert.equal(c([{ state: "Completed, Succeeded" }, { state: "Completed, Cancelled" }]), 0);
-  assert.equal(c([{ state: "InProgress" }, { state: "Queued, Remotely" }, { state: "Completed, Errored" }, { state: "Completed, Succeeded" }]), 3);
-  assert.equal(c(null), 0);
-});
-
 test("ownedInFolder: Fill reads its mode, a plain search reads the library lookup", () => {
   const g = { files: [{ filename: "m\\X\\01 - Airbag.flac" }, { filename: "m\\X\\03 - Subterranean Homesick Alien.flac" }] };
   const fill = { kind: "fill", owned: [{ title: "Airbag", track_number: 1, duration_secs: 284 }] };
@@ -115,18 +108,51 @@ test("ownedInFolder: Fill reads its mode, a plain search reads the library looku
   assert.deepEqual(plugin._ownedInFolder(g, null, undefined), {}, "not looked up yet");
 });
 
-test("historyRows: a chip per outcome; only a song that didn't play offers the search", () => {
+test("fallbackSongRows: one row per song — a chip per outcome, its kept file on the same row, the search only for a miss", () => {
   const now = Date.now();
-  const rows = plugin._historyRows([
+  const key = plugin._fallbackKey;
+  const history = [
     { at: now, title: "Sugarcube", artist: "Yo La Tengo", outcome: "played", ms: 7200, file: { quality: "FLAC", user: "vinylhead" } },
     { at: now - 3600e3, title: "Tom Courtenay", artist: "Yo La Tengo", outcome: "no-match", message: "0 of 41 files matched" },
+    { at: now - 7200e3, title: "Sugarcube", artist: "Yo La Tengo", outcome: "cached" },
     { at: now, title: "Shadows", artist: null, outcome: "timeout" }
-  ], now);
-  assert.deepEqual(rows.map((r) => r.badge.label), ["Played", "Nothing matched", "Ran out of time"]);
-  assert.deepEqual(rows.map((r) => r.actions), [[], ["fallback-search"], ["fallback-search"]]);
-  assert.equal(rows[0].subtitle, "Yo La Tengo  ·  started in 7.2 s  ·  FLAC from vinylhead  ·  just now");
-  assert.equal(rows[1].subtitle, "Yo La Tengo  ·  0 of 41 files matched  ·  1 h ago");
+  ];
+  const index = {
+    [key("Sugarcube", "Yo La Tengo")]: { ref: "r1", title: "Sugarcube", artist: "Yo La Tengo", state: "kept", size: 30e6, at: now },
+    [key("Shadows", null)]: { ref: "r2", title: "Shadows", artist: null, state: "pending", at: now },
+    [key("Autumn Sweater", "Yo La Tengo")]: { ref: "r3", title: "Autumn Sweater", artist: "Yo La Tengo", state: "kept", size: 8e6, at: now - 86400e3 * 3 }
+  };
+  const status = { [key("Sugarcube", "Yo La Tengo")]: { ref: "r1", exists: true, inLibrary: false } };
+  const rows = plugin._fallbackSongRows(history, index, status, null, { now, playable: () => true, canMove: true, liveLine: () => "" });
+  assert.deepEqual(rows.map((r) => r.title), ["Sugarcube", "Tom Courtenay", "Shadows", "Autumn Sweater"], "a song once; kept files with no history entry last");
+  assert.deepEqual(rows.map((r) => r.badge.label), ["Played", "Nothing matched", "Ran out of time", "Kept"]);
+  assert.equal(rows[0].subtitle, "Yo La Tengo  ·  started in 7.2 s  ·  FLAC from vinylhead  ·  just now  ·  29 MB kept");
+  assert.deepEqual(rows[0].actions, ["play-kept", "move-kept", "delete-kept"]);
+  assert.deepEqual(rows[1].actions, ["fallback-search"]);
+  assert.deepEqual(rows[2].actions, ["delete-kept", "fallback-search"], "a timed-out song still downloading: forget it, or search by hand");
+  assert.match(rows[2].subtitle, /still downloading/);
+  assert.deepEqual(rows[3].actions, ["play-kept", "delete-kept"], "not checked yet: no Move until the answer is in");
   assert.equal(rows[0].artistName, "Yo La Tengo", "a song row: the track menu works on it");
+
+  // A song moved to the library leaves the list; a later request for it shows again.
+  const moved = { at: now - 60e3, title: "Lucky", artist: "Radiohead", outcome: "played", moved: true };
+  const opts = { now, playable: () => true, canMove: true, liveLine: () => "" };
+  assert.deepEqual(plugin._fallbackSongRows([moved], {}, {}, null, opts), []);
+  assert.deepEqual(plugin._fallbackSongRows([{ at: now, title: "Lucky", artist: "Radiohead", outcome: "no-match" }, moved], {}, {}, null, opts)
+    .map((r) => r.badge.label), ["Nothing matched"]);
+
+  // A status for an older file under the same key is not this file's.
+  const stale = plugin._fallbackSongRows([], { k: { ref: "new", title: "X", state: "kept", size: 1, at: now } },
+    { k: { ref: "old", exists: false } }, null, { now, playable: () => true, canMove: true, liveLine: () => "" });
+  assert.deepEqual(stale[0].actions, ["play-kept", "delete-kept"]);
+
+  // A search running now is the top row, with its bar.
+  const live = plugin._fallbackSongRows(history, index, status, { title: "Sugarcube", artist: "Yo La Tengo", progress: 0.4 },
+    { now, playable: () => true, canMove: true, liveLine: () => "Downloading 40%" });
+  assert.equal(live[0].badge.label, "Finding");
+  assert.equal(live[0].progress, 0.4);
+  assert.match(live[0].subtitle, /Downloading 40%/);
+  assert.equal(live.filter((r) => r.title === "Sugarcube").length, 1);
 });
 
 test("withResolve: the host's quick retries of one song are one play; a later play or another song is a new entry", () => {
@@ -141,7 +167,8 @@ test("withResolve: the host's quick retries of one song are one play; a later pl
   list = w(list, { at: t0 + 20000, title: "Karma Police", artist: "Radiohead", outcome: "no-match" }, 50);
   list = w(list, { at: t0 + 20000 + 3 * 60e3, title: "Karma Police", artist: "Radiohead", outcome: "no-match" }, 50);
   assert.deepEqual(list.map((e) => e.title), ["Karma Police", "Karma Police", "Let Down"], "past the window it's a new play");
-  const rows = plugin._historyRows([{ at: t0, title: "Let Down", artist: "Radiohead", outcome: "no-match", message: "nothing matched", tries: 4 }], t0);
+  const rows = plugin._fallbackSongRows([{ at: t0, title: "Let Down", artist: "Radiohead", outcome: "no-match", message: "nothing matched", tries: 4 }], {}, {}, null,
+    { now: t0, playable: () => false, canMove: true, liveLine: () => "" });
   assert.match(rows[0].subtitle, /nothing matched {2}· {2}tried 4 times {2}· {2}just now$/);
 });
 
@@ -156,12 +183,12 @@ test("fallbackStatusNode: never used warns where to switch it on; used says when
   assert.match(running.content, /^Finding “Autumn Sweater” by Yo La Tengo on Soulseek now/);
 });
 
-test("rowTransferStatus: a finished upgrade file offers Replace on its own row, first", () => {
+test("rowTransferStatus: a finished upgrade file leads to its job, which offers the replace", () => {
   const s = plugin._rowTransferStatus;
-  const done = s({ state: "Completed, Succeeded" }, { resolvedPath: "/x", upgrade: { trackId: 42 } }, true, 0);
-  assert.deepEqual(done.actions, ["replace-transfer", "play-transfer", "import-transfer"]);
-  assert.equal(done.badge.label, "Done", "the plugin never hears whether the Replace went through");
-  assert.deepEqual(s({ state: "Completed, Succeeded" }, { resolvedPath: "/x", upgrade: { trackId: 42 } }, false, 0).actions, [], "remote slskd: nothing to replace from here");
+  const done = s({ state: "Completed, Succeeded" }, { resolvedPath: "/x", upgrade: { trackId: 42, auto: true } }, true, 0);
+  assert.deepEqual(done.actions, ["play-transfer", "show-job"]);
+  assert.equal(done.badge.label, "Done");
+  assert.deepEqual(s({ state: "Completed, Succeeded" }, { resolvedPath: "/x", upgrade: { trackId: 42 } }, false, 0).actions, ["show-job"], "remote slskd: nothing to play from here");
 });
 
 test("withResolve: a replay right after a song played is a new play, not a retry", () => {
@@ -204,12 +231,12 @@ function transfer(username, filename, state) {
   return { username, filename, state, size: 10e6, bytesTransferred: state === "InProgress" ? 5e6 : 0, id: username + "-" + filename };
 }
 
-test("a mixed selection: Retry re-queues only the failed file, Cancel cancels only the moving one", async () => {
+test("a mixed selection: Cancel cancels only the moving one", async () => {
   const p = loadPlugin();
   const moving = "a" + SEP + "m\\A\\01 - Moving.flac";
   const failed = "b" + SEP + "m\\B\\02 - Broken.flac";
   const done = "c" + SEP + "m\\C\\03 - Done.flac";
-  const { h, posts, deletes } = transferHost([
+  const { h, deletes } = transferHost([
     transfer("a", "m\\A\\01 - Moving.flac", "InProgress"),
     transfer("b", "m\\B\\02 - Broken.flac", "Completed, Errored"),
     transfer("c", "m\\C\\03 - Done.flac", "Completed, Succeeded")
@@ -218,13 +245,6 @@ test("a mixed selection: Retry re-queues only the failed file, Cancel cancels on
   try {
     await p._refreshTransfers();
     const ids = [moving, failed, done].map((k) => "f:" + k);
-    h.actions["retry-transfer"]({ selectedIds: ids });
-    await waitFor(() => posts.length === 1);
-    await new Promise((r) => setTimeout(r, 50));
-    assert.equal(posts.length, 1, "only the failed file is re-queued");
-    assert.equal(posts[0].username, "b");
-    assert.equal(h.calls.notifications.length, 0, "no refusal toasts for files that were never retried");
-
     h.actions["cancel-transfer"]({ selectedIds: ids });
     await waitFor(() => deletes.length >= 1);
     await new Promise((r) => setTimeout(r, 50));
@@ -308,7 +328,10 @@ test("Search: Download keeps you on the results, the row turns Queued, and no to
     assert.deepEqual(queuedList.actions.map((a) => a.id), ["download-file", "cancel-transfer"], "Cancel joins once a file is on its way");
     const tabs = findNodes(lastView(h), (n) => n.type === "tabs")[0];
     assert.equal(tabs.activeTab, "search", "still on the results");
-    assert.deepEqual(tabs.tabs.map((t) => t.id), ["upgrades", "search", "fallback", "transfers", "settings"]);
+    assert.deepEqual(tabs.tabs.map((t) => t.id), ["upgrades", "search", "fallback", "settings"], "no Transfers tab: the job is the download");
+    const jobs = Object.values(p._upgrades());
+    assert.equal(jobs.length, 1, "the file is a job");
+    assert.equal(jobs[0].state, "downloading");
     assert.equal(h.calls.notifications.length, 0, "no toast: " + h.calls.notifications.join(" | "));
 
     // The same row offered again, from a selection, isn't queued twice.
@@ -405,11 +428,11 @@ test("Folders: a sortable table — name opens, hover downloads the whole folder
     list = findNodes(lastView(h), (n) => n.type === "track-row-list" && n.sortAction === "sort-folders")[0];
     assert.deepEqual(list.items.map((i) => i.title), ["OK Computer", "OKC"]);
 
-    // The hover button queues every file of the folder without opening it.
+    // The hover button queues every file of the folder without opening it —
+    // a job per file.
     h.actions["folder-row-download"]({ itemId: okc.id, selectedIds: [okc.id] });
-    await waitFor(() => posts.length === 1);
-    assert.equal(posts[0].username, "peer");
-    assert.equal(posts[0].files.length, 3);
+    await waitFor(() => posts.length === 3);
+    assert.ok(posts.every((x) => x.username === "peer" && x.files.length === 1));
     await waitFor(() => {
       const r = findNodes(lastView(h), (n) => n.type === "track-row-list" && n.sortAction === "sort-folders")[0].items[0];
       return !!(r.badge && /^Queued 3 of 3$/.test(r.badge.label));

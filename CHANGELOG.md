@@ -1,5 +1,60 @@
 # Changelog
 
+## 0.29.0
+
+- **All settings are on the Settings tab.** **Look for** (the quality a
+  download looks for) moved from the top of the Downloads tab to the start of
+  **Settings → Downloads**. The Fallback tab's settings are now **Settings →
+  Playback fallback**. The Downloads and Fallback tabs show only their lists.
+- **A download's details open in place.** Click its title (or Details) and
+  its steps, files and buttons open right under its row; click again, or
+  **Hide details**, to fold them. They used to show in a panel on top of the
+  tab, and one opened by itself. Now only the download you open (or just
+  started) shows its details.
+- **A download saved to your library leaves the Downloads list.** Once
+  Save to library (or the automatic save) has put the song in your
+  library, the job is done and goes; the toast's **Play** still plays it,
+  under the song's names. Saved jobs kept by earlier versions are cleared
+  once. An upgrade's finished replace stays listed, as before.
+- **A song moved to your library leaves the Fallback list.** Its plays still
+  count in the numbers on top, and asking for it again brings it back.
+- **The Fallback tab is one list.** Each song the fallback was asked for is
+  one row: how its last request went and the file it kept, together. It used
+  to be three blocks (Last resolve, Recent and Kept files) that showed the
+  same song up to three times. A search still running is the top row, with
+  its progress. The numbers are one line at the top, and the last search's
+  step-by-step trace is folded under **Last search → Show steps**.
+- **Move to library.** A kept file can be moved into your library from its
+  row: it's copied into a collection through Viboplr (tagged as the song
+  that was asked for, filed by your layout), then deleted from slskd's
+  folder. It's offered only when the file is still in slskd's folder and
+  your library doesn't already have the song as a file. The tab checks both
+  when you open it, and a file that's gone says so and offers only Delete.
+  This replaces "Add to library…", which copied the file and left the kept
+  copy behind.
+- **A file you download from Search is a job too, and the Transfers tab is
+  gone.** Download on a search result, a selection or a whole folder now
+  starts one job per file on the **Downloads** tab. The job already holds the
+  file you picked: it skips its own search, then checks the file and saves it
+  into your library like any other download. In Upgrade mode it's that
+  track's upgrade, ending in the compare dialog. A file from a plain search
+  is named by its tags once it lands; the filename was only a guess. Before,
+  such a file was a bare transfer you followed on the Transfers tab and added
+  with **Add to library…** yourself. So the tab and its actions (Retry,
+  Another source, Add to library, Replace in library, Clear from list) are
+  gone. A search row still shows Queued / Downloading / Done and now offers
+  **Show download**. A job's file list says why each sharer it tried didn't
+  send the file ("tried: failed — remote client error"). slskd's own transfer
+  list is on slskd's page (Settings → Open slskd's page).
+- **Finished downloads no longer hang at "downloading" on the slskd this
+  plugin installed.** slskd lets only administrators read where it saves
+  files, and the key the install writes isn't one, so the plugin never
+  learned the folder and every finished file waited for it. It now asks with
+  slskd's web sign-in, and for the slskd it installed it uses the folder it
+  wrote into slskd's settings. A refused lookup waits a minute before asking
+  again instead of asking once per download every 3 seconds. While a
+  finished file is still being located, the row says so instead of "queued".
+
 ## 0.28.0
 
 - **Every download is a job that ends in your library.** Right-click a song →

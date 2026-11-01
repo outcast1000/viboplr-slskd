@@ -863,7 +863,7 @@ function transferSubtitle(t, rec, currentTier) {
 }
 
 // Pure: slskd's failure text in the words a user would use, with what to do
-// about it implied (the row's first action is Another source). The raw text
+// about it implied (another file, from someone else). The raw text
 // stays for anything not recognised — an unknown message is still a clue.
 function plainTransferError(exception, user) {
   var e = String(exception || "");
@@ -888,39 +888,6 @@ function waitedFor(t, now) {
   return "waiting " + (h < 24 ? h + " h" : Math.floor(h / 24) + " d");
 }
 
-// Which of the list's declared actions a transfer row shows. Only what would
-// do something to THIS transfer: Play / Add to library need a finished, located
-// file; Retry / Another source need a failure; Remove is for anything at rest.
-function transferRowActions(t, rec, currentTier) {
-  var phase = transferPhase(t && t.state);
-  var ids = [];
-  if (phase === "succeeded") {
-    if (currentTier === "local" && rec && rec.resolvedPath) {
-      ids.push("play-transfer");
-      // A file fetched as an upgrade has one obvious destination — the library
-      // row it was fetched for — so that comes before the generic copy.
-      if (rec.upgrade) ids.push("replace-transfer");
-      ids.push("import-transfer");
-    }
-    ids.push("remove-transfer");
-  } else if (phase === "failed") {
-    ids.push("retry-transfer");
-    ids.push("another-source");
-    ids.push("remove-transfer");
-  } else if (phase === "cancelled") {
-    ids.push("retry-transfer");
-    ids.push("remove-transfer");
-  } else if (phase === "requested" || (phase === "queued" && hasFlag(t.state, "Remotely"))) {
-    // Waiting on a stranger, maybe for hours: moving on is a real option.
-    // (Queued *locally* is slskd's own queue, which another sharer won't skip.)
-    ids.push("another-source");
-    ids.push("cancel-transfer");
-  } else {
-    ids.push("cancel-transfer");
-  }
-  return ids;
-}
-
 // Row ids out of a list action payload: a hover button sends `itemId`, the
 // selection toolbar sends `selectedIds`, a plain button sends `data.ref`.
 function rowIds(data) {
@@ -934,12 +901,6 @@ function rowIds(data) {
   if (!out.length && data && data.itemId != null && data.itemId !== "") out.push(String(data.itemId));
   if (!out.length && data && data.ref != null && data.ref !== "") out.push(String(data.ref));
   return out;
-}
-
-// Kept-file row ids carry a "k:" prefix so they can't collide with a transfer
-// key in a list that reuses the transfer actions.
-function keptKeys(data) {
-  return rowIds(data).map(function (id) { return id.indexOf("k:") === 0 ? id.slice(2) : id; });
 }
 
 // The transfer actions (Play / Retry / Cancel) are offered on search rows
@@ -1157,14 +1118,6 @@ function qualitySnapshot(f) {
   if (!f || (f.bitRate == null && f.bitDepth == null && f.sampleRate == null)) return null;
   return { bitRate: f.bitRate != null ? f.bitRate : null, bitDepth: f.bitDepth != null ? f.bitDepth : null,
     sampleRate: f.sampleRate != null ? f.sampleRate : null, isVariableBitRate: !!f.isVariableBitRate };
-}
-
-// Pure: a transfer row's tile — the remote file's container plus what the
-// sharer advertised for it when we queued it.
-function transferTile(t, rec) {
-  var q = (rec && rec.quality) || {};
-  return fileTile({ filename: t && t.filename, bitRate: q.bitRate, bitDepth: q.bitDepth,
-    sampleRate: q.sampleRate, isVariableBitRate: q.isVariableBitRate });
 }
 
 function availabilityLabel(c) {
@@ -1405,45 +1358,8 @@ function annotateForMode(ranked, mode) {
       c.source = upgradeSource(c, mode);
     } else if (mode.kind === "fill") {
       c.owned = !!ownedTrackFor(c, mode.owned);
-    } else if (mode.kind === "download") {
-      c.match = scoreFallbackCandidate(c, mode.want);
-      c.isSong = isSongMatch(c.match, mode.want);
     }
   }
-}
-
-// Pure: whether a scored file is the song a download asked for — the playback
-// fallback's bar, so "matching" means the same thing in both places.
-function isSongMatch(m, want) {
-  if (!m) return false;
-  if (m.title < FALLBACK_MIN_TITLE_MATCH) return false;
-  if (want.artist.length && m.artist < FALLBACK_MIN_ARTIST_MATCH) return false;
-  return m.score > 0;
-}
-
-// Pure: the files a download shows — the song's matches, closest first, the
-// search's own quality / sharer order kept within each tenth of a point (the
-// same bucketing `rankFallback` uses, so one word's difference in a long title
-// doesn't outrank a free slot).
-function songMatches(results) {
-  var out = [];
-  for (var i = 0; i < (results || []).length; i++) {
-    if (results[i].isSong) out.push({ c: results[i], at: i });
-  }
-  out.sort(function (a, b) {
-    var sa = Math.round(a.c.match.score * 10), sb = Math.round(b.c.match.score * 10);
-    return sa !== sb ? sb - sa : a.at - b.at;
-  });
-  return out.map(function (x) { return x.c; });
-}
-
-// What a download mode matches against, from the song's names. Never the
-// album: `scoreFallbackCandidate` lets album words stand in for the artist,
-// which is right only for the results of an album + title search (Soulseek
-// blocks some artist names) — on this artist + title search it let another
-// artist's cover, filed in a folder named like the album, read as the song.
-function downloadWant(title, artist) {
-  return { title: titleWords(title), artist: artistWords(artist), album: null };
 }
 
 // Identity of a request, for the kept-file index: what the host's `sameSong`
@@ -1780,21 +1696,90 @@ function parseApplication(st) {
   };
 }
 
-async function loadDownloadsDir() {
+// Pure: slskd's directories from a GET /api/v0/options answer, or null.
+function optionsDirectories(res) {
+  if (!res || res.status < 200 || res.status >= 300 || !res.json || !res.json.directories) return null;
+  var d = res.json.directories;
+  return d.downloads ? { downloads: d.downloads, incomplete: d.incomplete || null } : null;
+}
+
+// Where slskd puts finished files. slskd answers /options to administrators
+// only: the API key the install writes (role readwrite) gets a 403, so with
+// the key alone every finished download waited forever for a folder it would
+// never learn. Asked with the key, then with slskd's web sign-in, and for the
+// slskd this plugin installed, the folder the install wrote into slskd.yml.
+// A failed lookup isn't repeated for DOWNLOADS_DIR_RETRY_MS: every caller on
+// every poll asks, and a refusal doesn't change between polls.
+var DOWNLOADS_DIR_RETRY_MS = 60 * 1000;
+var downloadsDirFailedAt = 0;
+
+// A new connection: what the old one said no longer holds, and the next
+// caller asks again at once.
+function forgetDownloadsDir() {
+  downloadsDir = null;
+  incompleteDir = null;
+  downloadsDirFailedAt = 0;
+}
+
+// The poll and the kept-file check ask at the same moment; the second waits
+// for the first answer instead of signing in to slskd a second time.
+var downloadsDirLookup = null;
+function loadDownloadsDir() {
+  if (!downloadsDirLookup) {
+    downloadsDirLookup = lookUpDownloadsDir().finally(function () { downloadsDirLookup = null; });
+  }
+  return downloadsDirLookup;
+}
+
+async function lookUpDownloadsDir() {
+  if (downloadsDirFailedAt && nowMs() - downloadsDirFailedAt < DOWNLOADS_DIR_RETRY_MS) return;
+  var dirs = null;
   try {
     var res = await slskd("GET", "/api/v0/options");
-    if (res.status >= 200 && res.status < 300 && res.json && res.json.directories) {
-      downloadsDir = res.json.directories.downloads || null;
-      incompleteDir = res.json.directories.incomplete || null;
+    dirs = optionsDirectories(res);
+    if (!dirs && (res.status === 401 || res.status === 403)) {
+      try {
+        dirs = optionsDirectories(await slskdSettingsCall("GET", "/api/v0/options", await slskdAdminToken()));
+      } catch (e) {
+        console.error("slskd: couldn't read options with the web sign-in:", e);
+      }
     }
   } catch (e) {
     console.error("slskd: couldn't read options:", e);
   }
+  if (!dirs && usesManaged(conn(), managed) && managed.record.downloadsDir) {
+    dirs = { downloads: managed.record.downloadsDir, incomplete: null };
+  }
+  if (!dirs) {
+    if (!downloadsDirFailedAt) api.log("warn", "slskd won't say where it saves downloads (GET /api/v0/options refused)", "slskd");
+    downloadsDirFailedAt = nowMs();
+    return;
+  }
+  downloadsDirFailedAt = 0;
+  downloadsDir = dirs.downloads;
+  incompleteDir = dirs.incomplete;
 }
 
 // The host's local collections — what decides whether a finished file is
 // already "in the library" (→ rescan) or needs the download modal to copy it
 // into one. Feature-detected: older hosts have no api.collections.
+// One library row by id, or null (no such row, an older host, or an error,
+// which is logged).
+async function libraryTrackById(id) {
+  if (id == null || !api.library || typeof api.library.getTrackById !== "function") return null;
+  try {
+    return (await api.library.getTrackById(id)) || null;
+  } catch (err) {
+    console.error("slskd: could not read library track " + id + ":", err);
+    return null;
+  }
+}
+
+// Pure: a library row whose song is a file on this computer (not a stream).
+function isLocalRow(row) {
+  return !!(row && row.path && String(row.path).indexOf("file://") === 0);
+}
+
 async function loadCollections() {
   if (!api || !api.collections || typeof api.collections.getLocalCollections !== "function") {
     localCollections = [];
@@ -2249,32 +2234,12 @@ async function enqueueBatch(username, files, label, subdir, recExtra) {
       queuedAt: nowMs()
     };
     if (extra.upgrade) rec.upgrade = extra.upgrade;
-    if (extra.download) rec.download = extra.download;
     tracked[username + KEY_SEP + files[i].filename] = rec;
     queued.push(files[i]);
   }
   await api.storage.set(stateKey("tracked"), tracked);
   schedulePoll(true);
   return { queued: queued, failures: failures };
-}
-
-// View-side wrapper. The view stays where it is: the rows a download started
-// from show its state themselves (`rowTransferStatus`), so picking several
-// files from one search costs no trips back from the Downloads tab. Only a
-// refusal speaks up, since no row will ever change for it.
-async function enqueueFiles(username, files, label, recExtra) {
-  var out;
-  try {
-    out = await enqueueBatch(username, files, label, undefined, recExtra);
-  } catch (e) {
-    api.ui.showNotification((e && e.message) || "Couldn't start the download.");
-    return false;
-  }
-  var n = out.queued.length;
-  if (n === 0) api.ui.showNotification("slskd refused every file.");
-  else if (out.failures.length) api.ui.showNotification("Queued " + n + " from " + username + " · slskd refused " + out.failures.length + ".");
-  render();
-  return n > 0;
 }
 
 function trackKeyOf(t) {
@@ -2464,20 +2429,31 @@ var lastFinishedDownload = null;
 // that collection so the files reach the library without a click. Deduped by
 // collection: an album finishing is a dozen files and must not queue a dozen
 // scans of the same folder.
-async function handleCompletions(finished) {
+async function handleCompletions(all) {
   var names = [];
   var byCollection = {};
+  // A job's file is the job's to announce, once it passed its check
+  // (`advanceUpgradeCheck`); only what no job owns (the assistant's downloads,
+  // older records) speaks up here.
+  var finished = all.filter(function (t) {
+    var r = tracked[trackKeyOf(t)];
+    return !(r && r.upgrade && (r.upgrade.job || r.upgrade.auto));
+  });
   for (var i = 0; i < finished.length; i++) {
     var rec = tracked[trackKeyOf(finished[i])];
     var meta = (rec && rec.meta) || parseTrackMeta(finished[i].filename);
     names.push(meta.title || basenameRemote(finished[i].filename));
+  }
+  for (var j = 0; j < all.length; j++) {
+    var r = tracked[trackKeyOf(all[j])];
     // A new song's job saves its own file (`saveJob`), rescanning quietly
     // when it landed inside a collection.
-    if (rec && rec.resolvedPath && tier === "local" && !(rec.upgrade && rec.upgrade.job)) {
-      var c = collectionForPath(rec.resolvedPath, localCollections);
+    if (r && r.resolvedPath && tier === "local" && !(r.upgrade && r.upgrade.job)) {
+      var c = collectionForPath(r.resolvedPath, localCollections);
       if (c) byCollection[c.id] = c;
     }
   }
+  if (!finished.length) return rescanCollections(byCollection);
   var upgradeRec = finished.length === 1 ? tracked[trackKeyOf(finished[0])] : null;
   var downloadRec = upgradeRec && upgradeRec.download ? upgradeRec : null;
   if (downloadRec) {
@@ -2495,20 +2471,20 @@ async function handleCompletions(finished) {
     } else {
       api.ui.showNotification(song + " is downloaded — it's on the Downloads tab.", { kind: "success" });
     }
-  } else if (upgradeRec && upgradeRec.upgrade && upgradeRec.upgrade.auto) {
-    // An automatic upgrade announces itself once the file passed its check
-    // (advanceUpgradeCheck) — "ready" before that could be a mislabelled file.
   } else if (upgradeRec && upgradeRec.upgrade) {
-    // The file arrived for one purpose; say where the button is rather than
-    // opening the modal over whatever the user is doing now — a Soulseek
-    // transfer can land hours after it was asked for.
-    api.ui.showNotification("Upgrade for “" + names[0] + "” is ready — choose Replace in library on the Downloads tab.");
+    // A file picked by hand for an upgrade (an older version's record): its
+    // upgrade job takes it over (`adoptManualUpgrades`) and offers the replace.
+    api.ui.showNotification("Upgrade for “" + names[0] + "” is ready on the Downloads tab.");
   } else {
     api.ui.showNotification(finished.length === 1
       ? "Finished downloading: " + names[0]
       : "Finished downloading " + finished.length + " files (" + names[0] + ", …)");
   }
+  await rescanCollections(byCollection);
+}
 
+// Rescan each collection a finished file landed in, once.
+async function rescanCollections(byCollection) {
   if (!api.collections || typeof api.collections.resync !== "function") return;
   var ids = Object.keys(byCollection);
   for (var k = 0; k < ids.length; k++) {
@@ -2763,15 +2739,6 @@ function resolveStats(list) {
   return { total: all.length, started: started, medianMs: median };
 }
 
-var RESOLVE_OUTCOME_WORDS = {
-  running: "Working…",
-  played: "Played",
-  cached: "Played a kept copy",
-  timeout: "Ran out of time",
-  "no-match": "Nothing matched",
-  failed: "Failed"
-};
-
 function secondsLabel(ms) {
   return Math.round(ms / 100) / 10 + " s";
 }
@@ -2785,18 +2752,6 @@ function agoLabel(at, now) {
   return h < 24 ? h + " h ago" : Math.round(h / 24) + " d ago";
 }
 
-// Pure: one line of the Recent list.
-function historyLine(e, now) {
-  var mark = e.outcome === "played" || e.outcome === "cached" ? "✓" : e.outcome === "timeout" ? "…" : "✗";
-  var bits = [RESOLVE_OUTCOME_WORDS[e.outcome] || e.outcome];
-  if (e.outcome === "cached") bits[0] = "Played a kept copy";
-  else if (e.ms != null) bits.push(secondsLabel(e.ms));
-  if (e.file && e.outcome === "played") bits.push(e.file.quality + " from " + e.file.user);
-  else if (e.message && e.outcome !== "played") bits.push(e.message);
-  bits.push(agoLabel(e.at, now));
-  return mark + " " + "“" + e.title + "”" + (e.artist ? " — " + e.artist : "") + "  ·  " + bits.join("  ·  ");
-}
-
 // Pure: one Recent entry as a row. The chip says how it ended; the subtitle
 // what that took and from whom. A song that didn't play offers a search.
 var HISTORY_BADGES = {
@@ -2807,40 +2762,14 @@ var HISTORY_BADGES = {
   failed: { label: "Failed", variant: "error" },
   running: { label: "Working", variant: "accent" }
 };
-// A Recent row's id names the entry, not its place: resolves land while the
-// tab is open, and a position-based id then pointed at the song below.
-function historyRowId(e) {
-  return "h:" + e.at + "|" + (e.title || "");
-}
-
-function historyRows(list, now) {
-  return list.map(function (e) {
-    var bits = [];
-    if (e.outcome === "played" && e.ms != null) bits.push("started in " + secondsLabel(e.ms));
-    if (e.file && e.outcome === "played") bits.push(e.file.quality + " from " + e.file.user);
-    else if (e.message && e.outcome !== "played" && e.outcome !== "cached") bits.push(e.message);
-    if (e.tries > 1) bits.push("tried " + e.tries + " times");
-    bits.push(agoLabel(e.at, now));
-    var missed = e.outcome === "no-match" || e.outcome === "timeout" || e.outcome === "failed";
-    return {
-      id: historyRowId(e),
-      title: e.title,
-      subtitle: (e.artist ? e.artist + "  ·  " : "") + bits.join("  ·  "),
-      artistName: e.artist || null,
-      kind: "audio",
-      badge: HISTORY_BADGES[e.outcome] || undefined,
-      actions: missed ? ["fallback-search"] : []
-    };
-  });
-}
 
 // Pure: the line on top of the Fallback tab. The plugin can't see whether the
 // user switched the fallback on, or where it sits in the order — the host
 // doesn't say — so it says what its own history shows, and where to look.
 var FALLBACK_SETTINGS_PATH = "Settings → Providers → Playback fallback";
-function fallbackStatusNode(history, last, now, lastUsedAt) {
+function fallbackStatusNode(history, last, now, lastUsedAt, summary) {
   if (last && last.outcome === "running") {
-    return { type: "text", content: "Finding “" + last.title + "”" + (last.artist ? " by " + last.artist : "") + " on Soulseek now — details under Last resolve." };
+    return { type: "text", content: "Finding “" + last.title + "”" + (last.artist ? " by " + last.artist : "") + " on Soulseek now — it's the top row below." };
   }
   var latestAt = history && history[0] ? history[0].at : null;
   if (lastUsedAt != null && (latestAt == null || lastUsedAt > latestAt)) latestAt = lastUsedAt;
@@ -2849,7 +2778,8 @@ function fallbackStatusNode(history, last, now, lastUsedAt) {
       children: [{ type: "text", content: "Not used yet. It plays a track from Soulseek when nothing earlier in your order can — check that it's switched on in " + FALLBACK_SETTINGS_PATH + "." }] };
   }
   return { type: "text", className: "plugin-muted",
-    content: "Last used " + agoLabel(latestAt, now) + ". Viboplr asks it when nothing earlier in " + FALLBACK_SETTINGS_PATH + " can play a track." };
+    content: "Last used " + agoLabel(latestAt, now) + "." + (summary ? " " + summary.charAt(0).toUpperCase() + summary.slice(1) + "." : "") +
+      " Viboplr asks it when nothing earlier in " + FALLBACK_SETTINGS_PATH + " can play a track." };
 }
 
 // The sidebar item says "working" while a resolve runs, so it shows from any
@@ -4531,8 +4461,7 @@ async function useManagedConnection() {
     api.storage.set("insecure", false),
     api.storage.set("managedBy", "plugin")
   ]).catch(function (e) { console.error("slskd: couldn't save the connection:", e); });
-  downloadsDir = null;
-  incompleteDir = null;
+  forgetDownloadsDir();
 }
 
 async function releaseManagedConnection() {
@@ -4738,8 +4667,7 @@ async function removeManaged() {
   managed.job = null;
   api.log("info", "slskd removed", "slskd");
   webLogin = null;
-  downloadsDir = null;
-  incompleteDir = null;
+  forgetDownloadsDir();
   slskdShared = null;
   await forgetAccount();
   await saveManagedRecord(null);
@@ -5296,8 +5224,7 @@ async function useConnection(url, key, insecure) {
     api.storage.set("insecure", !!insecure),
     api.storage.set("managedBy", null)
   ]).catch(function (e) { console.error("slskd: couldn't save the connection:", e); });
-  downloadsDir = null;
-  incompleteDir = null;
+  forgetDownloadsDir();
 }
 
 // Look for slskd here. Found with a working key (or no key needed): connect.
@@ -5781,14 +5708,13 @@ function visibleResults() {
   if (!m || m.showAll) return search.results;
   if (m.kind === "upgrade") return search.results.filter(function (c) { return c.better; });
   if (m.kind === "fill") return search.results.filter(function (c) { return !c.owned; });
-  if (m.kind === "download") return songMatches(search.results);
   return search.results;
 }
 
-// A track's download and its upgrade are one-file jobs: no Folders view, whose
-// only offer for a song would be whole albums.
+// A track's upgrade is a one-file job: no Folders view, whose only offer for
+// a song would be whole albums.
 function singleFileMode(mode) {
-  return !!mode && (mode.kind === "upgrade" || mode.kind === "download");
+  return !!mode && mode.kind === "upgrade";
 }
 
 function visibleFolders() {
@@ -5820,18 +5746,13 @@ function rowTransferStatus(t, rec, playable, now) {
   else return null;
   if (p === "cancelled") return null;
   if (p === "succeeded") {
-    // A file fetched as an upgrade (an Upgrade-mode search) has one obvious
-    // next step, and it's on this row: before, the view jumped to Downloads,
-    // where Replace waited; staying put, Play alone read as "finished" while
-    // the library still held the old copy. The chip stays "Done" — whether
-    // the host's Replace dialog went through, the plugin never hears.
-    // Add to library sits on the row too: a file found by search ends here,
-    // and the Downloads tab shouldn't be the only way into a collection.
-    var ids = !playable ? [] : rec && rec.upgrade ? ["replace-transfer", "play-transfer", "import-transfer"] : ["play-transfer", "import-transfer"];
+    // The file's job checks it and saves it to the library (or offers the
+    // replace); the row only plays it and leads to that job.
     return { phase: "done", badge: { label: "Done", variant: "success" }, progress: null,
-      actions: ids, action: playable ? "play-transfer" : undefined };
+      actions: playable ? ["play-transfer", "show-job"] : ["show-job"], action: playable ? "play-transfer" : undefined };
   }
-  if (p === "failed") return { phase: "failed", badge: { label: "Failed", variant: "error" }, progress: null, actions: ["retry-transfer"], action: undefined };
+  // Failed: the job says why and offers what's next (another file, Retry).
+  if (p === "failed") return { phase: "failed", badge: { label: "Failed", variant: "error" }, progress: null, actions: ["show-job"], action: undefined };
   if (p === "downloading" || p === "starting") {
     var pr = transferProgress(t);
     return { phase: "moving", badge: { label: "Downloading" + (pr != null ? " " + Math.round(pr * 100) + "%" : ""), variant: "accent" },
@@ -5844,20 +5765,6 @@ function rowTransferStatus(t, rec, playable, now) {
 // Pure: a transfer phase Cancel applies to — anything not yet at rest.
 function cancellablePhase(p) {
   return p !== "succeeded" && p !== "failed" && p !== "cancelled";
-}
-
-// Pure-ish: a download Retry applies to — one slskd lists as failed or
-// cancelled, or one we queued that slskd has since forgotten (no transfer,
-// no finished file, past the just-queued window). Plain results, files on
-// their way and finished ones are not.
-function retryableKey(key) {
-  var t = transferByKey(key);
-  if (t) {
-    var p = transferPhase(t.state);
-    return p === "failed" || p === "cancelled";
-  }
-  var rec = tracked[key];
-  return !!rec && !rec.resolvedPath && !(rec.queuedAt && nowMs() - rec.queuedAt < JUST_QUEUED_MS);
 }
 
 // The phase a row's file is in, by its transfer key: "done" | "failed" |
@@ -5908,14 +5815,7 @@ function resultRow(c, prefix, owned) {
 }
 
 function resultRows() {
-  var rows = sortedResults().map(function (c) { return resultRow(c, "f:", false); });
-  // A download's first row is the one to take — said on the row, as long as
-  // the list is still in that order and the row isn't already on its way.
-  var m = search.mode;
-  if (m && m.kind === "download" && !m.showAll && !search.sortColumn && rows.length && !rows[0].badge) {
-    rows[0].badge = { label: "Best match", variant: "accent" };
-  }
-  return rows;
+  return sortedResults().map(function (c) { return resultRow(c, "f:", false); });
 }
 
 // Pure: of `all` (a list's possible actions), the ones some row offers, plus
@@ -5932,56 +5832,20 @@ function declaredActions(all, rows, keep) {
   return all.filter(function (a) { return used[a.id]; });
 }
 
-// Copy a finished download into a collection. Shared by Downloads and the
-// search lists, so the action looks the same wherever a finished file shows.
-var IMPORT_ACTION = { id: "import-transfer", label: "Add to library…", icon: "♫" };
-
 // The actions a file list declares; which one a row shows is resultRow's call.
-// A fresh search shows Download alone; Cancel joins once something is on its way.
+// A fresh search shows Download alone; Cancel joins once something is on its
+// way. What happens to a file after that is its job's, on the Downloads tab
+// ("Show download").
 function fileRowActions(upgrading, rows) {
   return declaredActions([
     { id: "download-file", label: upgrading ? "Upgrade" : "Download", icon: "⬇" },
-    { id: "replace-transfer", label: "Replace in library…", icon: "⇪" },
     { id: "play-transfer", label: "Play", icon: "▶" },
-    IMPORT_ACTION,
-    { id: "retry-transfer", label: "Retry", icon: "↻" },
+    SHOW_JOB_ACTION,
     { id: "cancel-transfer", label: "Cancel", icon: "■" }
   ], rows, ["download-file"]);
 }
 
-// The Downloads tab as a track-row-list: finished, located files carry a
-// `path`, so the host's universal track menu, drag-to-queue and "Download…"
-// (→ our onResolveByUri) all work on them with no code here.
-function transferRows() {
-  return transfers.map(function (t) {
-    var key = trackKeyOf(t);
-    var rec = tracked[key];
-    var meta = (rec && rec.meta) || parseTrackMeta(t.filename);
-    var playable = tier === "local" && rec && rec.resolvedPath && transferPhase(t.state) === "succeeded";
-    var duration = meta.durationSecs != null ? meta.durationSecs : (rec && rec.length != null ? rec.length : null);
-    return {
-      id: key,
-      title: meta.title || basenameRemote(t.filename),
-      subtitle: transferSubtitle(t, rec, tier),
-      album: meta.album || basenameRemote(dirnameRemote(t.filename)) || undefined,
-      duration: duration != null ? formatDurationSecs(duration) : undefined,
-      durationSecs: duration,
-      artistName: meta.artist || null,
-      albumTitle: meta.album || null,
-      path: playable ? SCHEME + "://" + key : null,
-      // A file still on its way (or one that never arrived) shows its format;
-      // once it is here and tagged, its real cover takes over by name.
-      imageUrl: playable ? undefined : transferTile(t, rec),
-      progress: transferRowProgress(t),
-      // The group title says the state; what it can't say is that this one
-      // was fetched to replace a library copy.
-      badge: rec && rec.upgrade ? { label: "Upgrade", variant: "accent" } : undefined,
-      kind: "audio",
-      actions: transferRowActions(t, rec, tier),
-      action: playable ? "play-transfer" : undefined
-    };
-  });
-}
+var SHOW_JOB_ACTION = { id: "show-job", label: "Show download", icon: "→" };
 
 // ---- the folder list ----------------------------------------------------------
 // Folders are a table like Files, not a grid of cards: a card is built around a
@@ -6219,11 +6083,8 @@ function folderSubtitle(g) {
 // tabs' (`result-mode`, `{ tabId }`).
 function resultsToolbar(fileCount, folderCount, singleFile) {
   var folders = activeTab === "folders";
-  var m = search.mode;
   var title;
-  if (singleFile && m.kind === "download") {
-    title = formatCount(fileCount) + (m.showAll ? "" : " matching") + (fileCount === 1 ? " file" : " files");
-  } else if (singleFile) {
+  if (singleFile) {
     title = formatCount(fileCount) + (fileCount === 1 ? " better file" : " better files");
   } else {
     title = formatCount(folderCount) + (folderCount === 1 ? " folder" : " folders") + " · " + formatCount(fileCount) + (fileCount === 1 ? " file" : " files");
@@ -6299,16 +6160,8 @@ function modeHeader() {
     out.push({ type: "text", content: "Filling “" + m.albumTitle + "”" + (m.artistName ? " by " + m.artistName : "") +
       " — you have " + m.owned.length + (m.owned.length === 1 ? " track" : " tracks") + " of it. " +
       (m.showAll ? "Showing every file and folder found." : "Showing only files you don't have; open a folder to download just those."), className: "plugin-muted" });
-  } else if (m.kind === "download") {
-    out.push({ type: "text", content: "Downloading “" + m.title + "”" + (m.artist ? " by " + m.artist : "") + " — " +
-      (m.showAll ? "showing every file found." : "showing the files that are this song, the best one first.") +
-      (m.haveLocal
-        ? " You already have it: when the new file arrives, Add to library lets you compare and replace your copy or keep both."
-        : " When it arrives you can add it to your library."),
-      className: "plugin-muted" });
   }
-  var backLabel = m.kind === "download" ? "Only this song" : "Only what's missing";
-  out.push({ type: "button", label: m.showAll ? backLabel : "Show everything found", action: "mode-show-all", variant: "secondary" });
+  out.push({ type: "button", label: m.showAll ? "Only what's missing" : "Show everything found", action: "mode-show-all", variant: "secondary" });
   return out;
 }
 
@@ -6324,14 +6177,6 @@ function modeRecExtra(mode) {
     };
   }
   if (m.kind === "fill") return { meta: { album: m.albumTitle, album_artist: m.artistName } };
-  // The file is tagged and imported as the song it was fetched for, and the
-  // completion knows to offer it to the library.
-  if (m.kind === "download") {
-    return {
-      download: { title: m.title, artist: m.artist },
-      meta: { title: m.title, artist: m.artist, album: m.album }
-    };
-  }
   return null;
 }
 
@@ -6409,9 +6254,7 @@ function searchTab() {
   if (mode && !mode.showAll && !files.length && !folders.length) {
     children.push({ type: "text", className: "plugin-muted", content: upgrading
       ? "Nothing better than your copy turned up among " + formatCount(search.matchCount) + " files. Show everything found to see them anyway."
-      : mode.kind === "download"
-        ? "None of the " + formatCount(search.matchCount) + " files found is clearly this song — the names don't match its title and artist. Show everything found to look anyway."
-        : "Every file found is already in your library. Show everything found to browse the folders anyway." });
+      : "Every file found is already in your library. Show everything found to browse the folders anyway." });
     return { type: "layout", direction: "vertical", children: children };
   }
   children.push(resultsToolbar(files.length, folders.length, singleFile));
@@ -6528,151 +6371,8 @@ function upgradeRowProgress(e, t) {
   return e && e.state === "downloading" && t ? transferRowProgress(t) : null;
 }
 
-// Pure: which group of the Downloads tab a transfer sits in. Problems come
-// first so a failure can't hide thirty rows down; a finished file is the one
-// thing nobody needs to look at again.
-function transferGroup(t) {
-  var p = transferPhase(t && t.state);
-  if (p === "failed") return "attention";
-  if (p === "downloading" || p === "starting") return "active";
-  if (p === "succeeded") return "finished";
-  if (p === "cancelled") return "cancelled";
-  return "waiting";
-}
-
-var TRANSFER_GROUPS = [
-  { id: "attention", title: "Needs attention" },
-  { id: "active", title: "Downloading" },
-  { id: "waiting", title: "Waiting" },
-  { id: "finished", title: "Finished" },
-  { id: "cancelled", title: "Cancelled" }
-];
-
-// Pure: the Downloads tab's count — what is still moving or needs you. Finished
-// and cancelled files are history; counting them kept the badge lit forever.
-function liveTransferCount(list) {
-  var n = 0;
-  for (var i = 0; i < (list || []).length; i++) {
-    var g = transferGroup(list[i]);
-    if (g === "attention" || g === "active" || g === "waiting") n++;
-  }
-  return n;
-}
-
-// Finished rows past this many fold behind "Show all".
-var FINISHED_SHOWN = 10;
-var showAllFinished = false;
-
-// Pure: one line for the summary bar over the groups.
-function transfersSummary(groups, collectionName) {
-  var active = groups.active, done = 0, total = 0, speed = 0;
-  for (var i = 0; i < active.length; i++) {
-    done += active[i].bytesTransferred || 0;
-    total += active[i].size || 0;
-    speed += active[i].averageSpeed || 0;
-  }
-  var bits = [];
-  if (active.length) bits.push(active.length + " downloading");
-  if (groups.waiting.length) bits.push(groups.waiting.length + " waiting");
-  if (active.length) bits.push(formatBytes(done) + " of " + formatBytes(total));
-  if (speed) bits.push("↓ " + formatSpeed(speed));
-  if (collectionName) bits.push("lands in “" + collectionName + "”");
-  return { done: done, total: total, label: bits.join(" · ") };
-}
-
-function transferList(rows, actionIds) {
-  var all = {
-    "play-transfer": { id: "play-transfer", label: "Play", icon: "▶" },
-    "replace-transfer": { id: "replace-transfer", label: "Replace in library…", icon: "⇪" },
-    // Not "＋": that is the host's Enqueue glyph.
-    "import-transfer": IMPORT_ACTION,
-    "retry-transfer": { id: "retry-transfer", label: "Retry", icon: "↻" },
-    "another-source": { id: "another-source", label: "Another source", icon: "⇄" },
-    "cancel-transfer": { id: "cancel-transfer", label: "Cancel", icon: "■" },
-    // Leaves the file where it is — a list, not a trash can. The bin icon is
-    // kept for "Delete file", which really deletes.
-    "remove-transfer": { id: "remove-transfer", label: "Clear from list", icon: "✕" }
-  };
-  return {
-    type: "track-row-list",
-    items: rows,
-    selectable: true,
-    showHeader: true,
-    // Which of these a row shows is transferRowActions' call — only what would
-    // do something to THAT transfer.
-    actions: actionIds.map(function (id) { return all[id]; })
-  };
-}
-
-function transfersTab() {
-  var children = [];
-  var col = tier === "local" ? downloadsCollection() : null;
-  if (!transfers.length) {
-    children.push({ type: "text", className: "plugin-muted", content: "No downloads yet. Search, then Download a file or a whole folder." +
-      (lastFallbackKeptCount() ? " Files the playback fallback fetched are on the Fallback tab." : "") });
-    return { type: "layout", direction: "vertical", children: children };
-  }
-
-  // Where finished files go is one clause on the summary bar when it's good
-  // news; the longer explanation is only for when the user has to act on it.
-  if (tier === "remote") {
-    children.push({ type: "text", content: "slskd is running on another machine, so finished files can't be played or added to the library from here. Add slskd's downloads folder (or its mount) as a music source in Collections.", className: "plugin-muted" });
-  } else if (!col) {
-    children.push({ type: "text", className: "plugin-muted", content: "Finished downloads play from here; Add to library copies one into a collection. Add slskd's downloads folder as a collection and they'll be picked up by themselves." });
-  }
-
-  var groups = { attention: [], active: [], waiting: [], finished: [], cancelled: [] };
-  var rows = transferRows();
-  for (var i = 0; i < transfers.length; i++) {
-    var g = transferGroup(transfers[i]);
-    groups[g].push(transfers[i]);
-    rows[i].group = g;
-  }
-  var sum = transfersSummary(groups, col ? col.name : null);
-  if (groups.active.length) {
-    children.push({ type: "progress-bar", value: sum.done, max: sum.total || 1, label: sum.label });
-  } else if (sum.label) {
-    children.push({ type: "text", className: "plugin-muted", content: sum.label.charAt(0).toUpperCase() + sum.label.slice(1) + "." });
-  }
-
-  for (var k = 0; k < TRANSFER_GROUPS.length; k++) {
-    var id = TRANSFER_GROUPS[k].id;
-    var mine = rows.filter(function (r) { return r.group === id; });
-    if (!mine.length) continue;
-    var buttons = [];
-    if (id === "attention") buttons.push({ label: "Retry all", action: "retry-transfer", icon: "↻", data: { selectedIds: mine.map(function (r) { return r.id; }) } });
-    if (id === "finished") {
-      // Every finished file in one go — the per-row button and a selection do
-      // the same, but this is the one nobody has to discover.
-      var importable = mine.filter(function (r) { return importTrackFor(r.id); }).map(function (r) { return r.id; });
-      if (importable.length > 1) buttons.push({ label: "Add all " + importable.length + " to library…", action: "import-transfer", icon: IMPORT_ACTION.icon, data: { selectedIds: importable } });
-    }
-    if (id === "finished" || id === "cancelled") buttons.push({ label: "Clear", action: "remove-transfer", icon: "✕", data: { selectedIds: mine.map(function (r) { return r.id; }) } });
-    var shown = mine;
-    if (id === "finished" && mine.length > FINISHED_SHOWN) {
-      buttons.unshift({ label: showAllFinished ? "Show fewer" : "Show all " + mine.length, action: "finished-toggle" });
-      if (!showAllFinished) shown = mine.slice(0, FINISHED_SHOWN);
-    }
-    var status = String(mine.length);
-    if (id === "finished" && col) status += " · in your library";
-    children.push({ type: "toolbar", title: TRANSFER_GROUPS[k].title, status: status, buttons: buttons,
-      statusVariant: id === "attention" ? "error" : undefined });
-    children.push(transferList(shown, id === "attention" ? ["another-source", "retry-transfer", "remove-transfer"]
-      : id === "finished" ? ["play-transfer", "replace-transfer", "import-transfer", "remove-transfer"]
-      : id === "cancelled" ? ["retry-transfer", "remove-transfer"]
-      : ["another-source", "cancel-transfer"]));
-  }
-  return { type: "layout", direction: "vertical", children: children };
-}
-
-function lastFallbackKeptCount() {
-  return fallbackTotals(fallback).count;
-}
-
-// The Fallback tab: what the last automatic resolve did, step by step — the
-// file it picked and every file it weighed. Mirrors the yt-dlp plugin's "Last
-// resolve" panel. The files it kept are listed under Downloads (keptSection),
-// with the rest of what slskd fetched.
+// The Fallback tab's "Last search" details: what the last automatic resolve
+// did, step by step — the file it picked and every file it weighed.
 //
 // The facts of one candidate on one line: the Fallback tab is a read-out of
 // what the resolver saw and did, not a second search view, so its files are
@@ -6727,44 +6427,6 @@ function pickedLine(rec) {
   ];
 }
 
-function keptRows() {
-  var keys = Object.keys(fallback);
-  var rows = [];
-  for (var i = 0; i < keys.length; i++) {
-    var e = fallback[keys[i]];
-    if (!e) continue;
-    var rec = tracked[e.ref];
-    var parts = splitKey(e.ref);
-    var bits = [];
-    if (e.state === "kept") {
-      bits.push(formatBytes(e.size));
-      if (parts) bits.push("from " + parts.username);
-      if (rec && rec.resolvedPath) bits.push(rec.resolvedPath);
-    } else {
-      bits.push("still downloading");
-      if (parts) bits.push("from " + parts.username);
-    }
-    var meta = (rec && rec.meta) || {};
-    var playable = e.state === "kept" && rec && rec.resolvedPath;
-    rows.push({
-      id: "k:" + keys[i],
-      title: e.title + (e.artist ? " — " + e.artist : ""),
-      subtitle: bits.join("  ·  "),
-      artistName: e.artist || meta.artist || null,
-      albumTitle: meta.album || null,
-      durationSecs: rec && rec.length != null ? rec.length : null,
-      path: playable ? SCHEME + "://" + e.ref : null,
-      kind: "audio",
-      badge: e.state === "kept" ? undefined : { label: "Downloading", variant: "accent" },
-      actions: playable ? ["play-kept", "import-kept", "delete-kept"] : ["delete-kept"],
-      action: playable ? "play-kept" : undefined,
-      sortAt: e.lastUsedAt || e.at || 0
-    });
-  }
-  rows.sort(function (a, b) { return b.sortAt - a.sortAt; });
-  return rows;
-}
-
 function outcomeLine(rec) {
   var label = {
     running: "Working…",
@@ -6780,89 +6442,216 @@ function outcomeLine(rec) {
   return bits.join("  ·  ");
 }
 
-var showResolveTrace = false;   // the Fallback tab's step-by-step trace, folded by default
+// ---- the Fallback tab: one list, a row per song ----------------------------
+// Each song the fallback was asked for is ONE row: how its last request went
+// (the history) and the file it kept, together. It used to be three blocks —
+// the last resolve, Recent and Kept files — which showed the same song up to
+// three times with three toolbars. A resolve still running is the top row;
+// its step-by-step trace is folded under "Details of the last search".
+
+var showResolveTrace = false;   // the last search's step-by-step trace, folded by default
 var keptConfirm = false;        // "Delete all kept files?" showing
 
-// The Fallback tab is the whole feature in one place: is it working (numbers),
-// what it did last (summary first, the trace on request), what it did lately,
-// the files it kept, and its settings. Those used to sit on three tabs.
-function fallbackTab() {
-  var children = [];
-  children.push(fallbackStatusNode(resolveHistory, lastResolve, Date.now(), fallbackLastUsedAt));
+// What the plugin found out about each kept file, by fallback key, this
+// session: { exists: bool|null, inLibrary: bool, busy: bool }. Memory only —
+// the answer can change under us (a file deleted by hand, a song added to the
+// library), so it is asked again next session. `exists: null` = couldn't tell.
+var keptStatus = {};
+var keptChecking = false;
 
-  var st = resolveStats(resolveHistory);
-  var totals = fallbackTotals(fallback);
-  var lt = ledgerTotals(sharers);
-  if (st.total || totals.count || lt.seen) {
-    children.push({ type: "stats-grid", items: [
-      { label: "played", value: st.started + " of " + st.total },
-      { label: "median time to start", value: st.medianMs != null ? secondsLabel(st.medianMs) : "—" },
-      { label: "files kept · " + formatBytes(totals.bytes), value: totals.count },
-      { label: "sharers proven / unreliable", value: lt.proven + " / " + lt.burned }
-    ] });
+// Pure: what was found out about a kept file — only while it is still the
+// same file (`ref`): the fallback can fetch the song again under the same key.
+function keptStatusOf(status, index, key) {
+  var st = status[key];
+  var e = index[key];
+  return st && e && st.ref === e.ref ? st : null;
+}
+
+function setKeptStatus(key, st) {
+  var e = fallback[key];
+  if (e) keptStatus[key] = Object.assign({}, st, { ref: e.ref });
+}
+
+// Pure: the row id for a song (its fallback key).
+function songRowId(key) {
+  return "s:" + key;
+}
+
+// Pure: the Fallback tab's list. `history` newest first; `index` the kept
+// files (`fallback`); `status` keptStatus; `live` the resolve running now (or
+// null). `opts`: { now, playable(fkey) → bool, canMove, liveLine(rec) → text }.
+//
+// Move to library is offered only once the check said the file is there and
+// the library has no local copy of the song: before that answer it would be a
+// guess, and moving a song the library already has makes a duplicate.
+function fallbackSongRows(history, index, status, live, opts) {
+  var rows = [];
+  var seen = {};
+  var now = opts.now;
+
+  function keptPart(key, row) {
+    var e = index[key];
+    if (!e) return;
+    var st = keptStatusOf(status, index, key) || {};
+    if (e.state !== "kept") {
+      row.bits.push("still downloading");
+      row.actions.push("delete-kept");
+      return;
+    }
+    var playable = st.exists !== false && opts.playable(key);
+    if (st.busy) row.bits.push("moving to your library…");
+    else if (st.exists === false) row.bits.push("the kept file is gone");
+    else if (st.inLibrary) row.bits.push("in your library");
+    else row.bits.push(formatBytes(e.size) + " kept");
+    if (playable) {
+      row.actions.push("play-kept");
+      row.path = SCHEME + "://" + e.ref;
+      row.action = "play-kept";
+    }
+    if (playable && opts.canMove && st.exists === true && st.inLibrary === false && !st.busy) row.actions.push("move-kept");
+    if (!st.busy) row.actions.push("delete-kept");
   }
 
-  children = children.concat(lastResolveSection());
+  function finish(row) {
+    var out = {
+      id: row.id,
+      title: row.title,
+      subtitle: (row.artist ? row.artist + "  ·  " : "") + row.bits.join("  ·  "),
+      artistName: row.artist || null,
+      kind: "audio",
+      badge: row.badge,
+      actions: row.actions
+    };
+    if (row.progress != null) out.progress = row.progress;
+    if (row.path) { out.path = row.path; out.action = row.action; }
+    rows.push(out);
+  }
 
-  if (resolveHistory.length) {
-    children.push({ type: "toolbar", title: "Recent", status: resolveHistory.length + (resolveHistory.length === 1 ? " resolve" : " resolves"),
-      buttons: [{ label: "Clear", action: "clear-resolve-history", icon: "✕" }] });
-    // Rows, not lines: each is a song, so it gets the universal track menu,
-    // and one that didn't play offers the search that might find it.
+  if (live) {
+    var lk = fallbackKey(live.title, live.artist);
+    seen[lk] = true;
+    finish({ id: songRowId(lk), title: live.title, artist: live.artist,
+      bits: [opts.liveLine(live) || "searching Soulseek…"], actions: [],
+      badge: { label: "Finding", variant: "accent" }, progress: live.progress != null ? live.progress : null });
+  }
+
+  for (var i = 0; i < history.length; i++) {
+    var h = history[i];
+    var key = fallbackKey(h.title, h.artist);
+    if (seen[key]) continue;
+    seen[key] = true;
+    // Moved to the library: the song is the library's now, and its row goes.
+    // A later request for it is a newer entry, and shows again.
+    if (h.moved && !index[key]) continue;
+    var row = { id: songRowId(key), title: h.title, artist: h.artist, bits: [], actions: [],
+      badge: HISTORY_BADGES[h.outcome] || undefined };
+    if (h.outcome === "played" && h.ms != null) row.bits.push("started in " + secondsLabel(h.ms));
+    if (h.file && h.outcome === "played") row.bits.push(h.file.quality + " from " + h.file.user);
+    else if (h.message && h.outcome !== "played" && h.outcome !== "cached") row.bits.push(h.message);
+    if (h.tries > 1) row.bits.push("tried " + h.tries + " times");
+    row.bits.push(agoLabel(h.at, now));
+    keptPart(key, row);
+    if (h.outcome === "no-match" || h.outcome === "timeout" || h.outcome === "failed") row.actions.push("fallback-search");
+    finish(row);
+  }
+
+  // Kept files whose request has dropped out of the history (it keeps 50).
+  var rest = Object.keys(index).filter(function (k) { return !seen[k] && index[k]; });
+  rest.sort(function (a, b) { return fallbackUsedAt(index[b]) - fallbackUsedAt(index[a]); });
+  for (var j = 0; j < rest.length; j++) {
+    var e = index[rest[j]];
+    var r = { id: songRowId(rest[j]), title: e.title, artist: e.artist, bits: [], actions: [],
+      badge: e.state === "kept" ? { label: "Kept", variant: "muted" } : { label: "Downloading", variant: "accent" } };
+    keptPart(rest[j], r);
+    r.bits.push(agoLabel(fallbackUsedAt(e), now));
+    finish(r);
+  }
+  return rows;
+}
+
+// Row ids → fallback keys ("s:" rows, and the older "k:" form).
+function songKeys(data) {
+  return rowIds(data).map(function (id) {
+    return id.indexOf("s:") === 0 || id.indexOf("k:") === 0 ? id.slice(2) : id;
+  });
+}
+
+function keptPlayable(fkey) {
+  var e = fallback[fkey];
+  var rec = e && tracked[e.ref];
+  return !!(e && e.state === "kept" && rec && rec.resolvedPath && tier === "local");
+}
+
+// Pure: the one line on top of the tab — whether it's working, in numbers.
+function fallbackSummaryText(st, totals) {
+  var bits = [];
+  if (st.total) bits.push("played " + st.started + " of " + st.total);
+  if (st.medianMs != null) bits.push("median start " + secondsLabel(st.medianMs));
+  if (totals.count) bits.push(totals.count + (totals.count === 1 ? " file kept" : " files kept") + " (" + formatBytes(totals.bytes) + ")");
+  return bits.join(" · ");
+}
+
+function fallbackTab() {
+  var children = [];
+  var st = resolveStats(resolveHistory);
+  var totals = fallbackTotals(fallback);
+  children.push(fallbackStatusNode(resolveHistory, lastResolve, Date.now(), fallbackLastUsedAt, fallbackSummaryText(st, totals)));
+
+  scheduleKeptCheck();
+  var live = lastResolve && lastResolve.outcome === "running" ? lastResolve : null;
+  var rows = fallbackSongRows(resolveHistory, fallback, keptStatus, live, {
+    now: Date.now(), playable: keptPlayable, canMove: tier === "local", liveLine: liveLine
+  });
+  if (rows.length) {
+    var buttons = [];
+    if (resolveHistory.length) buttons.push({ label: "Clear history", action: "clear-resolve-history", icon: "✕" });
+    if (totals.count) buttons.push({ label: "Delete all files…", action: "delete-all-kept-ask", icon: "🗑" });
+    children.push({ type: "toolbar", title: "Songs", status: rows.length + (rows.length === 1 ? " song" : " songs"), buttons: buttons });
+    if (keptConfirm) {
+      var col = downloadsCollection();
+      children.push({ type: "confirm", title: "Delete every kept file?",
+        message: "Deletes " + totals.count + (totals.count === 1 ? " file" : " files") + " (" + formatBytes(totals.bytes) + ") from slskd's downloads folder. A song is simply fetched again the next time it's needed." +
+          (col ? " They are library tracks too, through “" + col.name + "”, and leave the library with the files." : ""),
+        confirmLabel: "Delete " + totals.count + (totals.count === 1 ? " file" : " files"), cancelLabel: "Keep them", confirmVariant: "danger",
+        confirmAction: "delete-all-kept", cancelAction: "delete-all-kept-cancel" });
+    }
+    // Rows, not lines: each is a song, so it gets the universal track menu.
     // `selectable` because only that list body draws a row's hover actions.
-    var recentRows = historyRows(resolveHistory.slice(0, 10), Date.now());
     children.push({
       type: "track-row-list",
-      items: recentRows,
+      items: rows,
       artwork: "cached",
       showHeader: false,
       selectable: true,
-      actions: declaredActions([{ id: "fallback-search", label: "Search Soulseek for it", icon: "⌕" }], recentRows)
+      actions: declaredActions([
+        { id: "play-kept", label: "Play", icon: "▶" },
+        { id: "move-kept", label: "Move to library", icon: "♫" },
+        { id: "fallback-search", label: "Search Soulseek for it", icon: "⌕" },
+        { id: "delete-kept", label: "Delete file", icon: "🗑" }
+      ], rows)
     });
+  } else {
+    children.push(mutedText("Nothing yet. When a track has no source of its own — a library row whose file is gone, a streaming track that can't be reached — and Viboplr asks Soulseek, the song shows here."));
   }
 
-  children = children.concat(keptSection());
-  children.push(fallbackSettingsSection());
+  children = children.concat(lastSearchDetails());
+  // Its settings are in Settings → Playback fallback.
   return { type: "layout", direction: "vertical", children: children };
 }
 
-// The last resolve: what happened, to which song, with which file. The
-// numbered steps and every candidate weighed (✓ ↓ ✗) are the debugging view,
-// one click away instead of the first thing on the tab.
-function lastResolveSection() {
-  var out = [];
-  var buttons = [];
-  if (lastResolve) {
-    buttons.push({ label: showResolveTrace ? "Hide trace" : "Show trace", action: "fallback-trace-toggle" });
-    buttons.push({ label: "Clear", action: "clear-resolve", icon: "✕" });
-  }
-  out.push({ type: "toolbar", title: "Last resolve", buttons: buttons,
-    status: lastResolve ? outcomeLine(lastResolve) : undefined,
-    statusVariant: lastResolve && lastResolve.outcome === "failed" ? "error"
-      : lastResolve && (lastResolve.outcome === "played" || lastResolve.outcome === "cached") ? "success" : undefined });
-  if (!lastResolve) {
-    out.push({ type: "text", className: "plugin-muted",
-      content: "Nothing yet this session. Play a track with no source of its own — a library row whose file is gone, a streaming track that can't be reached — and what happened shows here." });
-    return out;
-  }
-
+// The last search, for when a row's outcome needs explaining: one line (what
+// was searched, how it ended), and the numbered steps and every file weighed
+// (✓ ↓ ✗) behind Show steps. Memory only: one run, gone at a restart.
+function lastSearchDetails() {
   var lr = lastResolve;
-  out.push({ type: "text", content: "“" + lr.title + "”" + (lr.artist ? " — " + lr.artist : "") +
-    (lr.durationSecs != null ? "  ·  " + formatDurationSecs(lr.durationSecs) : "") });
-  if (lr.outcome === "running" && lr.live) {
-    if (lr.progress != null) out.push({ type: "progress-bar", value: Math.round(lr.progress * 100), max: 100, label: liveLine(lr) });
-    else out.push({ type: "loading", message: liveLine(lr) });
-  } else if (lr.outcome === "running") {
-    out.push({ type: "loading", message: "Working…" });
-  }
-  out.push(mutedText("Searched for “" + lr.query + "”"));
+  if (!lr) return [];
+  var out = [];
+  out.push({ type: "toolbar", title: "Last search", status: "“" + lr.title + "”" + (lr.artist ? " — " + lr.artist : ""),
+    buttons: [{ label: showResolveTrace ? "Hide steps" : "Show steps", action: "fallback-trace-toggle" }] });
+  out.push(mutedText("Searched for “" + lr.query + "”  ·  " + outcomeLine(lr)));
+  if (!showResolveTrace) return out;
   var picked = pickedLine(lr);
   if (picked) out = out.concat(picked);
-  if (lr.candidates.length && !showResolveTrace) {
-    out.push(mutedText(lr.candidates.length + (lr.candidates.length === 1 ? " matching file" : " matching files") + " weighed — Show trace for each step and file."));
-  }
-  if (!showResolveTrace) return out;
-
   for (var i = 0; i < lr.steps.length; i++) {
     var s = lr.steps[i];
     var line = (i + 1) + ". " + s.label + (s.outcome ? " → " + s.outcome : "…") + (s.ms != null ? " (" + Math.round(s.ms / 100) / 10 + "s)" : "");
@@ -6875,39 +6664,161 @@ function lastResolveSection() {
   return out;
 }
 
-// On the Fallback tab: the files the playback fallback fetched. They are the
-// plugin's own record (slskd's transfer list may have forgotten them), kept so
-// the same song plays instantly next time, and deletable from disk here.
-function keptSection() {
-  var totals = fallbackTotals(fallback);
-  var keys = Object.keys(fallback);
-  if (!keys.length) return [];
-  var out = [];
-  var col = downloadsCollection();
-  out.push({ type: "toolbar", title: "Kept files",
-    status: totals.count + (totals.count === 1 ? " file" : " files") + " · " + formatBytes(totals.bytes) + (col ? " · in your library via “" + col.name + "”" : ""),
-    buttons: totals.count ? [{ label: "Delete all…", action: "delete-all-kept-ask", icon: "🗑" }] : [] });
-  if (keptConfirm) {
-    out.push({ type: "confirm", title: "Delete every kept file?",
-      message: "Deletes " + totals.count + (totals.count === 1 ? " file" : " files") + " (" + formatBytes(totals.bytes) + ") from slskd's downloads folder. A song is simply fetched again the next time it's needed." +
-        (col ? " They are library tracks too, through “" + col.name + "”, and leave the library with the files." : ""),
-      confirmLabel: "Delete " + totals.count + (totals.count === 1 ? " file" : " files"), cancelLabel: "Keep them", confirmVariant: "danger",
-      confirmAction: "delete-all-kept", cancelAction: "delete-all-kept-cancel" });
-  }
-  out.push({ type: "text", className: "plugin-muted",
-    content: "Kept in slskd's downloads folder so the same song plays at once next time. Delete file removes it from disk through slskd." });
-  out.push({
-    type: "track-row-list",
-    items: keptRows(),
-    selectable: true,
-    showHeader: true,
-    actions: [
-      { id: "play-kept", label: "Play", icon: "▶" },
-      { id: "import-kept", label: "Add to library…", icon: "＋" },
-      { id: "delete-kept", label: "Delete file", icon: "🗑" }
-    ]
+// ---- kept files: still there? already in the library? ----------------------
+
+// Look at each kept file not looked at yet this session, one at a time, and
+// redraw as answers come in. Not awaited by the render that starts it.
+function scheduleKeptCheck() {
+  if (keptChecking || readiness.state !== "ready") return;
+  var todo = Object.keys(fallback).filter(function (k) {
+    return fallback[k] && fallback[k].state === "kept" && !keptStatusOf(keptStatus, fallback, k);
   });
-  return out;
+  if (!todo.length) return;
+  keptChecking = true;
+  (async function () {
+    try {
+      for (var i = 0; i < todo.length; i++) {
+        if (!api) return;   // unloaded meanwhile
+        if (!fallback[todo[i]] || keptStatusOf(keptStatus, fallback, todo[i])) continue;
+        setKeptStatus(todo[i], await checkKept(todo[i]));
+        renderIfFallback();
+      }
+    } catch (e) {
+      console.error("slskd: checking the kept files failed:", e);
+    } finally {
+      keptChecking = false;
+    }
+  })();
+}
+
+// One kept file: is it still in slskd's folder, and does the library have the
+// song as a local file? A file inside a collection IS a library track.
+async function checkKept(fkey) {
+  var e = fallback[fkey];
+  var rec = e && tracked[e.ref];
+  var path = (rec && rec.resolvedPath) || (e && e.path) || null;
+  if (path && collectionForPath(path, localCollections)) return { exists: true, inLibrary: true, busy: false };
+  var exists = null;
+  if (rec && rec.destination) {
+    try {
+      exists = !!matchFile(transferFromRecord(e.ref, rec), await listDestination(rec));
+    } catch (err) {
+      console.error("slskd: couldn't look for the kept file of “" + e.title + "”:", err);
+    }
+  }
+  // Unloaded during the listing; or the file is gone, which its row says
+  // before anything the library could add.
+  if (!api || exists === false) return { exists: exists, inLibrary: false, busy: false };
+  var meta = (rec && rec.meta) || {};
+  var row = await libraryRowByName(e.title, e.artist, meta.durationSecs || (rec && rec.length) || null);
+  return { exists: exists, inLibrary: isLocalRow(row), busy: false };
+}
+
+// "Move to library": the kept file goes into a collection through Viboplr
+// (copied, tagged as the song that was asked for, filed by the user's layout),
+// then the kept copy is deleted from slskd's folder — a move. A song the
+// library already has is left alone (`importFile` answers "exists"). If the
+// delete is refused (slskd's remote_file_management off) the song is still in
+// the library and the toast says the copy stayed.
+// The last song moved, for its toast's Play: where it landed (`importFile`'s
+// absolute path) and the names it was saved under, kept in case the library
+// row can't be read back.
+var lastMoved = null;
+
+// Pure: what a "… is in your library" toast's Play plays (`playMovedTrack`'s
+// shape): where the song landed (`saved`: trackId, absolute path) and the
+// names it was saved under (`names`: title, artist, album, trackNumber,
+// durationSecs), kept in case the library row can't be read back.
+function songSnapshot(saved, names) {
+  return { trackId: saved.trackId, path: saved.path, title: names.title, artist: names.artist || null,
+    album: names.album || null, trackNumber: names.trackNumber || null, durationSecs: names.durationSecs || null };
+}
+
+// Hand a file to the host's library: it picks the collection, copies the
+// file in under the user's layout and tags it as `song` (title, artist,
+// album, trackNumber). Answers `importFile`'s result — "imported", or
+// "exists" when the song is already there as a file. `asCopy`: Save as copy.
+function importSong(path, song, asCopy) {
+  var req = { path: path, title: song.title, artist: song.artist || "", album: song.album || null,
+    trackNumber: song.trackNumber || null };
+  if (asCopy !== undefined) req.asCopy = asCopy;
+  return api.library.importFile(req);
+}
+
+async function playMovedTrack(m) {
+  if (!m) return;
+  var row = await libraryTrackById(m.trackId);
+  api.playback.playTrack({
+    path: fileUrlForPlayback(m.path),
+    title: (row && row.title) || m.title,
+    artist_name: (row && row.artist_name) || m.artist || null,
+    album_title: (row && row.album_title) || m.album || null,
+    track_number: (row && row.track_number) || m.trackNumber || null,
+    duration_secs: (row && row.duration_secs) || m.durationSecs || null,
+    kind: "audio"
+  });
+}
+
+async function moveKeptToLibrary(fkey) {
+  var e = fallback[fkey];
+  if (!e || e.state !== "kept") return;
+  var rec = tracked[e.ref];
+  if (!canImportHeadless()) {
+    // An older Viboplr: its Add to library dialog copies the file in.
+    return addToLibrary([e.ref]);
+  }
+  var path = rec ? await currentPath(e.ref, rec) : null;
+  if (!path) {
+    setKeptStatus(fkey, { exists: false, inLibrary: false, busy: false });
+    api.ui.showNotification("The kept file of “" + e.title + "” is gone from slskd's downloads folder.", { kind: "warning" });
+    render();
+    return;
+  }
+  var meta = (rec && rec.meta) || {};
+  setKeptStatus(fkey, Object.assign({}, keptStatusOf(keptStatus, fallback, fkey), { busy: true }));
+  render();
+  var r = null;
+  try {
+    r = await importSong(path, { title: e.title, artist: e.artist || meta.artist, album: meta.album, trackNumber: meta.trackNumber });
+  } catch (err) {
+    console.error("slskd: moving “" + e.title + "” to the library failed:", err);
+    delete keptStatus[fkey];   // asked again on the next render
+    api.ui.showNotification("Couldn't move “" + e.title + "” to your library: " + ((err && err.message) || String(err)), { kind: "error" });
+    render();
+    return;
+  }
+  if (r && r.status === "exists") {
+    setKeptStatus(fkey, { exists: true, inLibrary: true, busy: false });
+    api.ui.showNotification("“" + e.title + "” is already in your library, so the kept file was left where it is.", { kind: "warning" });
+    render();
+    return;
+  }
+  api.log("info", "fallback: “" + e.title + "” moved to " + r.collectionName + " — " + r.path, "slskd");
+  var leftover = null;
+  try {
+    await deleteFallbackFile(fkey);
+  } catch (err) {
+    leftover = (err && err.message) || String(err);
+    console.error("slskd: couldn't delete the kept copy of “" + e.title + "” after moving it:", err);
+  }
+  delete keptStatus[fkey];
+  if (leftover) setKeptStatus(fkey, { exists: true, inLibrary: true, busy: false });
+  // Its row leaves the list (`fallbackSongRows`). The entries stay, flagged,
+  // so "played N of M" still counts those plays. A copy slskd wouldn't delete
+  // keeps the row, for its Delete.
+  var hist = false;
+  for (var h = 0; h < resolveHistory.length; h++) {
+    if (fallbackKey(resolveHistory[h].title, resolveHistory[h].artist) === fkey) { resolveHistory[h].moved = true; hist = true; }
+  }
+  if (hist) api.storage.set(stateKey("resolveHistory"), resolveHistory).catch(function (err) { console.error("slskd: couldn't save the fallback history:", err); });
+  lastMoved = songSnapshot(r, { title: e.title, artist: e.artist || meta.artist, album: meta.album,
+    trackNumber: meta.trackNumber, durationSecs: meta.durationSecs || (rec && rec.length) });
+  api.ui.showNotification(leftover
+    ? "“" + e.title + "” is in your library (" + r.collectionName + "), but the kept copy couldn't be deleted: " + leftover
+    : "“" + e.title + "” moved to your library (" + r.collectionName + ").",
+    { kind: leftover ? "warning" : "success", action: { label: "Play", id: "kept-moved-play" } });
+  render();
+  renderSettings();
 }
 
 // Pure: what the chosen fallback quality means, in the row under it.
@@ -6966,7 +6877,7 @@ function fallbackSettingsSection() {
     Object.keys(sharers).length ? buttonRow([actionButton("Forget sharer history", "reset-sharers")]) : null
   ].filter(Boolean);
   void totals;
-  return { type: "section", title: "Settings", children: children };
+  return { type: "section", title: "Playback fallback", children: children };
 }
 
 function render() {
@@ -6998,21 +6909,18 @@ function render() {
   body.push({
     type: "tabs",
     tabs: [
-      // What you came for first; the download history, which you rarely need
-      // now that search rows carry their own state, after them.
-      // Downloads (the jobs) first — what you came for — then Search for
-      // browsing by hand; Transfers is slskd's own list underneath both.
+      // Downloads (the jobs) first — what you came for, and where every
+      // download is followed, Search's included — then Search for browsing by
+      // hand. slskd's own transfer list is slskd's page (Settings → Open).
       { id: "upgrades", label: "Downloads", count: upgradesTabCount(upgrades) },
       { id: "search", label: "Search" },
       { id: "fallback", label: "Fallback" },
-      { id: "transfers", label: "Transfers", count: liveTransferCount(transfers) || undefined },
       { id: "settings", label: "Settings" }
     ],
     activeTab: mainTab,
     action: "main-tab"
   });
-  body.push(mainTab === "transfers" ? transfersTab()
-    : mainTab === "upgrades" ? upgradesTab()
+  body.push(mainTab === "upgrades" ? upgradesTab()
     : mainTab === "fallback" ? fallbackTab()
     : mainTab === "settings" ? settingsTab()
     : searchTab());
@@ -7024,7 +6932,7 @@ function render() {
 // Pure: which top-level tab `activeTab` belongs to. "folders" is the Search
 // tab's folder mode, not a tab of its own.
 function mainTabFor(tab) {
-  return tab === "transfers" || tab === "upgrades" || tab === "fallback" || tab === "settings" ? tab : "search";
+  return tab === "upgrades" || tab === "fallback" || tab === "settings" ? tab : "search";
 }
 
 // Settings live in the view's own Settings tab. The setup screens carry the
@@ -7062,6 +6970,9 @@ function statusChecklist(rd, cfg, currentTier, col, share, ago) {
   } else if (col) {
     rows.push({ type: "settings-row", label: "✓ Downloads reach your library",
       description: "slskd's downloads folder is inside “" + col.name + "”." });
+  } else if (canImportHeadless()) {
+    rows.push({ type: "settings-row", label: "✓ Downloads reach your library",
+      description: "Each download is saved into your library when it's done." });
   } else {
     rows.push({ type: "settings-row", label: "⚠ Downloads stay in slskd's folder",
       description: "Add that folder (or a parent) as a music source in Collections and finished downloads reach the library by themselves. Until then, use Add to library on each one." });
@@ -7089,6 +7000,7 @@ function settingsTab() {
     type: "section",
     title: "Downloads",
     children: [
+      upgradeTargetRow(),
       { type: "settings-row", label: "How far a download goes on its own",
         description: "You can take over any download at any step either way. A song you already have is replaced only after you compare the two.",
         control: { type: "select", action: "set-job-automation", value: jobAutomationOf(settings.jobAutomation),
@@ -7106,31 +7018,14 @@ function settingsTab() {
           : downloadsDir || "Read from slskd once connected." }
     ]
   });
+  children.push(fallbackSettingsSection());
   if (!testServerActive) children.push(testServer);
-  children.push(mutedText("What downloads look for is on the Downloads tab; the playback fallback's settings on its own tab."));
   return { type: "layout", direction: "vertical", children: children };
 }
 
 // ---------------------------------------------------------------------------
 // Actions
 // ---------------------------------------------------------------------------
-// A selection can span several sharers, but an enqueue is addressed to ONE peer
-// (slskd queues per user), so group first and send one batch each — sequentially,
-// because each batch claims the next destination folder number.
-async function downloadCandidates(list, recExtra) {
-  var byUser = {};
-  var order = [];
-  for (var i = 0; i < list.length; i++) {
-    var c = list[i];
-    if (!byUser[c.username]) { byUser[c.username] = []; order.push(c.username); }
-    byUser[c.username].push(c);
-  }
-  for (var u = 0; u < order.length; u++) {
-    var files = byUser[order[u]];
-    await enqueueFiles(order[u], files, basenameRemote(dirnameRemote(files[0].filename)), recExtra);
-  }
-}
-
 // `f:` rows come from the Files view, `o:` rows from the open folder — whose
 // files may lie past the Files view's cap, so they're looked up there.
 function candidateByRef(ref) {
@@ -7225,7 +7120,7 @@ async function localCopyOf(rec, tr) {
   if (rec.upgrade && rec.upgrade.trackId != null) return rec.upgrade.trackId;
   var meta = rec.meta || {};
   var row = await libraryRowByName(meta.title || tr.title, meta.artist || tr.artist_name, tr.durationSecs);
-  return row && row.path && String(row.path).indexOf("file://") === 0 ? row.id : null;
+  return isLocalRow(row) ? row.id : null;
 }
 
 function playTransfer(key) {
@@ -7264,15 +7159,10 @@ function registerActions() {
     activeTab = mainTabFor(id);
     fixScrollKey = null;
     render();
-    schedulePoll(activeTab === "transfers");
+    schedulePoll(activeTab === "upgrades");
   });
 
   // ---- the Fallback tab ----
-  api.ui.onAction("clear-resolve", function () {
-    lastResolve = null;
-    render();
-  });
-
   api.ui.onAction("open-fallback", function () {
     activeTab = "fallback";
     render();
@@ -7280,26 +7170,37 @@ function registerActions() {
   });
 
   api.ui.onAction("play-kept", function (data) {
-    var keys = keptKeys(data);
+    var keys = songKeys(data);
     for (var i = 0; i < keys.length; i++) {
       var e = fallback[keys[i]];
       if (e && e.state === "kept") { playTransfer(e.ref); return; }
     }
   });
 
-  api.ui.onAction("import-kept", function (data) {
-    var refs = [];
-    var keys = keptKeys(data);
-    for (var i = 0; i < keys.length; i++) {
-      var e = fallback[keys[i]];
-      if (e && e.state === "kept") refs.push(e.ref);
-    }
-    return addToLibrary(refs).catch(function (err) { console.error("slskd: add to library failed:", err); });
+  // One row or a selection: each kept file, one after another (each is a
+  // copy into the library and a delete in slskd).
+  api.ui.onAction("move-kept", function (data) {
+    var keys = songKeys(data).filter(function (k) {
+      var st = keptStatusOf(keptStatus, fallback, k);
+      return fallback[k] && st && st.exists === true && st.inLibrary === false && !st.busy;
+    });
+    var chain = Promise.resolve();
+    keys.forEach(function (k) {
+      chain = chain.then(function () { return moveKeptToLibrary(k); });
+    });
+    return chain.catch(function (err) { console.error("slskd: moving kept files to the library failed:", err); });
+  });
+
+  // Plays the library copy with the library's own names — a bare path played
+  // as "? — 08 Screamager", the filename for a title and no artist.
+  api.ui.onAction("kept-moved-play", function () {
+    return playMovedTrack(lastMoved).catch(function (err) { console.error("slskd: playing the moved track failed:", err); });
   });
 
   api.ui.onAction("delete-kept", function (data) {
-    var keys = keptKeys(data).filter(function (k) { return !!fallback[k]; });
+    var keys = songKeys(data).filter(function (k) { return !!fallback[k]; });
     if (!keys.length) return;
+    keys.forEach(function (k) { delete keptStatus[k]; });
     deleteFallbackFiles(keys).catch(function (e) { console.error("slskd: deleting fallback files failed:", e); });
   });
 
@@ -7327,8 +7228,10 @@ function registerActions() {
   // A song the fallback couldn't play, handed to the Search tab: the user can
   // look through everything found, not just what the resolver would accept.
   api.ui.onAction("fallback-search", function (data) {
-    var id = rowIds(data)[0] || "";
-    var e = resolveHistory.filter(function (x) { return historyRowId(x) === id; })[0];
+    // A row's id is its song, not its place: resolves land while the tab is
+    // open, and a position-based id then pointed at the song below.
+    var key = songKeys(data)[0] || "";
+    var e = resolveHistory.filter(function (x) { return fallbackKey(x.title, x.artist) === key; })[0];
     if (!e) return;   // merged or cleared since it was drawn; the next render shows what's there
     var q = searchQueryForTarget({ kind: "track", title: e.title, artistName: e.artist });
     if (!q) return;
@@ -7402,19 +7305,10 @@ function registerActions() {
     // A selection can hold rows already on their way; only the rest go.
     picked = notYetQueued(picked);
     if (!picked.length) return;
-    // In download mode only the files that ARE the song are tagged as it: one
-    // picked from "Show everything found" can be another song entirely, and
-    // stamping it would import it under the wrong title.
-    if (search.mode && search.mode.kind === "download") {
-      var songs = picked.filter(function (c) { return c.isSong; });
-      var others = picked.filter(function (c) { return !c.isSong; });
-      var chain = Promise.resolve();
-      if (songs.length) chain = chain.then(function () { return downloadCandidates(songs, modeRecExtra()); });
-      if (others.length) chain = chain.then(function () { return downloadCandidates(others, null); });
-      return chain.catch(function (e) { console.error("slskd enqueue failed:", e); });
-    }
-    downloadCandidates(picked, modeRecExtra())
-      .catch(function (e) { console.error("slskd enqueue failed:", e); });
+    // Each file is a job (`jobForPick`). In download mode only the files that
+    // ARE the song are named as it: one picked from "Show everything found"
+    // can be another song entirely, and goes by its own name.
+    return downloadPicks(picked).catch(function (e) { console.error("slskd: starting the downloads failed:", e); });
   });
 
   // A folder row's name opens the folder (see folderView); nothing is queued
@@ -7441,14 +7335,13 @@ function registerActions() {
   // host's bulk toolbar sends a selection instead; each selected folder goes.
   api.ui.onAction("folder-row-download", function (data) {
     var refs = (data && data.selectedIds && data.selectedIds.length) ? data.selectedIds : [data && data.itemId];
+    var files = [];
     refs.forEach(function (ref) {
       var g = folderByRef(ref);
-      if (!g) return;
-      var files = folderRowFiles(g);
-      if (!files.length) return;
-      enqueueFiles(g.username, files, g.name, modeRecExtra())
-        .catch(function (e) { console.error("slskd folder enqueue failed:", e); });
+      if (g) files = files.concat(notYetQueued(folderRowFiles(g)));
     });
+    if (!files.length) return;
+    return downloadPicks(files).catch(function (e) { console.error("slskd: starting the folder's downloads failed:", e); });
   });
 
   // The open folder's button: everything not yet queued, or — `which:
@@ -7461,8 +7354,7 @@ function registerActions() {
     if (data && data.which === "missing") files = files.filter(function (c) { return !owned[c.filename]; });
     files = notYetQueued(files);
     if (!files.length) return;
-    enqueueFiles(g.username, files, g.name, modeRecExtra())
-      .catch(function (e) { console.error("slskd folder enqueue failed:", e); });
+    return downloadPicks(files).catch(function (e) { console.error("slskd: starting the folder's downloads failed:", e); });
   });
 
   // ---- the Upgrades tab ----
@@ -7526,10 +7418,11 @@ function registerActions() {
     }
   });
 
+  // A row's title or Details: open its details under it, or close them.
   api.ui.onAction("upgrade-show", function (data) {
     var id = rowIds(data)[0];
     if (!upgrades[id]) return;
-    focusedUpgrade = id;
+    focusedUpgrade = focusedUpgrade === id ? false : id;
     render();
   });
 
@@ -7622,12 +7515,8 @@ function registerActions() {
     if (e) saveJob(e, false).catch(function (err) { console.error("slskd: saving to the library failed:", err); });
   });
 
-  api.ui.onAction("job-play", function (data) {
-    playSavedJob(rowIds(data)[0]);
-  });
-
   api.ui.onAction("job-play-notice", function () {
-    if (lastSavedJob) playSavedJob(lastSavedJob);
+    return playMovedTrack(lastSavedJob).catch(function (err) { console.error("slskd: playing the saved track failed:", err); });
   });
 
   api.ui.onAction("set-job-automation", function (data) {
@@ -7647,19 +7536,6 @@ function registerActions() {
     if (!search.mode) return;
     search.mode.showAll = !search.mode.showAll;
     render();
-  });
-
-  api.ui.onAction("replace-transfer", function (data) {
-    // Only finished, located files (openReplace finds the library copy by name
-    // when there's no upgrade stamp): a selection on the search list can hold
-    // anything else too.
-    var keys = transferKeys(data).filter(function (k) {
-      var t = transferByKey(k);
-      return !!(tracked[k] && importTrackFor(k) && (!t || transferPhase(t.state) === "succeeded"));
-    });
-    for (var i = 0; i < keys.length; i++) {
-      openReplace(keys[i]).catch(function (e) { console.error("slskd: replace in library failed:", e); });
-    }
   });
 
   // A selection plays as ONE queue, in list order; a single row just plays.
@@ -7684,61 +7560,6 @@ function registerActions() {
     api.playback.playTracks(tracks, 0, { name: "Soulseek downloads", source: "playlist" });
   });
 
-  // One row, a selection, or the Finished group's "Add all" — from Downloads
-  // (plain keys) or a search list (`f:` / `o:` ids, which transferKeys strips).
-  // openImport skips whatever hasn't finished, so a mixed selection is fine.
-  // The handlers return their promise: the host ignores it, a caller (a test)
-  // can wait on it.
-  api.ui.onAction("import-transfer", function (data) {
-    return addToLibrary(transferKeys(data)).catch(function (err) { console.error("slskd: add to library failed:", err); });
-  });
-
-  // Re-queue with the same user. slskd retries a failed transfer on its own
-  // schedule (attempts / nextAttemptAt); this is for after it has given up, or
-  // for one the user cancelled.
-  api.ui.onAction("retry-transfer", function (data) {
-    // Only what has stopped: a selection on the search list can also hold
-    // files still on their way (slskd would refuse each, one toast apiece),
-    // finished ones, and plain results nobody asked to download.
-    var keys = transferKeys(data).filter(retryableKey);
-    var chain = Promise.resolve();
-    keys.forEach(function (key) {
-      var parts = splitKey(key);
-      if (!parts) return;
-      var t = transferByKey(key);
-      var rec = tracked[key];
-      var size = (t && t.size) || (rec && rec.size) || 0;
-      // The re-queue writes a fresh record; carry over what the first one was
-      // for, or a retried upgrade can no longer be replaced into the library.
-      // `meta` goes back through mergeMeta, which reads tag-shaped keys.
-      var m = rec && rec.meta;
-      var extra = rec && (rec.upgrade || m) ? {
-        upgrade: rec.upgrade || null,
-        meta: m ? { title: m.title, artist: m.artist, album: m.album, album_artist: m.albumArtist, track_number: m.trackNumber,
-          year: m.year, genre: m.genre, duration_secs: m.durationSecs } : null
-      } : null;
-      chain = chain.then(function () {
-        return enqueueFiles(parts.username, [{ filename: parts.filename, size: size }], basenameRemote(dirnameRemote(parts.filename)), extra);
-      });
-    });
-    chain.catch(function (e) { console.error("slskd retry failed:", e); });
-  });
-
-  // Search again for the same song, rejecting anything whose duration is off
-  // from the copy that failed — the same knownDurationSecs guard the context
-  // menu uses, so a mislabeled file can't be the "other source".
-  api.ui.onAction("another-source", function (data) {
-    var key = rowIds(data)[0];
-    var parts = splitKey(key);
-    var filename = parts ? parts.filename : String(key || "");
-    var rec = tracked[key];
-    var meta = (rec && rec.meta) || parseTrackMeta(filename);
-    var known = meta.durationSecs != null ? meta.durationSecs : (rec && rec.length != null ? rec.length : null);
-    runSearch([meta.artist, meta.title].filter(Boolean).join(" ") || basenameRemote(filename),
-      known != null ? { knownDurationSecs: known } : null)
-      .catch(function (e) { console.error("slskd re-search failed:", e); });
-  });
-
   api.ui.onAction("cancel-transfer", function (data) {
     var keys = transferKeys(data);
     var chain = Promise.resolve();
@@ -7757,28 +7578,15 @@ function registerActions() {
       });
   });
 
-  // Drops the row from slskd's list. The file on disk is untouched — this is a
-  // list, not a trash can, and slskd's own remote_file_management gate exists
-  // precisely so an API caller can't delete downloads by default.
-  api.ui.onAction("finished-toggle", function () {
-    showAllFinished = !showAllFinished;
+  // A search row's file → its job on the Downloads tab, where what happens to
+  // it next (the check, the save, another file after a failure) is shown.
+  api.ui.onAction("show-job", function (data) {
+    var key = transferKeys(data)[0];
+    var job = key ? jobKeyForTransfer(key) : null;
+    if (job) focusedUpgrade = job;
+    activeTab = "upgrades";
     render();
-  });
-
-  api.ui.onAction("remove-transfer", function (data) {
-    var keys = rowIds(data);
-    var chain = Promise.resolve();
-    keys.forEach(function (key) {
-      var t = transferByKey(key);
-      if (!t) return;
-      chain = chain.then(function () { return cancelTransfer(t, true); });
-    });
-    chain
-      .then(function () { render(); schedulePoll(true); })
-      .catch(function (e) {
-        console.error("slskd remove failed:", e);
-        api.ui.showNotification((e && e.message) || "Couldn't remove that download.");
-      });
+    schedulePoll(true);
   });
 
   api.ui.onAction("open-slskd-site", function () {
@@ -8020,8 +7828,7 @@ function registerActions() {
     api.storage.set("debugUrl", settings.debugUrl).catch(function (e) { console.error("slskd: couldn't save debugUrl:", e); });
     debugDetected = null;
     if (settings.debugServer) {
-      downloadsDir = null;
-      incompleteDir = null;
+      forgetDownloadsDir();
       refreshReadiness().catch(function (e) { console.error("slskd probe failed:", e); });
     } else {
       detectDebugServer().then(renderSettings).catch(function (e) { console.error("slskd: test server check failed:", e); });
@@ -8391,7 +8198,6 @@ function upgradeLine(e, t, ahead) {
   var have = !savesAsNew(e) ? "your copy " + (e.currentLabel || "?") : (jobDestination(e) || "new to your library");
   if (e.state === "choosing") return (e.message || "Choose the file to download") + " · " + have;
   if (e.state === "saving") return "Saving to your library…";
-  if (e.state === "saved") return "In your library" + (e.saved ? " · " + e.saved.collectionName + " · " + displayPath(e.saved.path) : "");
   if (e.state === "ready" && e.file && savesAsNew(e)) {
     return "Downloaded: " + qualityLabel(e.file.quality) + " · " + (e.message || "waiting for you to save it") + " · " + have;
   }
@@ -8401,7 +8207,9 @@ function upgradeLine(e, t, ahead) {
     var pick = e.active;
     var bits = ["“" + basenameRemote(pick.filename) + "”", qualityLabel(pick) + " from " + pick.username];
     var phase = t ? transferPhase(t.state) : null;
-    if (phase === "downloading" || phase === "starting") {
+    if (phase === "succeeded") {
+      bits.push(e.message || "downloaded");
+    } else if (phase === "downloading" || phase === "starting") {
       var pct = transferProgress(t);
       bits.push(pct == null ? "downloading" : "downloading " + Math.round(pct * 100) + "%");
       if (t.averageSpeed) bits.push("↓ " + formatSpeed(t.averageSpeed));
@@ -8428,7 +8236,6 @@ function upgradeRowActions(e) {
   var ids = [];
   if (!upgradeIsHistory(e)) ids.push("upgrade-show");
   if (e.state === "ready") ids.push(savesAsNew(e) ? "job-save" : "upgrade-replace");
-  if (e.state === "saved" && e.saved) ids.push("job-play");
   if (e.state === "alternative") ids.push("upgrade-take-alternative");
   if (e.state === "none" || e.state === "failed" || e.state === "alternative" || e.state === "cancelled") ids.push("upgrade-retry");
   // Try another sharer and Choose myself… are on the panel (Details), not on
@@ -8504,10 +8311,9 @@ async function queueUpgrades(trackIds) {
 
   var started = [], notLocal = 0, missing = 0, already = 0;
   for (var j = 0; j < ids.length; j++) {
-    var row = null;
-    try { row = await api.library.getTrackById(ids[j]); } catch (e) { console.error("slskd: could not read library track " + ids[j] + ":", e); }
+    var row = await libraryTrackById(ids[j]);
     if (!row) { missing++; continue; }
-    if (!row.path || String(row.path).indexOf("file://") !== 0) { notLocal++; continue; }
+    if (!isLocalRow(row)) { notLocal++; continue; }
     var prev = upgrades[upgradeKey(row.id)];
     if (prev && (upgradeIsBusy(prev) || prev.state === "ready")) { already++; continue; }
     var e = await beginUpgrade(row, { origin: "batch", deferred: true });
@@ -8630,11 +8436,20 @@ async function beginUpgrade(row, opts) {
 // Keyed "g<seq>". Where it will be saved is asked of the host at once
 // (`planImport`), so the row can say it while the file is still on its way.
 // A busy job for the same song is shown instead of starting a second one.
+//
+// `opts.pick`: the user already chose the file (Search's Download — see
+// `jobForPick`). The job then starts at rest ("choosing") instead of
+// searching, and the caller hands it the file. `opts.from` says which names
+// came from the file and may be corrected by its tags once it lands
+// (`adoptFileNames`): "file" (all of them) or "fill" (all but the album).
 async function beginGetJob(song, opts) {
+  var pick = !!(opts && opts.pick);
   var wantT = normalizeText(song.title), wantA = normalizeText(song.artist || "");
+  var wantAl = normalizeText(song.album || "");
   for (var k in upgrades) {
     var o = upgrades[k];
-    if (isGetJob(o) && upgradeIsBusy(o) && normalizeText(o.title) === wantT && normalizeText(o.artist || "") === wantA) {
+    if (isGetJob(o) && upgradeIsBusy(o) && normalizeText(o.title) === wantT && normalizeText(o.artist || "") === wantA &&
+        (!pick || normalizeText(o.album || "") === wantAl)) {
       focusedUpgrade = k;
       return { entry: o, existing: true };
     }
@@ -8657,7 +8472,7 @@ async function beginGetJob(song, opts) {
     currentLabel: null,
     plan: null,
     target: upgradeTargetOf(settings.upgradeTarget),
-    state: "searching",
+    state: pick ? "choosing" : "searching",
     message: null,
     candidates: [],
     alternative: null,
@@ -8666,25 +8481,162 @@ async function beginGetJob(song, opts) {
     file: null,
     replaceRequested: false,
     origin: "user",
+    from: pick && opts.from ? opts.from : null,
     createdAt: nowMs(),
     updatedAt: nowMs()
   };
   focusedUpgrade = key;
   await saveUpgrades();
-  if (api.library && typeof api.library.planImport === "function") {
-    api.library.planImport({ title: e.title, artist: e.artist || "", album: e.album })
-      .then(function (plan) {
-        if (upgrades[key] !== e) return;
-        e.plan = plan || null;
-        saveUpgrades().catch(function (err) { console.error("slskd: couldn't save upgrades:", err); });
-        render();
-      })
-      .catch(function (err) { console.error("slskd: asking where “" + e.title + "” would be saved failed:", err); });
-  }
+  planJob(e);
+  if (pick) return { entry: e, existing: false };
   render();
   if (readiness.state === "ready") advanceUpgrades().catch(function (err) { console.error("slskd: advancing jobs failed:", err); });
   schedulePoll(true);
   return { entry: e, existing: false };
+}
+
+// Ask the host where a new song's file will be saved, for its row. Not
+// awaited: the row says it once the answer is in.
+function planJob(e) {
+  if (!api.library || typeof api.library.planImport !== "function") return;
+  var key = jobKeyOf(e);
+  api.library.planImport({ title: e.title, artist: e.artist || "", album: e.album })
+    .then(function (plan) {
+      if (upgrades[key] !== e) return;
+      e.plan = plan || null;
+      saveUpgrades().catch(function (err) { console.error("slskd: couldn't save upgrades:", err); });
+      render();
+    })
+    .catch(function (err) { console.error("slskd: asking where “" + e.title + "” would be saved failed:", err); });
+}
+
+// ---- Search's Download: every picked file is a job ----
+// A file, a selection or a folder downloaded from Search becomes one job per
+// file, holding the file the user picked: no search of its own, straight to
+// downloading, then the same check and save as any job — so a file found by
+// hand ends in the library like everything else, and the Downloads tab is
+// the one place every download is followed. Which song each file is: the
+// search mode's (Download → that song, Upgrade → that library track, Fill →
+// that album), else the file's own name, corrected by its tags once it lands.
+async function downloadPicks(list) {
+  var m = search.mode;
+  var started = 0;
+  var refused = [];
+  for (var i = 0; i < list.length; i++) {
+    var ok = false;
+    try {
+      ok = await jobForPick(list[i], m);
+    } catch (err) {
+      console.error("slskd: starting a download job failed:", err);
+    }
+    if (ok) started++;
+    else refused.push(list[i]);
+    render();
+  }
+  schedulePoll(true);
+  if (refused.length) {
+    api.ui.showNotification(started
+      ? "Started " + started + " download" + (started === 1 ? "" : "s") + " · slskd refused " + refused.length + "."
+      : refused.length === 1 ? "slskd refused the download of “" + basenameRemote(refused[0].filename) + "”."
+      : "slskd refused all " + refused.length + " downloads.", { kind: "error", action: { label: "Show", id: "open-upgrades" } });
+  }
+  return started;
+}
+
+// One picked file → its job, downloading. False when slskd refused it.
+async function jobForPick(c, m) {
+  if (m && m.kind === "upgrade" && m.trackId != null) {
+    var u = await upgradeEntryFor(m.trackId);
+    if (u) return pickInto(u, c);
+  }
+  var meta = parseTrackMeta(c.filename);
+  var song;
+  var from;
+  if (m && m.kind === "fill") {
+    song = { title: meta.title, artist: m.artistName || meta.artist, album: m.albumTitle || meta.album, trackNumber: meta.trackNumber };
+    from = "fill";
+  } else {
+    song = { title: meta.title, artist: meta.artist, album: meta.album, trackNumber: meta.trackNumber };
+    from = "file";
+  }
+  song.durationSecs = c.length || null;
+  var r = await beginGetJob(song, { pick: true, from: from });
+  return pickInto(r.entry, c);
+}
+
+// The library track's upgrade job: the running one, else a new one (which
+// then takes the picked file instead of searching). Null when the track is
+// gone from the library.
+async function upgradeEntryFor(trackId) {
+  var e = upgrades[upgradeKey(trackId)];
+  if (e && !upgradeIsHistory(e)) return e;
+  var row = await libraryTrackById(trackId);
+  if (!row) return null;
+  var made = await beginUpgrade(row, { origin: "user", deferred: true });
+  if (made) setUpgradeState(made, "choosing");
+  return made;
+}
+
+// Download exactly this file for this job, whatever it was doing: the job's
+// own search is dropped (`runUpgradeSearch` ignores an answer for a job no
+// longer searching), a running download is stopped, and a file below the
+// job's target lowers the bar for it — the user chose it. False when slskd
+// refused it; the job then rests with the reason.
+async function pickInto(e, c) {
+  if (isActiveFile(e, c)) return true;
+  if (e.state === "searching" || e.state === "checking" || e.state === "ready") setUpgradeState(e, "choosing");
+  var has = (e.candidates || []).some(function (x) { return x.username === c.username && x.filename === c.filename; });
+  if (!has) e.candidates = [leanCandidate(c)].concat(e.candidates || []);
+  unmarkTried(e, c.username);
+  focusedUpgrade = jobKeyOf(e);
+  return fetchChosen(e, c, function () { return upgradeSources(e).length > 1 ? "pick another file" : null; });
+}
+
+// Pure: `c` is the file this job is fetching right now.
+function isActiveFile(e, c) {
+  return !!(e.active && e.active.username === c.username && e.active.filename === c.filename);
+}
+
+// The user chose `c` for this job: drop what it was fetching and ask for
+// this one. A pick below the target lowers it to "best" for this job. False
+// (the job failed, `next()` saying the way on) when the sharer refuses.
+async function fetchChosen(e, c, next) {
+  await dropActiveUpgradeTransfer(e);
+  e.file = null;
+  if (!meetsQualityTarget(c, e.target)) e.target = "best";
+  if (await enqueueUpgradeCandidate(e, c)) return true;
+  var way = next();
+  setUpgradeState(e, "failed", c.username + " refused the download" + (way ? " — " + way : ""));
+  await saveUpgrades();
+  return false;
+}
+
+// Pure-ish: a job started from a bare file takes the names its tags give,
+// once they are read — the filename was only a guess. Fill keeps the album
+// it is filling. Once only.
+function adoptFileNames(e, meta) {
+  if (!e.from || !meta) return false;
+  var before = [e.title, e.artist, e.album].join(KEY_SEP);
+  if (meta.title) e.title = String(meta.title);
+  if (meta.artist) e.artist = String(meta.artist);
+  if (e.from === "file" && meta.album) e.album = String(meta.album);
+  var n = meta.trackNumber != null ? parseInt(String(meta.trackNumber), 10) : NaN;
+  if (isFinite(n) && n > 0) e.trackNumber = n;
+  if (meta.durationSecs) e.durationSecs = meta.durationSecs;
+  e.from = null;
+  // True only when the names `planJob` asks about changed: tags that agree
+  // with the filename's guess need no second planImport.
+  return [e.title, e.artist, e.album].join(KEY_SEP) !== before;
+}
+
+// The job a transfer belongs to (its active download or its finished file),
+// by transfer key; null when none does.
+function jobKeyForTransfer(key) {
+  for (var k in upgrades) {
+    var e = upgrades[k];
+    if ((e.active && e.active.key === key) || (e.file && e.file.key === key)) return k;
+  }
+  return null;
 }
 
 // The context menu's Download (and "…and let me choose"): one job, and which
@@ -8697,7 +8649,7 @@ async function startJob(target, manual) {
   if (!t.title) return plainSearch(t, null);
   var row = await libraryRowForTarget(t);
   var open = { label: "Show", id: "open-upgrades" };
-  if (row && row.path && String(row.path).indexOf("file://") === 0) {
+  if (isLocalRow(row)) {
     var key = upgradeKey(row.id);
     if (upgradeIsBusy(upgrades[key])) {
       focusedUpgrade = key;
@@ -8825,10 +8777,24 @@ function nextUntriedSource(e) {
   return null;
 }
 
+// A sharer this job has asked (each gets one chance), and why it didn't
+// work out when that's known — the Sources list says "tried: <why>".
+function markTried(e, user, why) {
+  if (!e.triedUsers) e.triedUsers = [];
+  if (e.triedUsers.indexOf(user) < 0) e.triedUsers.push(user);
+  if (why) (e.triedWhy = e.triedWhy || {})[user] = why;
+}
+
+// The user picked this sharer's file: a fresh chance, the old reason gone.
+function unmarkTried(e, user) {
+  e.triedUsers = (e.triedUsers || []).filter(function (u) { return u !== user; });
+  if (e.triedWhy) delete e.triedWhy[user];
+}
+
 // Queue one candidate as this upgrade's active attempt. False when slskd
 // refused it (the sharer is marked tried either way).
 async function enqueueUpgradeCandidate(e, c) {
-  if (e.triedUsers.indexOf(c.username) < 0) e.triedUsers.push(c.username);
+  markTried(e, c.username);
   var key = c.username + KEY_SEP + c.filename;
   try {
     var out = await enqueueBatch(c.username, [c], (e.artist ? e.artist + " - " : "") + e.title, isGetJob(e) ? JOB_SUBDIR : UPGRADE_SUBDIR, {
@@ -8836,12 +8802,14 @@ async function enqueueUpgradeCandidate(e, c) {
       meta: { title: e.title, artist: e.artist, album: e.album, track_number: e.trackNumber }
     });
     if (!out.queued.length) {
+      markTried(e, c.username, "refused — " + ((out.failures[0] && out.failures[0].message) || "slskd wouldn't queue it"));
       ledgerCount(key, c.username, "failed", 0, false);
       await dropIfListed(key);
       return false;
     }
   } catch (err) {
     console.error("slskd: upgrade enqueue failed:", err);
+    markTried(e, c.username, "refused — " + ((err && err.message) || String(err)));
     ledgerCount(key, c.username, "failed", 0, false);
     await dropIfListed(key);
     return false;
@@ -8858,6 +8826,7 @@ async function enqueueUpgradeCandidate(e, c) {
 async function abandonUpgradeAttempt(e, t, reason, drop) {
   var a = e.active;
   api.log("warn", "upgrade: “" + e.title + "” — " + a.username + ": " + reason, "slskd");
+  markTried(e, a.username, reason);
   if (drop && t) await dropStalled(t);
   if (drop) delete tracked[a.key];
   e.active = null;
@@ -8951,7 +8920,13 @@ async function advanceUpgradeDownload(e) {
   if (phase === "succeeded") {
     var rec = tracked[a.key];
     var path = rec ? (rec.resolvedPath || await resolveTransferPath(t, rec)) : null;
-    if (!path) return;   // located on a later poll
+    if (!path) {
+      // Located on a later poll — but say what the row is waiting for.
+      var why = downloadsDir ? "Downloaded — looking for the file in slskd's downloads folder"
+        : "Downloaded — waiting for slskd to say where it saves files";
+      if (e.message !== why) { e.message = why; await saveUpgrades(); }
+      return;
+    }
     e.file = { key: a.key, path: path, size: t.size || a.size || null };
     setUpgradeState(e, "checking");
     await saveUpgrades();
@@ -8993,6 +8968,7 @@ async function advanceUpgradeCheck(e) {
   var rec = tracked[e.file.key];
   var canRead = api.system && typeof api.system.readAudioTags === "function";
   if (rec && canRead && !rec.tagsRead) return;
+  if (rec && savesAsNew(e) && adoptFileNames(e, rec.meta)) planJob(e);
   var duration = rec && rec.meta && rec.meta.durationSecs ? rec.meta.durationSecs : null;
   var pick = e.active || {};
   var measured = duration ? measuredQuality(pick, e.file.size, duration) : null;
@@ -9066,7 +9042,21 @@ function canImportHeadless() {
   return !!(api && api.library && typeof api.library.importFile === "function");
 }
 
-var lastSavedJob = null;   // which job the "in your library" toast's Play plays
+// What the "in your library" toast's Play plays: where the song landed and the
+// names it was saved under (`playMovedTrack`'s shape). The job itself is gone
+// by then — a song in the library is done, and leaves the Downloads list.
+var lastSavedJob = null;
+
+// Saved: drop the job from the list, keep what Play needs. `saved` is where
+// the file landed ({ trackId, path }).
+async function finishSavedJob(e, key, saved) {
+  lastSavedJob = songSnapshot(saved, e);
+  delete upgrades[key];
+  delete sourcesOpen[key];
+  if (focusedUpgrade === key) focusedUpgrade = null;
+  await saveUpgrades();
+  render();
+}
 
 // Step 3 of a new song: hand the checked file to the host, which picks the
 // collection (next to the album, the artist, or the default), copies it in
@@ -9084,11 +9074,7 @@ async function saveJob(e, asCopy) {
     if (api.collections && typeof api.collections.resync === "function") {
       try { await api.collections.resync(landed.id); } catch (err) { console.error("slskd: could not rescan collection " + landed.id + ":", err); }
     }
-    e.saved = { trackId: null, path: e.file.path, collectionName: landed.name, placement: "slskd" };
-    setUpgradeState(e, "saved");
-    await saveUpgrades();
-    render();
-    lastSavedJob = key;
+    await finishSavedJob(e, key, { trackId: null, path: e.file.path });
     api.ui.showNotification("“" + e.title + "” is downloaded into “" + landed.name + "” and on its way into your library.",
       { kind: "success", action: { label: "Play", id: "job-play-notice" } });
     return;
@@ -9105,10 +9091,7 @@ async function saveJob(e, asCopy) {
   render();
   var r = null;
   try {
-    r = await api.library.importFile({
-      path: e.file.path, title: e.title, artist: e.artist || "", album: e.album || null,
-      trackNumber: e.trackNumber || null, asCopy: !!asCopy
-    });
+    r = await importSong(e.file.path, e, !!asCopy);
   } catch (err) {
     console.error("slskd: saving “" + e.title + "” to the library failed:", err);
     if (upgrades[key] !== e) return;
@@ -9122,13 +9105,8 @@ async function saveJob(e, asCopy) {
     await becomeReplace(e, r);
     return;
   }
-  e.trackId = r.trackId;
-  e.saved = { trackId: r.trackId, path: r.path, collectionName: r.collectionName, placement: r.placement };
-  setUpgradeState(e, "saved");
-  await saveUpgrades();
-  render();
+  await finishSavedJob(e, key, r);
   api.log("info", "job: “" + e.title + "” saved to " + r.collectionName + " — " + r.path, "slskd");
-  lastSavedJob = key;
   api.ui.showNotification("“" + e.title + "” is in your library (" + qualityLabel(e.file.quality) + ", " + r.collectionName + ").",
     { kind: "success", action: { label: "Play", id: "job-play-notice" } });
 }
@@ -9138,8 +9116,7 @@ async function saveJob(e, asCopy) {
 // saves beside it (Save as copy). Measured against your copy like an upgrade,
 // so a download no better than what you have says so.
 async function becomeReplace(e, r) {
-  var row = null;
-  try { row = await api.library.getTrackById(r.trackId); } catch (err) { console.error("slskd: could not read library track " + r.trackId + ":", err); }
+  var row = await libraryTrackById(r.trackId);
   e.trackId = r.trackId;
   e.path = row ? row.path : "file://" + r.path;
   e.current = row ? libraryQuality(row) : null;
@@ -9152,17 +9129,6 @@ async function becomeReplace(e, r) {
   lastReadyUpgrade = jobKeyOf(e);
   api.ui.showNotification("You already have “" + e.title + "”. Compare the two, or save the new one as a copy.",
     { action: { label: "Compare & replace", id: "upgrade-replace-notice" } });
-}
-
-function playSavedJob(key) {
-  var e = upgrades[key];
-  if (!e || !e.saved) return;
-  var p = String(e.saved.path);
-  api.playback.playTrack({
-    path: p.indexOf("file://") === 0 ? p : "file://" + p,
-    title: e.title, artist_name: e.artist || null, album_title: e.album || null,
-    track_number: e.trackNumber || null, duration_secs: e.durationSecs || null, kind: "audio"
-  });
 }
 
 // Pure: this host swaps a library file itself, behind its own dialog.
@@ -9274,9 +9240,11 @@ async function retryUpgrade(key) {
   e.candidates = [];
   e.alternative = null;
   e.triedUsers = [];
+  e.triedWhy = {};
   e.active = null;
   e.file = null;
   e.replaceRequested = false;
+  e.from = null;
   setUpgradeState(e, "searching");
   await saveUpgrades();
   render();
@@ -9361,14 +9329,8 @@ async function useUpgradeSource(key, index) {
   if (!canPickUpgradeSource(e)) return;
   var c = upgradeSources(e)[index];
   if (!c) return;
-  if (e.active && e.active.username === c.username && e.active.filename === c.filename) return;
-  await dropActiveUpgradeTransfer(e);
-  e.file = null;
-  if (!meetsQualityTarget(c, e.target)) e.target = "best";
-  if (!(await enqueueUpgradeCandidate(e, c))) {
-    setUpgradeState(e, "failed", c.username + " refused the download — pick another source");
-    await saveUpgrades();
-  }
+  if (isActiveFile(e, c)) return;
+  await fetchChosen(e, c, function () { return "pick another source"; });
   render();
   schedulePoll(true);
 }
@@ -9392,7 +9354,7 @@ function upgradeSourceRows(e) {
     var bits = [c.username + " · " + dirnameRemote(c.filename).replace(/\\/g, "/")];
     if (!meetsQualityTarget(c, e.target)) bits.push("below your target");
     if (active) bits.push("downloading now");
-    else if (tried) bits.push("tried");
+    else if (tried) bits.push(e.triedWhy && e.triedWhy[c.username] ? "tried: " + e.triedWhy[c.username] : "tried");
     var rep = sharerLabel(sharers[c.username]);
     var badge = active ? { label: "Downloading", variant: "accent" }
       : tried ? { label: "Tried", variant: "muted" }
@@ -9423,7 +9385,7 @@ function parseSourceId(id) {
 
 // Pure: an upgrade that is over — kept only as history.
 function upgradeIsHistory(e) {
-  return !!e && (e.state === "replaced" || e.state === "gone" || e.state === "saved");
+  return !!e && (e.state === "replaced" || e.state === "gone");
 }
 
 // Pure: where a job's file will go, for its row — "→ Music · next to
@@ -9479,10 +9441,10 @@ function upgradeSearchQueue(all, runningKey) {
   return out;
 }
 
-// `group`: an upgradeGroup id; `shownKey`: the entry the panel describes,
-// whose row says so instead of offering Details.
-function upgradeRows(group, shownKey) {
-  var queue = upgradeSearchQueue(upgrades, upgradeSearchKey);
+// `group`: an upgradeGroup id; `shownKey`: the entry whose details are open
+// (under its row). A click on a row's title — or Details — opens or closes them.
+function upgradeRows(group, shownKey, queue) {
+  queue = queue || upgradeSearchQueue(upgrades, upgradeSearchKey);
   return Object.keys(upgrades)
     .map(function (k) { return upgrades[k]; })
     .filter(function (e) { return upgradeGroup(e) === group; })
@@ -9494,7 +9456,7 @@ function upgradeRows(group, shownKey) {
       return {
         id: key,
         title: e.title,
-        subtitle: key === shownKey ? "Shown above · " + line : line,
+        subtitle: line,
         badge: upgradeBadge(e, t, queue[key]) || undefined,
         progress: upgradeRowProgress(e, t),
         album: e.album || undefined,
@@ -9503,7 +9465,8 @@ function upgradeRows(group, shownKey) {
         artistName: e.artist,
         albumTitle: e.album,
         kind: "audio",
-        actions: key === shownKey ? upgradeRowActions(e).filter(function (id) { return id !== "upgrade-show"; }) : upgradeRowActions(e)
+        actions: upgradeRowActions(e),
+        action: "upgrade-show"
       };
     });
 }
@@ -9514,34 +9477,21 @@ function displayPath(p) {
   return /^[A-Za-z]:[\\/]/.test(s) ? s.replace(/\//g, "\\") : s;
 }
 
-// Pure: which entry the panel describes — the one last started here while it
-// still exists, else the newest one still in progress or waiting on you.
-// `focused` false: the user closed the panel; Details (or a new upgrade) opens it.
+// Pure: which entry's details are open — the one the user opened (or just
+// started) while it still exists, else none. Nothing opens by itself: the
+// details sit under their row now, and a row expanding on its own as jobs
+// come and go would push the list around under the pointer.
 function panelUpgrade(all, focused) {
-  if (focused === false) return null;
-  if (focused && all[focused]) return all[focused];
-  var best = null;
-  for (var k in all) {
-    var e = all[k];
-    if (!e || !(upgradeIsBusy(e) || e.state === "ready")) continue;
-    if (!best || (e.createdAt || 0) > (best.createdAt || 0)) best = e;
-  }
-  return best;
+  return focused && all[focused] ? all[focused] : null;
 }
 
-// Pure: the panel on top of the Upgrades tab — the whole process for one
-// track in plain lines: the file you have, what it's after, the file it is
-// fetching and from whom, and the file that will replace yours.
-// `t` is the active transfer, `ready` whether slskd is up, `asking` whether
-// the host's Replace dialog is open for it, `inPlace` whether this host
-// replaces behind its own dialog.
 // Pure: the four steps of an automatic upgrade as one line — ✓ done, ● now,
 // ○ to come — or null for a state that isn't on that road (nothing found,
 // failed, cancelled, gone). It answers "where is it?" without reading.
 var UPGRADE_STEPS = ["Search", "Download", "Check", "Replace"];
 var GET_STEPS = ["Search", "Download", "Check", "Save"];
 function upgradeStepper(state, pct, saves) {
-  var at = { searching: 0, choosing: 0, downloading: 1, checking: 2, ready: 3, saving: 3, replaced: 4, saved: 4 }[state];
+  var at = { searching: 0, choosing: 0, downloading: 1, checking: 2, ready: 3, saving: 3, replaced: 4 }[state];
   if (at == null) return null;
   return (saves ? GET_STEPS : UPGRADE_STEPS).map(function (label, i) {
     var mark = i < at ? "✓" : i === at ? "●" : "○";
@@ -9563,10 +9513,9 @@ function upgradePanel(e, t, ready, asking, inPlace, ahead) {
   var key = jobKeyOf(e);
   var phase = t ? transferPhase(t.state) : null;
   var pct = t && (phase === "downloading" || phase === "starting") ? transferProgress(t) : null;
-  var lines = [
-    { type: "text", content: "“" + e.title + "”" + (e.artist ? " · " + e.artist : ""), className: "plugin-heading" }
-  ];
-  var steps = upgradeStepper(e.state, pct, savesAsNew(e) || e.state === "saved");
+  // No title line: the details open right under their own row, which names it.
+  var lines = [];
+  var steps = upgradeStepper(e.state, pct, savesAsNew(e));
   if (steps) lines.push(mutedText(steps));
   // Who is driving: automation, with Take over; or you, with Let it run.
   if (e.manual && !upgradeIsHistory(e)) {
@@ -9579,8 +9528,8 @@ function upgradePanel(e, t, ready, asking, inPlace, ahead) {
     { type: "text", content: e.currentLabel || "?" },
     mutedText(displayPath(e.path))
   ]) : compareSide("Goes to", [
-    { type: "text", content: e.saved ? e.saved.collectionName : (jobDestination(e) || "Your library").replace(/^→ /, "") },
-    mutedText(e.saved ? displayPath(e.saved.path) : "Artist › Album › Title, tagged as the song you asked for")
+    { type: "text", content: (jobDestination(e) || "Your library").replace(/^→ /, "") },
+    mutedText("Artist › Album › Title, tagged as the song you asked for")
   ]);
   var theirs = null;
   var buttons = [];
@@ -9595,9 +9544,6 @@ function upgradePanel(e, t, ready, asking, inPlace, ahead) {
     ]);
   } else if (e.state === "saving") {
     theirs = compareSide("Downloaded", [{ type: "text", content: "Saving to your library…" }]);
-  } else if (e.state === "saved") {
-    lines.push({ type: "text", content: "In your library." });
-    buttons.push(actionButton("Play", "job-play", "accent", { data: { itemId: key } }));
   } else if (e.state === "ready" && e.file && savesAsNew(e)) {
     var dl = [{ type: "text", content: "Downloaded: " + qualityLabel(e.file.quality) + (e.file.size ? " · " + formatBytes(e.file.size) : "") },
       mutedText(displayPath(e.file.path))];
@@ -9665,9 +9611,9 @@ function upgradePanel(e, t, ready, asking, inPlace, ahead) {
   } else if (!isGetJob(e) && !upgradeIsHistory(e) && e.state !== "ready" && e.state !== "searching" && e.state !== "saving") {
     buttons.push(actionButton("Search Soulseek myself…", "upgrade-choose", "secondary", { data: { itemId: key } }));
   }
-  // Cancel goes last, apart from the ways forward; Close only folds the panel.
+  // Cancel goes last, apart from the ways forward; Hide details only folds them.
   if (upgradeIsBusy(e)) buttons.push(cancel);
-  buttons.push(actionButton("Close", "upgrade-panel-close", "secondary"));
+  buttons.push(actionButton("Hide details", "upgrade-panel-close", "secondary"));
   lines.push(buttonRow(buttons));
   // Every file the search found for it, so the user can take a different
   // source than the automatic pick — a sharer with a shorter queue, a smaller
@@ -9685,10 +9631,8 @@ function upgradePanel(e, t, ready, asking, inPlace, ahead) {
       actions: [{ id: "upgrade-use-source", label: "Use this", icon: "⬇" }]
     });
   }
-  // The title says where it stands, so a failed or ready entry doesn't read
-  // as "Upgrading".
-  var badge = upgradeBadge(e, t, ahead);
-  return { type: "section", title: badge ? badge.label : "Download", children: lines };
+  // Where it stands is the row's chip, just above.
+  return { type: "section", title: "Details", children: lines };
 }
 
 var SOURCE_COLUMNS = [
@@ -9733,9 +9677,7 @@ function upgradesTabCount(all) {
 
 function upgradesTab() {
   var inPlace = canReplaceInPlace();
-  // The setting that steers every upgrade, above them: an MP3 library left at
-  // the FLAC default otherwise read "Nothing better" everywhere with the why
-  // below the fold.
+  // Its settings (Look for, how far a download goes) are on the Settings tab.
   var children = [{
     type: "search-input",
     placeholder: "Download a song: Artist - Title",
@@ -9743,7 +9685,7 @@ function upgradesTab() {
     value: "",
     submitOnly: true,
     buttonLabel: "Download"
-  }, upgradeTargetRow()];
+  }];
   if (!Object.keys(upgrades).length) {
     children.push({ type: "text", className: "plugin-muted",
       content: "Nothing downloading. Right-click any song and choose Soulseek: Download, or type one above. Each download finds the best file, fetches it and puts it in your library — or, for a song you already have, offers to replace your copy. Take over any of them to choose the file yourself." });
@@ -9751,21 +9693,31 @@ function upgradesTab() {
   }
   var shown = panelUpgrade(upgrades, focusedUpgrade);
   var shownKey = shown ? jobKeyOf(shown) : null;
-  if (shown) {
-    var queue = upgradeSearchQueue(upgrades, upgradeSearchKey);
-    children.push(upgradePanel(shown, shown.active ? transferByKey(shown.active.key) : null,
-      readiness.state === "ready", !!replaceOffers[shownKey], inPlace, queue[shownKey]));
-  }
+  var queue = upgradeSearchQueue(upgrades, upgradeSearchKey);
+  // A download's details open in place, under its own row: the group's list
+  // is split there, the details sit between the halves, and the row's title
+  // (or Details) closes them again. The host's list has no expandable rows,
+  // and the details used to be a panel on top of the tab, away from the row.
   function list(group, rows) {
     // Selectable, so the actions reach many rows at once from the selection
     // bar (their handlers take every id) — and only a selectable list draws
-    // a row's hover actions.
-    return { type: "track-row-list", items: rows, selectable: true, showHeader: false,
-      actions: upgradeListActions(group, rows, inPlace) };
+    // a row's hover actions. A click on the title opens the details.
+    function part(items) {
+      return { type: "track-row-list", items: items, selectable: true, showHeader: false, openOnClick: "title",
+        actions: upgradeListActions(group, items, inPlace) };
+    }
+    var at = -1;
+    for (var i = 0; i < rows.length; i++) if (rows[i].id === shownKey) { at = i; break; }
+    if (at < 0) return [part(rows)];
+    var out = [part(rows.slice(0, at + 1)),
+      upgradePanel(shown, shown.active ? transferByKey(shown.active.key) : null,
+        readiness.state === "ready", !!replaceOffers[shownKey], inPlace, queue[shownKey])];
+    if (at + 1 < rows.length) out.push(part(rows.slice(at + 1)));
+    return out;
   }
-  var needs = upgradeRows("needs", shownKey);
-  var progress = upgradeRows("progress", shownKey);
-  var ended = upgradeRows("ended", shownKey);
+  var needs = upgradeRows("needs", shownKey, queue);
+  var progress = upgradeRows("progress", shownKey, queue);
+  var ended = upgradeRows("ended", shownKey, queue);
   if (needs.length) {
     var ready = readyUpgradeKeys();
     var bar = [];
@@ -9773,19 +9725,19 @@ function upgradesTab() {
     else if (ready.length && inPlace) bar.push({ label: "Replace all ready (" + ready.length + ")…", action: "upgrade-replace-all", variant: "accent", icon: "⇪" });
     children.push({ type: "toolbar", title: "Needs you", buttons: bar,
       status: needs.length + (ready.length ? " · " + ready.length + " ready" : "") + (replaceWalk ? " · replacing one at a time" : "") });
-    children.push(list("needs", needs));
+    children = children.concat(list("needs", needs));
   }
   if (progress.length) {
     var searching = progress.filter(function (r) { return upgrades[r.id] && upgrades[r.id].state === "searching"; }).length;
     children.push({ type: "toolbar", title: "In progress", buttons: [],
       status: progress.length + (searching > 1 ? " · searches run one at a time" : "") });
-    children.push(list("progress", progress));
+    children = children.concat(list("progress", progress));
   }
   if (ended.length) {
     children.push({ type: "toolbar", title: "Didn't work out", status: String(ended.length), buttons: [
       { label: "Search all again", action: "upgrade-retry-ended", icon: "↻" },
       { label: "Clear", action: "upgrade-clear-ended", icon: "✕" }] });
-    children.push(list("ended", ended));
+    children = children.concat(list("ended", ended));
   }
   if (!needs.length && !progress.length && !ended.length) children.push(mutedText("Nothing pending."));
   // Finished upgrades are of little use once done: one folded line, and the
@@ -9800,15 +9752,15 @@ function upgradesTab() {
         type: "track-row-list",
         items: history,
         showHeader: false,
-        actions: declaredActions([{ id: "job-play", label: "Play", icon: "▶" }, { id: "upgrade-remove", label: "Remove", icon: "✕" }], history)
+        actions: declaredActions([{ id: "upgrade-remove", label: "Remove", icon: "✕" }], history)
       });
     }
   }
   return { type: "layout", direction: "vertical", children: children };
 }
 
-// The one setting that decides what an upgrade looks for, on the tab it
-// steers rather than three tabs away in Settings.
+// The one setting that decides what a download looks for — first in
+// Settings → Downloads.
 function upgradeTargetRow() {
   var t = upgradeTargetOf(settings.upgradeTarget);
   return { type: "settings-row", label: "Look for",
@@ -9831,10 +9783,7 @@ function upgradeTargetRow() {
 // several remain. Without this, Upgrade on the playing song quietly became a
 // plain search, and its download could never be replaced into the library.
 async function libraryRowForTarget(t) {
-  var row = null;
-  if (t.trackId != null && api.library && typeof api.library.getTrackById === "function") {
-    try { row = await api.library.getTrackById(t.trackId); } catch (e) { console.error("slskd: could not read library track " + t.trackId + ":", e); }
-  }
+  var row = await libraryTrackById(t.trackId);
   if (row) return row;
   return libraryRowByName(t.title, t.artistName, t.durationSecs);
 }
@@ -9869,7 +9818,7 @@ async function libraryRowByName(title, artist, durationSecs) {
     var r = hits[i];
     if (normalizeText(r.title) !== wantTitle) continue;
     if (wantArtist && normalizeText(r.artist_name || "") !== wantArtist) continue;
-    var local = r.path && String(r.path).indexOf("file://") === 0;
+    var local = isLocalRow(r);
     var drift = durationSecs && r.duration_secs ? Math.abs(r.duration_secs - durationSecs) : 0;
     var score = (local ? 0 : 1e6) + drift;
     if (score < bestScore) { best = r; bestScore = score; }
@@ -9921,36 +9870,6 @@ async function startUpgrade(target) {
   // hand is a different version, not a better copy of this one.
   if (row.duration_secs != null && row.duration_secs > 0) extra.knownDurationSecs = row.duration_secs;
   await runSearch(searchQueryForTarget({ kind: "track", title: row.title, artistName: row.artist_name }), extra);
-}
-
-// "Download…" on a track — the plugin's one track action. Opens the Search tab
-// in download mode: only files that are this song, the best first, tagged as
-// the song when fetched and offered to the library when they land. A song the
-// library already has as a local file is downloaded the same way; the choice
-// to replace that copy or keep both comes at "Add to library…" (`addToLibrary`
-// → the host's compare dialog), once the user can see what arrived.
-async function startDownload(target) {
-  var t = target || {};
-  if (!t.title) return plainSearch(t, null);
-  api.ui.navigateToView(VIEW_ID);
-  var row = await libraryRowForTarget(t);
-  var haveLocal = !!(row && row.path && String(row.path).indexOf("file://") === 0);
-  var title = t.title;
-  var artist = t.artistName || null;
-  var album = t.albumTitle || null;
-  var duration = t.durationSecs != null ? t.durationSecs : (row && row.duration_secs) || null;
-  var mode = {
-    kind: "download",
-    title: title,
-    artist: artist,
-    album: album,
-    want: downloadWant(title, artist),
-    haveLocal: haveLocal,
-    showAll: false
-  };
-  var extra = { mode: mode };
-  if (duration) extra.knownDurationSecs = duration;
-  await runSearch(fallbackQuery(title, artist), extra);
 }
 
 // The album's library rows. An album target normally carries its id; one built
@@ -10405,8 +10324,7 @@ function saveSetting(key, value) {
   saveTimer = setTimeout(function () {
     api.storage.set(key, value).catch(function (e) { console.error("slskd: couldn't save " + key + ":", e); });
     if (key === "url" || key === "apiKey" || key === "insecure") {
-      downloadsDir = null;
-      incompleteDir = null;
+      forgetDownloadsDir();
       refreshReadiness().catch(function (e) { console.error("slskd probe failed:", e); });
     } else {
       tier = detectTier(conn().url, conn().tierOverride);
@@ -10430,7 +10348,7 @@ function schedulePoll(fast) {
           var p = transferPhase(t.state);
           return p === "downloading" || p === "queued" || p === "starting" || p === "requested";
         });
-        schedulePoll(active || upgradesNeedPoll() || activeTab === "transfers" || activeTab === "upgrades");
+        schedulePoll(active || upgradesNeedPoll() || activeTab === "upgrades");
       });
   }, delay);
 }
@@ -10482,6 +10400,12 @@ async function loadServerState() {
     if (sh && typeof sh === "object") sharers = sh;
     var up = await api.storage.get(stateKey("upgrades"));
     if (up && typeof up === "object") upgrades = up;
+    // Saved jobs stayed in the list before 0.29; a song in the library is done.
+    var savedLeft = Object.keys(upgrades).filter(function (k) { return upgrades[k] && upgrades[k].state === "saved"; });
+    if (savedLeft.length) {
+      savedLeft.forEach(function (k) { delete upgrades[k]; });
+      await api.storage.set(stateKey("upgrades"), upgrades);
+    }
     var hist = await api.storage.get(stateKey("resolveHistory"));
     if (Array.isArray(hist)) resolveHistory = hist.slice(0, RESOLVE_HISTORY_MAX);
     var used = await api.storage.get(stateKey("fallbackLastUsedAt"));
@@ -10595,8 +10519,7 @@ async function switchServer(on) {
   replaceOffers = {};
   focusedUpgrade = null;
   lastReadyUpgrade = null;
-  downloadsDir = null;
-  incompleteDir = null;
+  forgetDownloadsDir();
   lastServerState = null;
   signinWhy = null;
   slskdShared = null;
@@ -10718,14 +10641,12 @@ return {
   _hasFlag: hasFlag,
   _qualityTier: qualityTier,
   _formatTile: formatTile,
-  _transferGroup: transferGroup,
   _transferRowProgress: transferRowProgress,
   _upgradeBadge: upgradeBadge,
   _upgradeRowProgress: upgradeRowProgress,
   _queueUpgrades: queueUpgrades,
   _batchUpgradeNote: batchUpgradeNote,
   _replaceAllReady: replaceAllReady,
-  _transfersSummary: transfersSummary,
   _plainTransferError: plainTransferError,
   _waitedFor: waitedFor,
   _withRecentSearch: withRecentSearch,
@@ -10736,14 +10657,18 @@ return {
   _resolveStats: resolveStats,
   _withResolve: withResolve,
   _historyEntry: historyEntry,
-  _historyLine: historyLine,
   _upgradeStepper: upgradeStepper,
+  _optionsDirectories: optionsDirectories,
+  _keptStatusOf: keptStatusOf,
+  _fallbackSummaryText: fallbackSummaryText,
+  _songSnapshot: songSnapshot,
+  _isLocalRow: isLocalRow,
+  _isActiveFile: isActiveFile,
   _statusChecklist: statusChecklist,
   _fileTile: fileTile,
   _folderTile: folderTile,
   _tileTier: tileTier,
   _tileDetail: tileDetail,
-  _transferTile: transferTile,
   _availabilityTier: availabilityTier,
   _rankResults: rankResults,
   _downloadModeOf: downloadModeOf,
@@ -10775,6 +10700,7 @@ return {
   _hostToolReady: hostToolReady,
   _defaultDownloadsDir: defaultDownloadsDir,
   _downloadsFolderText: downloadsFolderText,
+  _loadDownloadsDir: loadDownloadsDir,
   _canInstallHere: canInstallHere,
   _portLooksFree: portLooksFree,
   _pickFreePort: pickFreePort,
@@ -10824,7 +10750,6 @@ return {
   _candidateId: candidateId,
   _transferProgress: transferProgress,
   _transferSubtitle: transferSubtitle,
-  _transferRowActions: transferRowActions,
   _rowIds: rowIds,
   _KEY_SEP: KEY_SEP,
   _fileUrlForPlayback: fileUrlForPlayback,
@@ -10861,16 +10786,14 @@ return {
   _noteSharer: noteSharer,
   _ledgerTotals: ledgerTotals,
   _refreshTransfers: refreshTransfers,
-  _keptKeys: keptKeys,
+  _songKeys: songKeys,
   _transferKeys: transferKeys,
-  _retryableKey: retryableKey,
   _cancellablePhase: cancellablePhase,
-  _historyRowId: historyRowId,
   _declaredActions: declaredActions,
   _rowTransferStatus: rowTransferStatus,
-  _liveTransferCount: liveTransferCount,
   _ownedInFolder: ownedInFolder,
-  _historyRows: historyRows,
+  _fallbackSongRows: fallbackSongRows,
+  _keptStatus: function () { return keptStatus; },
   _fallbackStatusNode: fallbackStatusNode,
   _sidebarBadge: sidebarBadge,
   _startResolveRecord: startResolveRecord,
@@ -10880,10 +10803,6 @@ return {
   _ownedTrackFor: ownedTrackFor,
   _missingFiles: missingFiles,
   _startUpgrade: startUpgrade,
-  _startDownload: startDownload,
-  _songMatches: songMatches,
-  _isSongMatch: isSongMatch,
-  _downloadWant: downloadWant,
   _trackedQuality: trackedQuality,
   _finishedFileRefusal: finishedFileRefusal,
   _queueUpgrade: queueUpgrade,
@@ -10919,6 +10838,7 @@ return {
   _enforceFallbackLimits: enforceFallbackLimits,
   _fallbackIndex: function () { return fallback; },
   _upgradeSourceRows: upgradeSourceRows,
+  _adoptFileNames: adoptFileNames,
   _parseSourceId: parseSourceId,
   _upgradesTab: upgradesTab,
   _upgradeGroup: upgradeGroup,

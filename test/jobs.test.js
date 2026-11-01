@@ -136,18 +136,21 @@ test("integration: Download on a song you don't have runs search → download �
     assert.deepEqual(calls.plans[0], { title: "Lucky", artist: "Radiohead", album: "OK Computer" });
     await waitFor(() => job(p).state === "downloading", 8000, "the download to start");
     assert.equal(calls.batches[0].username, "a", "the best sharer first");
-    await pollUntil(p, () => job(p).state === "saved", "saved");
+    await pollUntil(p, () => !job(p), "saved, and gone from the list");
     assert.equal(calls.imports.length, 1);
     assert.equal(calls.imports[0].title, "Lucky");
     assert.equal(calls.imports[0].artist, "Radiohead");
     assert.equal(calls.imports[0].asCopy, false);
     assert.match(calls.imports[0].path, /11 - Lucky\.flac$/);
-    assert.equal(job(p).saved.collectionName, "Music");
+    assert.deepEqual(p._upgrades(), {}, "a song in the library leaves the Downloads list");
+    assert.deepEqual(h.store.upgrades, {}, "for good");
     const done = h.calls.notices[h.calls.notices.length - 1];
     assert.match(done.message, /“Lucky” is in your library/);
     assert.equal(done.options.action.id, "job-play-notice");
-    h.actions["job-play-notice"]();
+    await h.actions["job-play-notice"]();
+    await waitFor(() => h.calls.played.length === 1, 2000, "Play");
     assert.match(h.calls.played[0].path, /^file:\/\/.*11 Lucky\.flac$/, "Play plays the library copy");
+    assert.deepEqual([h.calls.played[0].title, h.calls.played[0].artist_name], ["Lucky", "Radiohead"], "under the song's names");
   } finally {
     await p.deactivate();
   }
@@ -167,7 +170,7 @@ test("integration: a song already in the library turns into a replace, and Save 
     assert.ok(labels.includes("Save as copy"), labels.join(", "));
     assert.ok(labels.some((l) => /replace/i.test(l)), labels.join(", "));
     h.actions["job-save-copy"]({ itemId: "g1" });
-    await waitFor(() => job(p).state === "saved", 2000, "saved as a copy");
+    await waitFor(() => !job(p), 2000, "saved as a copy, and gone from the list");
     assert.equal(calls.imports[1].asCopy, true);
   } finally {
     await p.deactivate();
@@ -194,7 +197,7 @@ test("integration: Download and let me choose stops at the files found; Use this
     await pollUntil(p, () => job(p).state === "ready", "downloaded");
     assert.equal(calls.imports.length, 0, "a job you took over isn't saved for you");
     h.actions["job-save"]({ itemId: "g1" });
-    await waitFor(() => job(p).state === "saved", 2000, "saved");
+    await waitFor(() => !job(p), 2000, "saved, and gone from the list");
   } finally {
     await p.deactivate();
   }
@@ -228,7 +231,7 @@ test("integration: a download that lands inside a collection is rescanned there,
   try {
     await h.actions["ctx:slskd-download"](LUCKY_TARGET);
     await waitFor(() => job(p).state === "downloading", 8000, "the download to start");
-    await pollUntil(p, () => job(p).state === "saved", "saved");
+    await pollUntil(p, () => !job(p), "saved, and gone from the list");
     assert.equal(calls.imports.length, 0, "no copy");
     assert.deepEqual(h.calls.resync, [1]);
     assert.ok(!h.calls.notifications.some((m) => /^Scanning/.test(m)), "the job's own toast, not the generic scan notice");
@@ -251,4 +254,121 @@ test("integration: Download on a song you have as a file is an upgrade job, keye
   } finally {
     await p.deactivate();
   }
+});
+
+// ---- Search's Download is a job too ----------------------------------------
+// A file picked on the Search tab used to be a bare slskd transfer, followed
+// (and added to the library by hand) on a Transfers tab. Now it is a job that
+// holds the picked file: no search of its own, the same check and save.
+
+const LUCKY_KEY = "a\u0000m\\Radiohead\\OK Computer\\11 - Lucky.flac";
+
+async function searchFor(h, query) {
+  await h.actions["search"]({ query });
+  await waitFor(() => findNodes(lastView(h), (n) => n.type === "track-row-list" && (n.items || []).length).length, 8000, "results");
+}
+
+test("integration: a file downloaded from Search is a job — no search of its own, its tags name it, and it ends in the library", async () => {
+  const p = loadPlugin();
+  const { h, calls } = jobHost({ responses: LUCKY });
+  // The filename gives no artist ("OK Computer" folder, "11 - Lucky" stem);
+  // the tags do.
+  h.api.system.readAudioTags = async (paths) => paths.map(() => ({ title: "Lucky", artist: "Radiohead", album_artist: null,
+    album: "OK Computer", track_number: 11, disc_number: null, year: null, genre: null, duration_secs: 264 }));
+  await p.activate(h.api);
+  try {
+    await searchFor(h, "lucky");
+    const searches = h.calls.fetched.filter((u) => /\/api\/v0\/searches$/.test(u)).length;
+    h.actions["download-file"]({ itemId: "f:" + LUCKY_KEY });
+    await waitFor(() => job(p) && job(p).state === "downloading", 4000, "the job to download the picked file");
+    assert.equal(job(p).kind, "get");
+    assert.equal(job(p).active.username, "a");
+    assert.equal(job(p).from, "file", "named from the file until its tags are read");
+    assert.equal(job(p).artist, null);
+    assert.equal(calls.batches.length, 1);
+    assert.equal(findNodes(lastView(h), (n) => n.type === "tabs")[0].activeTab, "search", "the view stays on the results");
+
+    await pollUntil(p, () => !job(p), "saved, and gone from the list");
+    assert.equal(h.calls.fetched.filter((u) => /\/api\/v0\/searches$/.test(u)).length, searches, "the job never searched");
+    assert.equal(calls.imports.length, 1);
+    assert.equal(calls.imports[0].title, "Lucky");
+    assert.equal(calls.imports[0].artist, "Radiohead", "the tags named it");
+    assert.equal(calls.imports[0].album, "OK Computer");
+    assert.equal(calls.imports[0].trackNumber, 11);
+    assert.ok(!h.calls.notifications.some((m) => /^Finished downloading/.test(m)), "the job speaks for its file: " + h.calls.notifications.join(" | "));
+
+    // The search row leads to the job.
+    h.actions["show-job"]({ itemId: "f:" + LUCKY_KEY });
+    assert.equal(findNodes(lastView(h), (n) => n.type === "tabs")[0].activeTab, "upgrades");
+  } finally {
+    await p.deactivate();
+  }
+});
+
+test("integration: a file slskd refuses fails its job with the reason, and says so once", async () => {
+  const p = loadPlugin();
+  const { h } = jobHost({ responses: LUCKY });
+  const inner = h.api.network.fetch;
+  h.api.network.fetch = async (url, init) => {
+    if (url.includes("/api/v0/transfers/downloads/batches")) {
+      const b = JSON.parse(init.body);
+      return { status: 200, text: async () => JSON.stringify({ failures: b.files.map((f) => ({ filename: f.filename, message: "already queued" })) }) };
+    }
+    return inner(url, init);
+  };
+  await p.activate(h.api);
+  try {
+    await searchFor(h, "lucky");
+    await h.actions["download-file"]({ itemId: "f:" + LUCKY_KEY });
+    assert.equal(job(p).state, "failed");
+    assert.match(job(p).message, /a refused the download/);
+    assert.equal(job(p).triedWhy.a, "refused — already queued");
+    assert.equal(h.calls.notices.length, 1);
+    assert.match(h.calls.notices[0].message, /slskd refused the download of “11 - Lucky\.flac”/);
+    assert.equal(h.calls.notices[0].options.action.id, "open-upgrades");
+    const row = p._upgradeSourceRows(job(p))[0];
+    assert.match(row.subtitle, /tried: refused — already queued/, "the job's file list says why");
+  } finally {
+    await p.deactivate();
+  }
+});
+
+test("adoptFileNames: tags replace the filename's guess once; Fill keeps its album", () => {
+  const e = { from: "file", title: "Rammstein - Mutter - 05 - Feuer frei!", artist: null, album: "x", trackNumber: null };
+  assert.equal(plugin._adoptFileNames(e, { title: "Feuer frei!", artist: "Rammstein", album: "Mutter", trackNumber: "5/11" }), true);
+  assert.deepEqual([e.title, e.artist, e.album, e.trackNumber, e.from], ["Feuer frei!", "Rammstein", "Mutter", 5, null]);
+  assert.equal(plugin._adoptFileNames(e, { title: "Other" }), false, "once only");
+  assert.equal(e.title, "Feuer frei!");
+  const fill = { from: "fill", title: "03 Track", artist: "Radiohead", album: "OK Computer" };
+  plugin._adoptFileNames(fill, { title: "Subterranean Homesick Alien", album: "OKC (Remaster)" });
+  assert.deepEqual([fill.title, fill.album], ["Subterranean Homesick Alien", "OK Computer"]);
+  const asked = { from: null, title: "Karma Police" };
+  assert.equal(plugin._adoptFileNames(asked, { title: "karma police (remaster)" }), false, "a song asked for keeps its name");
+});
+
+test("saved jobs left from an older version are cleared at load; the rest stay", async () => {
+  const p = loadPlugin();
+  const { h } = jobHost({ responses: [], store: { upgrades: {
+    g1: { key: "g1", kind: "get", title: "Done", state: "saved", saved: { path: "/m/a.flac" } },
+    g2: { key: "g2", kind: "get", title: "Waiting", state: "ready", file: { path: "/m/b.flac" } }
+  } } });
+  await p.activate(h.api);
+  try {
+    assert.deepEqual(Object.keys(p._upgrades()), ["g2"]);
+    assert.deepEqual(Object.keys(h.store.upgrades), ["g2"]);
+  } finally {
+    await p.deactivate();
+  }
+});
+
+test("isLocalRow / isActiveFile / songSnapshot: the small pure helpers jobs share", () => {
+  assert.equal(plugin._isLocalRow({ path: "file:///m/a.flac" }), true);
+  assert.equal(plugin._isLocalRow({ path: "tidal://123" }), false);
+  assert.equal(plugin._isLocalRow(null), false);
+  const c = { username: "u", filename: "m\a.flac" };
+  assert.equal(plugin._isActiveFile({ active: { username: "u", filename: "m\a.flac" } }, c), true);
+  assert.equal(plugin._isActiveFile({ active: { username: "v", filename: "m\a.flac" } }, c), false);
+  assert.equal(plugin._isActiveFile({ active: null }, c), false);
+  assert.deepEqual(plugin._songSnapshot({ trackId: 9, path: "/m/a.flac", collectionName: "Music" }, { title: "Lucky", artist: "Radiohead", trackNumber: 11 }),
+    { trackId: 9, path: "/m/a.flac", title: "Lucky", artist: "Radiohead", album: null, trackNumber: 11, durationSecs: null });
 });

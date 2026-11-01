@@ -61,9 +61,3 @@ test("folderTile: the main format by bytes, MIX for a real lossless/lossy split"
   assert.deepEqual(texts(plugin._folderTile([mp3(1), mp3(2)])), ["MP3", "320"]);
   assert.deepEqual(texts(plugin._folderTile([])), ["?"]);
 });
-
-test("transferTile: the advertised quality kept on the tracked record, else the container alone", () => {
-  const t = { filename: "m\\a\\01 - x.flac" };
-  assert.deepEqual(texts(plugin._transferTile(t, { quality: { bitDepth: 24, sampleRate: 96000 } })), ["FLAC", "24/96"]);
-  assert.deepEqual(texts(plugin._transferTile(t, null)), ["FLAC"]);
-});

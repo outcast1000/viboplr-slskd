@@ -98,7 +98,8 @@ test("matchLabel and fallbackTotals read the way the tab shows them", () => {
   assert.equal(p._matchLabel({ score: 0.5, penalty: 0.3 }), "50% · variant");
   const totals = p._fallbackTotals({ a: { state: "kept", size: 10 }, b: { state: "pending", size: 99 }, c: { state: "kept", size: 5 } });
   assert.deepEqual(totals, { count: 2, bytes: 15 });
-  assert.deepEqual(p._keptKeys({ itemId: "k:x|y" }), ["x|y"]);
+  assert.deepEqual(p._songKeys({ itemId: "s:x|y" }), ["x|y"]);
+  assert.deepEqual(p._songKeys({ itemId: "k:x|y" }), ["x|y"], "the older kept-row id still reads");
 });
 
 // --- the flow ------------------------------------------------------------------
@@ -320,7 +321,7 @@ test("a search slskd is still running at the fallback's deadline is stopped and 
   }
 });
 
-test("the Fallback tab holds the whole feature: numbers, the last resolve (trace folded), recent resolves, kept files", async () => {
+test("the Fallback tab is one list: a row per song with its outcome and its kept file; the last search's steps are folded", async () => {
   const plugin = loadPlugin();
   const { h } = fallbackHost();
   await plugin.activate(h.api);
@@ -335,35 +336,137 @@ test("the Fallback tab holds the whole feature: numbers, the last resolve (trace
     };
 
     h.actions["main-tab"]({ tabId: "fallback" });
+    // The kept file is checked (still there? in the library?) after the first draw.
+    for (let i = 0; i < 100 && !plugin._keptStatus()[Object.keys(h.store.fallback)[0]]; i++) await new Promise((r) => setTimeout(r, 10));
     let fb = nodes(lastView());
     let texts = fb.filter((n) => n.type === "text").map((n) => n.content);
-    assert.ok(texts.some((t) => /^Picked: 03 - Karma Police\.mp3 {2}— {2}played$/.test(t)), "the picked file and what became of it: " + texts.join(" | "));
-    assert.ok(!texts.some((t) => t.startsWith("✓ ") && t.includes("03 - Karma Police.mp3")), "candidates are folded behind Show trace");
-    const stats = fb.filter((n) => n.type === "stats-grid")[0];
-    assert.ok(stats, "the numbers");
-    assert.equal(stats.items[0].value, "1 of 1", "played 1 of 1");
+    assert.ok(texts.some((t) => /^Last used just now\. Played 1 of 1 · median start .+ · 1 file kept \(.+\)\./.test(t)), "one status line with the numbers: " + texts.join(" | "));
+    assert.equal(fb.filter((n) => n.type === "stats-grid").length, 0, "no separate number grid");
     assert.equal(h.store.resolveHistory.length, 1, "the history is kept across restarts");
-    assert.ok(texts.some((t) => /^Last used just now\./.test(t)), "the status line reads the history: " + texts.join(" | "));
 
-    // Recent resolves are rows (with the track menu), then the kept files.
     const lists = fb.filter((n) => n.type === "track-row-list");
-    assert.equal(lists.length, 2);
-    const recent = lists[0].items[0];
-    assert.equal(recent.title, "Karma Police");
-    assert.equal(recent.badge.label, "Played");
-    assert.deepEqual(recent.actions, [], "a song that played offers no search");
-    assert.ok(fb.some((n) => n.type === "toolbar" && n.title === "Kept files"));
-    assert.deepEqual(lists[1].actions.map((a) => a.id), ["play-kept", "import-kept", "delete-kept"]);
+    assert.equal(lists.length, 1, "one list, not Recent + Kept files");
+    assert.equal(lists[0].items.length, 1, "the song once, its outcome and its file on one row");
+    const row = lists[0].items[0];
+    assert.equal(row.title, "Karma Police");
+    assert.equal(row.badge.label, "Played");
+    assert.match(row.subtitle, /in your library/, "slskd's folder sits inside the Music collection here: " + row.subtitle);
+    assert.deepEqual(row.actions, ["play-kept", "delete-kept"], "in the library already: nothing to move");
+    assert.ok(!fb.some((n) => n.type === "toolbar" && (n.title === "Kept files" || n.title === "Recent" || n.title === "Last resolve")));
 
+    texts = fb.filter((n) => n.type === "text").map((n) => n.content);
+    assert.ok(texts.some((t) => /^Searched for “radiohead karma police”/.test(t)), "the last search in one line");
+    assert.ok(!texts.some((t) => t.startsWith("✓ ") && t.includes("03 - Karma Police.mp3")), "its steps are folded");
     h.actions["fallback-trace-toggle"]();
     texts = nodes(lastView()).filter((n) => n.type === "text").map((n) => n.content);
-    assert.ok(texts.some((t) => t.startsWith("✓ ") && t.includes("03 - Karma Police.mp3")), "the played candidate is marked in the trace");
-
-    h.actions["main-tab"]({ tabId: "transfers" });
-    const dl = nodes(lastView());
-    assert.ok(!dl.some((n) => n.type === "toolbar" && n.title === "Kept files"), "not on Downloads any more");
+    assert.ok(texts.some((t) => /^Picked: 03 - Karma Police\.mp3 {2}— {2}played$/.test(t)), "the picked file: " + texts.join(" | "));
+    assert.ok(texts.some((t) => t.startsWith("✓ ") && t.includes("03 - Karma Police.mp3")), "the played candidate is marked in the steps");
   } finally {
     plugin.deactivate();
+  }
+});
+
+// Outside the library: Move to library copies it in and deletes the kept copy.
+function moveHost(opts) {
+  const made = fallbackHost(Object.assign({ collections: [{ id: 1, name: "Music", path: "/Users/me/Library" }] }, opts || {}));
+  const imports = [];
+  made.h.api.library.findTrack = async () => (opts && opts.inLibrary ? [{ id: 7, path: "file:///Users/me/Library/RH/Karma Police.mp3" }] : []);
+  made.h.api.library.importFile = async (req) => {
+    imports.push(req);
+    return { status: "imported", trackId: 99, path: "/Users/me/Library/Radiohead/03 Karma Police.mp3", collectionId: 1, collectionName: "Music", placement: "artist" };
+  };
+  return Object.assign(made, { imports });
+}
+
+async function fallbackRow(plugin, h) {
+  for (let i = 0; i < 200 && !plugin._keptStatus()[Object.keys(h.store.fallback)[0]]; i++) await new Promise((r) => setTimeout(r, 10));
+  h.actions["main-tab"]({ tabId: "fallback" });
+  const view = h.calls.views[h.calls.views.length - 1].data;
+  const find = (n) => (n.type === "track-row-list" ? n : (n.children || []).map(find).find(Boolean));
+  return find(view).items[0];
+}
+
+test("Move to library: a kept file the library lacks is copied in through Viboplr, then deleted from slskd's folder", async () => {
+  const plugin = loadPlugin();
+  const { h, calls, imports } = moveHost();
+  await plugin.activate(h.api);
+  try {
+    await h.resolvers["meta:" + plugin._FALLBACK_ID]("Karma Police", "Radiohead", null, 264, {});
+    h.actions["main-tab"]({ tabId: "fallback" });
+    const row = await fallbackRow(plugin, h);
+    assert.deepEqual(row.actions, ["play-kept", "move-kept", "delete-kept"]);
+    assert.match(row.subtitle, /kept/);
+
+    await h.actions["move-kept"]({ itemId: row.id });
+    assert.equal(imports.length, 1);
+    assert.equal(imports[0].title, "Karma Police", "tagged as the song that was asked for");
+    assert.equal(imports[0].artist, "Radiohead");
+    assert.match(imports[0].path, /03 - Karma Police\.mp3$/);
+    assert.equal(calls.deletes.length, 1, "the kept copy is deleted: a move");
+    assert.deepEqual(h.store.fallback, {});
+    h.actions["main-tab"]({ tabId: "fallback" });
+    const after = JSON.stringify(h.calls.views[h.calls.views.length - 1].data);
+    assert.ok(!/"type":"track-row-list"/.test(after), "the moved song's row is gone from the list");
+    assert.equal(h.store.resolveHistory[0].moved, true, "its history entry stays, flagged");
+    assert.match(after, /Played 1 of 1/, "and still counts in the numbers");
+    const n = h.calls.notices[h.calls.notices.length - 1];
+    assert.match(n.message, /“Karma Police” moved to your library \(Music\)/);
+    assert.equal(n.options.action.id, "kept-moved-play");
+    // Play plays the library copy under the song's names, not a bare file
+    // titled by its filename ("? — 03 Karma Police").
+    h.api.library.getTrackById = async (id) => (id === 99 ? { id: 99, title: "Karma Police", artist_name: "Radiohead",
+      album_title: "OK Computer", track_number: 6, duration_secs: 264 } : null);
+    await h.actions["kept-moved-play"]();
+    const played = h.calls.played[h.calls.played.length - 1];
+    assert.equal(played.path, "file:///Users/me/Library/Radiohead/03 Karma Police.mp3");
+    assert.deepEqual([played.title, played.artist_name, played.album_title, played.track_number, played.duration_secs],
+      ["Karma Police", "Radiohead", "OK Computer", 6, 264]);
+
+    // A row that can't be read back still plays with the names it was saved under.
+    h.api.library.getTrackById = async () => null;
+    await h.actions["kept-moved-play"]();
+    const fallbackPlay = h.calls.played[h.calls.played.length - 1];
+    assert.deepEqual([fallbackPlay.title, fallbackPlay.artist_name], ["Karma Police", "Radiohead"]);
+  } finally {
+    plugin.deactivate();
+  }
+});
+
+test("Move to library is not offered for a song the library has, nor for a kept file that is gone", async () => {
+  const plugin = loadPlugin();
+  const have = moveHost({ inLibrary: true });
+  await plugin.activate(have.h.api);
+  try {
+    await have.h.resolvers["meta:" + plugin._FALLBACK_ID]("Karma Police", "Radiohead", null, 264, {});
+    have.h.actions["main-tab"]({ tabId: "fallback" });
+    const row = await fallbackRow(plugin, have.h);
+    assert.deepEqual(row.actions, ["play-kept", "delete-kept"]);
+    assert.match(row.subtitle, /in your library/);
+    await have.h.actions["move-kept"]({ itemId: row.id });
+    assert.equal(have.imports.length, 0, "a move asked for anyway does nothing");
+  } finally {
+    plugin.deactivate();
+  }
+
+  const plugin2 = loadPlugin();
+  const gone = moveHost();
+  await plugin2.activate(gone.h.api);
+  try {
+    await gone.h.resolvers["meta:" + plugin2._FALLBACK_ID]("Karma Police", "Radiohead", null, 264, {});
+    // Deleted by hand since: slskd's folder no longer lists it.
+    const inner = gone.h.api.network.fetch;
+    gone.h.api.network.fetch = async (url, init) => {
+      if (url.includes("/api/v0/files/downloads/directories/") && (!init || !init.method || init.method === "GET")) {
+        return { status: 200, text: async () => JSON.stringify({ files: [], directories: [] }) };
+      }
+      return inner(url, init);
+    };
+    gone.h.actions["main-tab"]({ tabId: "fallback" });
+    const row = await fallbackRow(plugin2, gone.h);
+    assert.match(row.subtitle, /the kept file is gone/);
+    assert.deepEqual(row.actions, ["delete-kept"], "no Play, no Move — only forgetting it");
+  } finally {
+    plugin2.deactivate();
   }
 });
 
@@ -986,8 +1089,8 @@ test("integration: an age limit deletes a stale kept file through slskd; off by 
     assert.equal(calls.deletes.length, 1, "the stale file is deleted");
     assert.deepEqual(plugin._fallbackIndex(), {});
     assert.ok(!h.calls.notifications.some((m) => /Deleted/.test(m)), "unattended cleanup raises no toast");
-    h.actions["main-tab"]({ tabId: "fallback" });
-    assert.match(JSON.stringify(h.calls.views[h.calls.views.length - 1].data), /Last cleanup deleted 1 file/);
+    h.actions["main-tab"]({ tabId: "settings" });
+    assert.match(JSON.stringify(h.calls.views[h.calls.views.length - 1].data), /Last cleanup deleted 1 file/, "under the setting, in Settings → Playback fallback");
   } finally {
     plugin.deactivate();
   }
@@ -1002,7 +1105,7 @@ test("integration: an age limit deletes a stale kept file through slskd; off by 
     second.h.actions["set-fallback-max-age"]({ value: "30" });
     await new Promise((r) => setTimeout(r, 50));
     assert.equal(Object.keys(plugin2._fallbackIndex()).length, 1, "a refused delete keeps the file and its record");
-    second.h.actions["main-tab"]({ tabId: "fallback" });
+    second.h.actions["main-tab"]({ tabId: "settings" });
     assert.match(JSON.stringify(second.h.calls.views[second.h.calls.views.length - 1].data), /Last cleanup stopped: .*remote_file_management/);
   } finally {
     plugin2.deactivate();

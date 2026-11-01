@@ -5,8 +5,8 @@ const { fakeHost } = require("./harness/host");
 
 // --- the view layout from the 2026-10 UX review ------------------------------
 // One home per job: Search (recent searches, a results toolbar), Downloads
-// grouped by state, Upgrades with its own target, the whole playback fallback
-// on its tab, and Settings reduced to a status checklist + connection.
+// (every download a job, Search's included), the whole playback fallback on
+// its tab, and Settings reduced to a status checklist + connection.
 
 const plugin = loadPlugin();
 
@@ -23,18 +23,6 @@ function lastView(h) {
 }
 
 // --- pure helpers ---------------------------------------------------------
-
-test("transferGroup: problems first, then moving, waiting, finished, cancelled", () => {
-  const g = (state) => plugin._transferGroup({ state });
-  assert.equal(g("Completed, Errored"), "attention");
-  assert.equal(g("Completed, Rejected"), "attention");
-  assert.equal(g("InProgress"), "active");
-  assert.equal(g("Initializing"), "active");
-  assert.equal(g("Queued, Remotely"), "waiting");
-  assert.equal(g("Requested"), "waiting");
-  assert.equal(g("Completed, Succeeded"), "finished");
-  assert.equal(g("Completed, Cancelled"), "cancelled");
-});
 
 test("plainTransferError: slskd's text in a user's words, unknown text kept", () => {
   const p = plugin._plainTransferError;
@@ -55,16 +43,6 @@ test("waitedFor: minutes, hours, days — nothing under a minute or without a ti
   assert.equal(w("2026-10-06T11:59:40Z"), "");
   assert.equal(plugin._waitedFor({ requestedAt: "2026-10-06T11:50:00Z" }, now), "waiting 10 min", "requestedAt when not enqueued yet");
   assert.equal(plugin._waitedFor({}, now), "");
-});
-
-test("transfersSummary: counts, bytes, speed and where files land, in one line", () => {
-  const s = plugin._transfersSummary({
-    active: [{ bytesTransferred: 5e6, size: 10e6, averageSpeed: 1e6 }, { bytesTransferred: 1e6, size: 4e6, averageSpeed: 5e5 }],
-    waiting: [{}], attention: [], finished: [], cancelled: []
-  }, "Music");
-  assert.equal(s.done, 6e6);
-  assert.equal(s.total, 14e6);
-  assert.match(s.label, /^2 downloading · 1 waiting · .+ of .+ · ↓ .+ · lands in “Music”$/);
 });
 
 test("withRecentSearch: newest first, no case-duplicates, capped", () => {
@@ -91,7 +69,7 @@ test("resolveStats: played counts kept copies; the median is over fresh fetches 
   assert.deepEqual(plugin._resolveStats([]), { total: 0, started: 0, medianMs: null });
 });
 
-test("historyEntry / withResolve / historyLine: a small record per resolve, newest first, capped", () => {
+test("historyEntry / withResolve: a small record per resolve, newest first, capped", () => {
   const rec = { at: 1000, title: "Windowlicker", artist: "Aphex Twin", outcome: "played", totalMs: 14600, message: null,
     chosen: { username: "kaltwasser", filename: "m\\Aphex\\Windowlicker.mp3", extension: "mp3", bitRate: 320, qualityTier: 1 } };
   const e = plugin._historyEntry(rec);
@@ -100,9 +78,6 @@ test("historyEntry / withResolve / historyLine: a small record per resolve, newe
   const list = plugin._withResolve([{ n: 1 }, { n: 2 }], e, 2);
   assert.equal(list.length, 2);
   assert.equal(list[0], e);
-  assert.equal(plugin._historyLine(e, 1000 + 3 * 3600e3),
-    "✓ “Windowlicker” — Aphex Twin  ·  Played  ·  14.6 s  ·  MP3 320kbps from kaltwasser  ·  3 h ago");
-  assert.match(plugin._historyLine({ at: 0, title: "X", outcome: "no-match", ms: 20000, message: "nothing matched" }, 60000), /^✗ “X”  ·  Nothing matched  ·  20 s  ·  nothing matched  ·  1 min ago$/);
 });
 
 test("upgradeStepper: ✓ done, ● now, ○ to come; null off the road", () => {
@@ -138,57 +113,6 @@ test("statusChecklist: connected, sharing, reaching the library — the fix on t
 });
 
 // --- the views --------------------------------------------------------------
-
-function transfer(username, filename, state, extra) {
-  return Object.assign({ username, filename, state, size: 10e6, bytesTransferred: 0, id: username + filename }, extra || {});
-}
-
-function downloadsHost(files) {
-  const byUser = {};
-  for (const f of files) (byUser[f.username] = byUser[f.username] || []).push(f);
-  return fakeHost({ responses: {
-    "/api/v0/transfers/downloads": Object.keys(byUser).map((u) => ({ username: u, directories: [{ directory: "d", files: byUser[u] }] }))
-  } });
-}
-
-test("Downloads: grouped by state, problems first, with Retry all / Clear on the group bars", async () => {
-  const p = loadPlugin();
-  const h = downloadsHost([
-    transfer("a", "m\\A\\01 - Done.flac", "Completed, Succeeded"),
-    transfer("b", "m\\B\\02 - Waiting.flac", "Queued, Remotely", { placeInQueue: 37 }),
-    transfer("c", "m\\C\\03 - Moving.flac", "InProgress", { bytesTransferred: 5e6, averageSpeed: 1e6 }),
-    transfer("d", "m\\D\\04 - Broken.flac", "Completed, Rejected", { exception: "File not shared." })
-  ]);
-  await p.activate(h.api);
-  try {
-    await p._refreshTransfers();
-    h.actions["main-tab"]({ tabId: "transfers" });
-    const view = lastView(h);
-    const bars = findNodes(view, (n) => n.type === "toolbar").map((n) => n.title);
-    assert.deepEqual(bars, ["Needs attention", "Downloading", "Waiting", "Finished"]);
-    const lists = findNodes(view, (n) => n.type === "track-row-list");
-    assert.deepEqual(lists.map((l) => l.items.map((i) => i.title)), [["Broken"], ["Moving"], ["Waiting"], ["Done"]]);
-    assert.match(lists[0].items[0].subtitle, /^Failed — d no longer shares this file/);
-    assert.deepEqual(lists[0].items[0].actions, ["retry-transfer", "another-source", "remove-transfer"]);
-    assert.deepEqual(lists[2].items[0].actions, ["another-source", "cancel-transfer"], "a remote queue can be left");
-
-    const attention = findNodes(view, (n) => n.type === "toolbar" && n.title === "Needs attention")[0];
-    assert.equal(attention.buttons[0].label, "Retry all");
-    assert.deepEqual(attention.buttons[0].data.selectedIds, [lists[0].items[0].id]);
-    const finished = findNodes(view, (n) => n.type === "toolbar" && n.title === "Finished")[0];
-    assert.equal(finished.buttons[0].label, "Clear");
-
-    // "Remove" said nothing about the file; the label now does.
-    const removeLabel = lists[3].actions.filter((a) => a.id === "remove-transfer")[0];
-    assert.equal(removeLabel.label, "Clear from list");
-    assert.notEqual(removeLabel.icon, "🗑", "the bin is for Delete file");
-
-    const bar = findNodes(view, (n) => n.type === "progress-bar")[0];
-    assert.match(bar.label, /^1 downloading · 1 waiting/);
-  } finally {
-    p.deactivate();
-  }
-});
 
 test("Search: recent searches are remembered and offered under the box; the results bar replaces the second tab row", async () => {
   const p = loadPlugin();
@@ -230,7 +154,7 @@ test("Search: recent searches are remembered and offered under the box; the resu
   }
 });
 
-test("Settings: a status checklist, and the upgrade / fallback / library / sharing sections are gone", async () => {
+test("Settings: a status checklist, then Connection, Downloads (Look for first) and Playback fallback", async () => {
   const p = loadPlugin();
   const h = fakeHost({});
   await p.activate(h.api);
@@ -238,10 +162,21 @@ test("Settings: a status checklist, and the upgrade / fallback / library / shari
     h.actions["main-tab"]({ tabId: "settings" });
     const titles = findNodes(lastView(h), (n) => n.type === "section").map((n) => n.title);
     assert.equal(titles[0], "Status");
-    for (const gone of ["Upgrades", "Playback fallback", "Library", "Sharing"]) assert.ok(!titles.includes(gone), gone + " moved out: " + titles.join(", "));
+    for (const gone of ["Upgrades", "Library", "Sharing"]) assert.ok(!titles.includes(gone), gone + " moved out: " + titles.join(", "));
+    assert.ok(titles.indexOf("Downloads") >= 0 && titles.indexOf("Playback fallback") > titles.indexOf("Downloads"), titles.join(", "));
+    const downloads = findNodes(lastView(h), (n) => n.type === "section" && n.title === "Downloads")[0];
+    assert.equal(downloads.children[0].label, "Look for");
+    const fb = findNodes(lastView(h), (n) => n.type === "section" && n.title === "Playback fallback")[0];
+    assert.deepEqual(fb.children.filter((c) => c.label).map((c) => c.label), ["Quality", "Sharers", "Keep at most", "Delete if not played for"]);
     const status = findNodes(lastView(h), (n) => n.type === "section" && n.title === "Status")[0];
     assert.equal(status.children[0].label, "✓ Connected as me");
     assert.equal(status.children[1].label, "✓ Sharing 3 folders");
+
+    // The tabs they came from show only their lists.
+    for (const tab of ["upgrades", "fallback"]) {
+      h.actions["main-tab"]({ tabId: tab });
+      assert.equal(findNodes(lastView(h), (n) => n.type === "settings-row").length, 0, tab + " has no settings rows");
+    }
   } finally {
     p.deactivate();
   }
@@ -253,8 +188,8 @@ test("Fallback: Delete all asks first, through a confirm node", async () => {
   await p.activate(h.api);
   try {
     h.actions["main-tab"]({ tabId: "fallback" });
-    const bar = findNodes(lastView(h), (n) => n.type === "toolbar" && n.title === "Kept files")[0];
-    assert.equal(bar.buttons[0].action, "delete-all-kept-ask", "the button asks; it doesn't delete");
+    const bar = findNodes(lastView(h), (n) => n.type === "toolbar" && n.title === "Songs")[0];
+    assert.ok(bar.buttons.some((b) => b.action === "delete-all-kept-ask"), "the button asks; it doesn't delete");
     h.actions["delete-all-kept-ask"]();
     const confirm = findNodes(lastView(h), (n) => n.type === "confirm")[0];
     assert.ok(confirm, "the confirm");
@@ -292,28 +227,4 @@ test("upgradeBadge / upgradeRowProgress: one chip per state; a queued download s
   assert.equal(plugin._upgradeBadge(null), null);
   assert.equal(plugin._upgradeRowProgress({ state: "downloading" }, { state: "InProgress", size: 10, bytesTransferred: 5 }), 0.5);
   assert.equal(plugin._upgradeRowProgress({ state: "ready" }, { state: "InProgress", size: 10, bytesTransferred: 5 }), null);
-});
-
-test("Downloads rows: a bar on the moving one, an Upgrade chip on a file fetched as one", async () => {
-  const p = loadPlugin();
-  const key = "c" + "\u0000" + "m\\C\\03 - Moving.flac";
-  const h = downloadsHost([
-    transfer("c", "m\\C\\03 - Moving.flac", "InProgress", { bytesTransferred: 5e6 }),
-    transfer("b", "m\\B\\02 - Waiting.flac", "Queued, Remotely")
-  ]);
-  h.store.tracked = { [key]: { upgrade: { trackId: 42 }, meta: {} } };
-  await p.activate(h.api);
-  try {
-    await p._refreshTransfers();
-    h.actions["main-tab"]({ tabId: "transfers" });
-    const lists = findNodes(lastView(h), (n) => n.type === "track-row-list");
-    const moving = lists[0].items[0];
-    assert.equal(moving.progress, 0.5);
-    assert.deepEqual(moving.badge, { label: "Upgrade", variant: "accent" });
-    const waiting = lists[1].items[0];
-    assert.equal(waiting.progress, null);
-    assert.equal(waiting.badge, undefined, "the group title already says Waiting");
-  } finally {
-    p.deactivate();
-  }
 });

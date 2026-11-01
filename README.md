@@ -93,7 +93,7 @@ rejected, or slskd not signed in to Soulseek — each with the fix.
   really 128 is set aside and the next sharer is asked. Then *Compare &
   replace…* opens Viboplr's compare → replace / keep both step. Nothing in
   your library changes until you confirm there.
-  **Soulseek → Settings → Upgrade to** picks what it looks for: *FLAC 16-bit
+  **Soulseek → Settings → Downloads → Look for** picks what it looks for: *FLAC 16-bit
   (CD quality)*, the default, which skips large hi-res files; *Hi-res lossless
   (24-bit)*; *Any lossless*; *MP3 320*; *MP3 320 / V0*; *256 kbps or better*;
   or *Best available* (lossless when someone has it). When nothing meets the
@@ -101,8 +101,7 @@ rejected, or slskd not signed in to Soulseek — each with the fix.
   myself* unfolds every better file the search found, inside the same upgrade:
   *Use this* switches the download and the upgrade carries on to the check and
   Replace. Only when nothing better turned up does *Search Soulseek myself…*
-  open the search, filtered to better files. The *Upgrade to* setting sits at
-  the foot of the Upgrades tab.
+  open the search, filtered to better files.
   Select several tracks to upgrade them all (up to 100 at a time); their
   searches run one after another, and finished ones wait at Ready until you
   choose *Replace all ready…*, which shows Viboplr's compare dialog for each.
@@ -110,21 +109,22 @@ rejected, or slskd not signed in to Soulseek — each with the fix.
   folder found is compared with the tracks you already have; open a folder
   and **Download the N you don't have** fetches just those. "Show everything
   found" lifts either filter.
-- **Results show their own downloads.** Download leaves you on the results:
-  the row itself turns *Queued*, then *Downloading 42%* with a bar, then
-  *Done* with Play (or *Failed* with Retry). Nothing pops up.
+- **Every download is a job, Search's too.** Download on a result (a file, a
+  selection or a whole folder) starts one job per file on the **Downloads**
+  tab, holding the file you picked: it skips the job's own search, then is
+  checked and saved into your library like any job (or, in Upgrade mode,
+  offered as the replace). A file found by a plain search is named by its
+  tags once it lands. You stay on the results: the row itself turns
+  *Queued*, then *Downloading 42%* with a bar, then *Done* with Play and
+  *Show download*. Nothing pops up unless slskd refuses a file.
 - **A folder opens before anything is queued**: its tracklist with sizes and
   lengths, songs your library already has marked *In library*, and one button
   for what you lack (or for all of it). Select rows to take only some.
   *Search…* on an album opens on Folders.
-- **Downloads tab** (after Search, Upgrades and Fallback; its count shows only
-  what is moving or failed), grouped: *Needs attention* (failures, in plain words, with
-  Retry all) first, then Downloading, Waiting (your place in the other user's
-  queue and how long you've waited), Finished and Cancelled. Per-row actions
-  show only what applies: Cancel while it runs, Another source while it waits
-  in someone's queue or after a failure, Play / Add to library once it's done,
-  Clear from list for anything at rest (the file stays). Finished rows are
-  ordinary tracks — right-click menu, drag-to-queue, Download… all work.
+- **Downloads tab**: every job, wherever it started. A job's files list says
+  which sharers it tried and why each one didn't send the file. There is no
+  separate list of slskd's raw transfers any more; slskd's own page
+  (Settings → *Open slskd's page*) still has it.
 - **Play** a finished download straight from slskd's folder.
 - **Playback fallback.** When a track has no playable source of its own — a
   library row whose file is gone, a streaming plugin's track it can't reach —
@@ -132,12 +132,12 @@ rejected, or slskd not signed in to Soulseek — each with the fix.
   (Settings → Providers → Playback fallback). It runs one bounded search,
   fetches the best-matching file from a sharer with a free slot, and plays it
   the moment it lands. See [Playback fallback](#playback-fallback).
-- **Into your library, two ways.** If slskd's downloads folder is inside one of
-  your collections, finished files are picked up automatically (the plugin
-  rescans that collection as they land). Otherwise **Add to library…** copies one
-  or several finished files into a collection through Viboplr's own download
-  modal, with tags and cover art written. Soulseek → Settings → Library says
-  which case you're in.
+- **Into your library.** If slskd's downloads folder is inside one of your
+  collections, finished files are picked up there (the plugin rescans that
+  collection as they land). Otherwise each job saves its file into a
+  collection through Viboplr, next to the album or artist you already have.
+  On Viboplr versions before 1.0.114-beta3 a job opens Viboplr's Add to
+  library dialog instead.
 - **Real metadata.** Embedded tags are read from finished files and win, field by
   field, over the filename guess.
 - **AI assistants** can drive it through Viboplr's assistant API: `status`,
@@ -157,7 +157,7 @@ waiting:
    the matches, a sharer who has **delivered before** comes first, then one with
    a free upload slot — the flag is self-reported, and was wrong for the sharer
    that cost the first live run its whole budget. Then quality, per **Soulseek →
-   Settings → Fallback quality**, the same choices as the Upgrade target:
+   Settings → Playback fallback → Quality**, the same choices as Look for:
    *Fastest start* (default) puts high-bitrate lossy first, a fifth of the
    bytes of lossless so the song starts sooner; *Best available* puts lossless
    first, as the Search tab does. *Lossless only* and *MP3 320 / V0 only* are
@@ -187,12 +187,16 @@ waiting:
    plugin remembers every file the fallback fetched, by normalized title +
    artist.
 
-The **Fallback tab** in the Soulseek view is the whole feature in one place: how
-often it played (and how fast), the last resolve — the query, the **picked file**
-and what became of it, with *Show trace* for each step and every matching file
-(match score, ✓ played, ↓ downloading, ✗ tried and dropped) — the recent
-resolves, the files the fallback **kept**, and its settings. Kept files have
-Play, Add to library and **Delete file**; Delete all asks first. Delete is the one place
+The **Fallback tab** in the Soulseek view is the whole feature in one place: one
+line with how often it played (and how fast), then **one row per song** the
+fallback was asked for — how its last request went and the file it kept, together
+(a search still running is the top row) — then the last search folded to one line,
+with *Show steps* for each step and every matching file (match score, ✓ played,
+↓ downloading, ✗ tried and dropped). Its settings are in Settings → Playback fallback. A kept file has Play,
+**Move to library** and **Delete file**; Delete all asks first. Move to library is
+offered only while the file is still in slskd's folder and your library doesn't
+have the song as a file: it copies the file into a collection through Viboplr and
+then deletes the kept copy. Delete is the one place
 the plugin removes anything from disk, and it does so through slskd's own Files
 API, which slskd gates behind a top-level `remote_file_management: true` line in
 `slskd.yml` (or `SLSKD_REMOTE_FILE_MANAGEMENT=true`); without it the plugin
@@ -209,7 +213,7 @@ happens *after* a download finishes.
 
 | slskd location | Finished downloads |
 |---|---|
-| **Same computer as Viboplr** | Playable immediately; **Add to library…** copies them into a collection, or they arrive on their own if the downloads folder is inside one |
+| **Same computer as Viboplr** | Playable immediately; each job saves its file into a collection, or it arrives on its own if the downloads folder is inside one |
 | **Docker / NAS / another machine** | Land in slskd's downloads folder. Add that folder (or its mount) as a music source in Collections |
 
 The plugin guesses from the address you enter and you can override it with
@@ -301,8 +305,8 @@ through a sandbox harness that shadows every global the Viboplr host does *not*
 provide (`fetch`, `Map`, `Set`, `btoa`, `WebSocket`, …), so anything that would
 work in Node but break in the app fails loudly in CI. `test/transfers.test.js`
 also activates the plugin against a fake host and checks that every surface the
-manifest declares is registered and that Add to library opens the host modal
-with the payload the host expects.
+manifest declares is registered and that a finished file resolves through the
+import provider and the `slsk://` scheme the host calls.
 
 ## Release
 

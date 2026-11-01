@@ -92,18 +92,6 @@ test("transferSubtitle leads with the phase and reads the same down the column",
   assert.match(sub({ state: "Completed, Errored", exception: "boom", attempts: 2, username: "peer" }, null, "local"), /^Failed — boom.*attempt 2/);
 });
 
-test("transferRowActions offers only what would act on THAT transfer", () => {
-  const act = plugin._transferRowActions;
-  assert.deepEqual(act({ state: "Completed, Succeeded" }, { resolvedPath: "/x" }, "local"), ["play-transfer", "import-transfer", "remove-transfer"]);
-  assert.deepEqual(act({ state: "Completed, Succeeded" }, { resolvedPath: "/x" }, "remote"), ["remove-transfer"], "remote: nothing to play or copy");
-  assert.deepEqual(act({ state: "Completed, Succeeded" }, null, "local"), ["remove-transfer"], "not located yet");
-  assert.deepEqual(act({ state: "Completed, Errored" }, null, "local"), ["retry-transfer", "another-source", "remove-transfer"]);
-  assert.deepEqual(act({ state: "Completed, Cancelled" }, null, "local"), ["retry-transfer", "remove-transfer"]);
-  assert.deepEqual(act({ state: "InProgress" }, null, "local"), ["cancel-transfer"]);
-  assert.deepEqual(act({ state: "Queued, Remotely" }, null, "local"), ["another-source", "cancel-transfer"], "a long queue can be left for another sharer");
-  assert.deepEqual(act({ state: "Queued, Locally" }, null, "local"), ["cancel-transfer"]);
-});
-
 test("rowIds reads a hover button, a selection toolbar and a plain button alike", () => {
   assert.deepEqual(plugin._rowIds({ itemId: "a" }), ["a"]);
   assert.deepEqual(plugin._rowIds({ selectedIds: ["a", "b", null, ""] }), ["a", "b"]);
@@ -161,7 +149,7 @@ test("activate registers every surface the manifest declares, and readiness land
     assert.equal(typeof h.resolvers["meta:" + manifest.contributes.streamResolvers[0].id], "function", "playback fallback resolver registered");
     assert.equal(typeof h.resolvers["download:" + manifest.contributes.downloadProviders[0].id], "function");
     assert.equal(typeof h.actions["host:search"], "function", "tabbed view handles the Cmd+K handover");
-    for (const id of ["play-transfer", "import-transfer", "retry-transfer", "another-source", "cancel-transfer", "remove-transfer", "download-file", "open-folder", "close-folder", "folder-download", "fallback-search", "upgrade-sources-toggle"]) {
+    for (const id of ["play-transfer", "show-job", "cancel-transfer", "download-file", "open-folder", "close-folder", "folder-download", "fallback-search", "upgrade-sources-toggle"]) {
       assert.equal(typeof h.actions[id], "function", id + " handled");
     }
     const status = await h.tools.status({});
@@ -175,7 +163,7 @@ test("activate registers every surface the manifest declares, and readiness land
   }
 });
 
-test("Add to library opens the host download modal with the provider key and slsk:// uri", async () => {
+test("a finished file resolves through the import provider and the slsk:// scheme", async () => {
   const p = loadPlugin();
   const key = "peer" + SEP + "@@x\\Music\\OK Computer\\03 - Karma Police.flac";
   const h = fakeHost({
@@ -192,21 +180,7 @@ test("Add to library opens the host download modal with the provider key and sls
   });
   await p.activate(h.api);
   try {
-    // Async: Add to library first asks the library whether the song is already
-    // here (then it's the compare dialog instead — see modes.test.js).
-    await h.actions["import-transfer"]({ itemId: key });
-    assert.equal(h.calls.requestAction.length, 1);
-    const r = h.calls.requestAction[0];
-    assert.equal(r.action, "download-tracks");
-    assert.equal(r.payload.providerId, "slskd:slskd-import", "host keys providers as pluginId:providerId");
-    assert.equal(r.payload.providerName, "Soulseek");
-    assert.equal(r.payload.tracks.length, 1);
-    assert.equal(r.payload.tracks[0].uri, "slsk://" + key);
-    assert.equal(r.payload.tracks[0].title, "Karma Police");
-    assert.equal(r.payload.tracks[0].artist_name, "Radiohead");
-    assert.equal(r.payload.tracks[0].durationSecs, 264);
-
-    // The provider the modal then calls answers a file:// copy with a real ext.
+    // The provider the host's modal calls answers a file:// copy with a real ext.
     const resolved = await h.resolvers["download:slskd-import"]("slsk://" + key, "original");
     assert.equal(resolved.url, "file:///Users/me/Music/slskd/viboplr/1-OK_Computer/03 - Karma Police.flac");
     assert.equal(resolved.ext, "flac", "a concrete extension, never \"auto\"");
@@ -270,7 +244,7 @@ test("finishedFileRefusal refuses only on what is known", () => {
   assert.equal(q.qualityTier, 0, "lossless");
 });
 
-test("Add to library on a remote-tier slskd explains instead of opening the modal", async () => {
+test("a finished file on a remote-tier slskd is not playable from here", async () => {
   const p = loadPlugin();
   const key = "peer" + SEP + "x\\a.mp3";
   const h = fakeHost({
@@ -281,9 +255,6 @@ test("Add to library on a remote-tier slskd explains instead of opening the moda
   });
   await p.activate(h.api);
   try {
-    h.actions["import-transfer"]({ itemId: key });
-    assert.equal(h.calls.requestAction.length, 0);
-    assert.match(h.calls.notifications[h.calls.notifications.length - 1], /another machine/);
     assert.equal(await h.resolvers["stream:slsk"](key), null, "remote files are not playable from here");
   } finally {
     p.deactivate();
@@ -425,7 +396,7 @@ test("the results list declares selectable alongside its columns, or they do not
   }
 });
 
-test("downloading a multi-user selection sends one batch per sharer", async () => {
+test("downloading a multi-user selection makes one job per file, each asking its own sharer", async () => {
   const p = loadPlugin();
   const batches = [];
   const { h } = searchHost({
@@ -444,8 +415,8 @@ test("downloading a multi-user selection sends one batch per sharer", async () =
       }
     ]
   });
-  // slskd addresses an enqueue to ONE peer, so a selection spanning sharers has
-  // to be split into a batch each.
+  // Every picked file is a job of its own (it is checked and saved on its
+  // own), and slskd addresses an enqueue to ONE peer.
   const inner = h.api.network.fetch;
   h.api.network.fetch = async (url, init) => {
     if (url.includes("/transfers/downloads/batches")) {
@@ -460,14 +431,15 @@ test("downloading a multi-user selection sends one batch per sharer", async () =
     const ids = list.items.map((i) => i.id);
     assert.equal(ids.length, 3);
     h.actions["download-file"]({ selectedIds: ids });
-    for (let i = 0; i < 100 && batches.length < 2; i++) await new Promise((r) => setTimeout(r, 20));
-    assert.equal(batches.length, 2, "one batch per sharer, not one batch for the selection");
-    assert.deepEqual(batches.map((b) => b.username).sort(), ["alice", "bob"]);
-    assert.deepEqual(batches.map((b) => b.files.length).sort(), [1, 2]);
-    assert.notEqual(
-      batches[0].options.destination, batches[1].options.destination,
-      "each batch claims its own destination folder"
-    );
+    for (let i = 0; i < 100 && batches.length < 3; i++) await new Promise((r) => setTimeout(r, 20));
+    assert.equal(batches.length, 3, "one per file");
+    assert.deepEqual(batches.map((b) => b.username).sort(), ["alice", "alice", "bob"]);
+    assert.deepEqual(batches.map((b) => b.files.length), [1, 1, 1]);
+    assert.equal(new Set(batches.map((b) => b.options.destination)).size, 3, "each claims its own destination folder");
+    for (let i = 0; i < 100 && Object.values(p._upgrades()).filter((e) => e.state === "downloading").length < 3; i++) await new Promise((r) => setTimeout(r, 20));
+    const jobs = Object.values(p._upgrades());
+    assert.equal(jobs.length, 3);
+    assert.ok(jobs.every((e) => e.kind === "get" && e.state === "downloading" && e.from === "file"), JSON.stringify(jobs.map((e) => e.state)));
   } finally {
     p.deactivate();
   }
