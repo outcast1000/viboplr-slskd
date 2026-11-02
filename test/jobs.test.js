@@ -372,3 +372,94 @@ test("isLocalRow / isActiveFile / songSnapshot: the small pure helpers jobs shar
   assert.deepEqual(plugin._songSnapshot({ trackId: 9, path: "/m/a.flac", collectionName: "Music" }, { title: "Lucky", artist: "Radiohead", trackNumber: 11 }),
     { trackId: 9, path: "/m/a.flac", title: "Lucky", artist: "Radiohead", album: null, trackNumber: 11, durationSecs: null });
 });
+
+// --- History (0.31): a saved song leaves the list, a failure goes on Clear;
+// each ending leaves one small record on the folded History line instead.
+
+function historyLine(h) {
+  return findNodes(lastView(h), (n) => n.type === "toolbar" && n.title === "History")[0];
+}
+
+function historyList(h) {
+  const lists = findNodes(lastView(h), (n) => n.type === "track-row-list");
+  return lists[lists.length - 1];
+}
+
+test("integration: a saved song leaves the list but stays in History, which plays it", async () => {
+  const p = loadPlugin();
+  const { h } = jobHost({ responses: LUCKY });
+  await p.activate(h.api);
+  try {
+    await h.actions["ctx:slskd-download"](LUCKY_TARGET);
+    await waitFor(() => job(p) && job(p).state === "downloading", 8000, "the download to start");
+    await pollUntil(p, () => !job(p), "saved");
+    assert.equal(h.store.jobHistory.length, 1, "one record, stored per server");
+    assert.equal(h.store.jobHistory[0].outcome, "saved");
+
+    h.actions["main-tab"]({ tabId: "upgrades" });
+    assert.equal(historyLine(h).status, "1 saved", "shown under an otherwise empty list");
+    assert.ok(!findNodes(lastView(h), (n) => n.type === "track-row-list").length, "folded: no rows yet");
+
+    h.actions["upgrade-history-toggle"]();
+    const row = historyList(h).items[0];
+    assert.equal(row.title, "Lucky");
+    assert.equal(row.badge.label, "Saved");
+    assert.match(row.subtitle, /^Radiohead {2}· {2}FLAC.* from a · in Music {2}· {2}just now$/, row.subtitle);
+    assert.deepEqual(row.actions, ["history-play", "history-remove"]);
+
+    h.api.library.getTrackById = async (id) => (id === 99 ? { id: 99, path: "file:///Users/me/Music/Radiohead/OK Computer/11 Lucky.flac",
+      title: "Lucky", artist_name: "Radiohead", album_title: "OK Computer", track_number: 11, duration_secs: 264 } : null);
+    await h.actions["history-play"]({ itemId: row.id });
+    const played = h.calls.played[h.calls.played.length - 1];
+    assert.equal(played.path, "file:///Users/me/Music/Radiohead/OK Computer/11 Lucky.flac", "the library copy, file:// once");
+    assert.equal(played.title, "Lucky");
+
+    await h.actions["history-remove"]({ itemId: row.id });
+    await waitFor(() => h.store.jobHistory.length === 0, 2000, "the record to go");
+    await waitFor(() => !historyLine(h), 2000, "an empty History to draw nothing");
+  } finally {
+    await p.deactivate();
+  }
+});
+
+test("integration: a failed download is recorded once, and Download again starts it afresh", async () => {
+  const p = loadPlugin();
+  const { h } = jobHost({ responses: LUCKY });
+  const inner = h.api.network.fetch;
+  h.api.network.fetch = async (url, init) => {
+    if (url.includes("/api/v0/transfers/downloads/batches")) {
+      const b = JSON.parse(init.body);
+      return { status: 200, text: async () => JSON.stringify({ failures: b.files.map((f) => ({ filename: f.filename, message: "already queued" })) }) };
+    }
+    return inner(url, init);
+  };
+  await p.activate(h.api);
+  try {
+    await searchFor(h, "lucky");
+    await h.actions["download-file"]({ itemId: "f:" + LUCKY_KEY });
+    assert.equal(job(p).state, "failed");
+    assert.equal(p._jobHistory().length, 1, "one failure, one record");
+    assert.equal(p._jobHistory()[0].outcome, "failed");
+    assert.match(p._jobHistory()[0].line, /a refused the download/, "with its reason");
+
+    h.actions["main-tab"]({ tabId: "upgrades" });
+    assert.equal(historyLine(h).status, "1 failed");
+    h.actions["upgrade-history-toggle"]();
+    const row = historyList(h).items[0];
+    assert.deepEqual(row.actions, ["history-again", "history-remove"], "no Play: nothing was saved");
+
+    // The failed job is cleared; Download again starts a new one by name.
+    await h.actions["upgrade-clear-ended"]();
+    await waitFor(() => !job(p), 2000, "the failed job to be cleared");
+    assert.equal(p._jobHistory().length, 1, "clearing the job leaves its History record");
+    await h.actions["history-again"]({ itemId: row.id });
+    await waitFor(() => Object.keys(p._upgrades()).length === 1, 2000, "a new job");
+    // A file picked in Search has no artist until its tags are read, so the
+    // record (and the new job) carries what the job knew: the title.
+    const again = p._upgrades()[Object.keys(p._upgrades())[0]];
+    assert.equal(again.title, p._jobHistory()[0].title);
+    assert.equal(again.artist, p._jobHistory()[0].artist);
+  } finally {
+    await p.deactivate();
+  }
+});

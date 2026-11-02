@@ -685,9 +685,9 @@ test("integration: Try another sharer moves on without waiting out the stall tim
   }
 });
 
-test("the Upgrades tab lists what is pending; finished upgrades are folded into History", async () => {
+test("the Downloads tab lists what is pending; what ended is folded into History, started from an older version's finished upgrades", async () => {
   const p = loadPlugin();
-  const done = (id, state) => ({ trackId: id, title: "Song " + id, state, target: "flac16", createdAt: id, currentLabel: "MP3" });
+  const done = (id, state) => ({ trackId: id, title: "Song " + id, state, target: "flac16", createdAt: id, updatedAt: id * 1000, currentLabel: "MP3" });
   const { h } = upgradeHost({ responses: [], store: { upgrades: {
     t1: done(1, "replaced"), t2: done(2, "gone"),
     t3: Object.assign(done(3, "none"), { message: "Nothing better" })
@@ -698,15 +698,20 @@ test("the Upgrades tab lists what is pending; finished upgrades are folded into 
     let lists = findNodes(lastView(h), (n) => n.type === "track-row-list");
     assert.equal(lists.length, 1, "only the pending list; history folded");
     assert.deepEqual(lists[0].items.map((i) => i.id), ["t3"]);
-    assert.ok(findNodes(lastView(h), (n) => n.type === "toolbar" && n.title === "Finished" && n.status === "2 done").length);
+    // No stored History yet: it starts from the replaced / gone upgrades the
+    // old "Finished" line listed. "gone" is listed but not counted.
+    assert.ok(findNodes(lastView(h), (n) => n.type === "toolbar" && n.title === "History" && n.status === "1 replaced").length,
+      "the History line: " + JSON.stringify(findNodes(lastView(h), (n) => n.type === "toolbar").map((n) => [n.title, n.status])));
+    assert.ok(!findNodes(lastView(h), (n) => n.type === "toolbar" && n.title === "Finished").length, "History replaces Finished");
 
     h.actions["upgrade-history-toggle"]();
     lists = findNodes(lastView(h), (n) => n.type === "track-row-list");
     assert.equal(lists.length, 2);
-    assert.deepEqual(lists[1].items.map((i) => i.id).sort(), ["t1", "t2"]);
+    assert.deepEqual(lists[1].items.map((i) => [i.title, i.badge.label]), [["Song 2", "Not in library"], ["Song 1", "Replaced"]], "newest first");
 
     h.actions["upgrade-history-clear"]();
-    await waitFor(() => !h.store.upgrades.t1 && !h.store.upgrades.t2, 2000, "history cleared");
+    await waitFor(() => !h.store.upgrades.t1 && !h.store.upgrades.t2 && Array.isArray(h.store.jobHistory) && !h.store.jobHistory.length,
+      2000, "history cleared");
     assert.ok(h.store.upgrades.t3, "the pending one stays");
   } finally {
     p.deactivate();

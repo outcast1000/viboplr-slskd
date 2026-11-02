@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.31.0
+
+- **Downloads keep a quiet History.** A song saved to your library leaves the
+  Downloads list, and a failure goes when you clear it, so nothing said what
+  had happened. Now a folded **History** line sits at the foot of the tab —
+  "14 saved · 1 replaced · 2 failed" — and **Show** lists each download that
+  ended: what came of it, the file and who sent it (or why it didn't work
+  out), and when. A saved or replaced song has **Play**; one that failed or
+  was cancelled has **Download again**; any row can be removed, and **Clear**
+  empties the list. The last 50 are kept. It replaces the old **Finished**
+  line, and starts from the finished upgrades that line listed.
+- **The Fallback tab says what it's for.** Two sentences open it: when a song
+  can't play from anywhere else, Viboplr asks Soulseek, which finds the song,
+  downloads it and plays it; and each file is kept so the song plays at once
+  next time — cleaned up automatically by the limits in Settings, or, while
+  no limits are set, a note that cleanup is off and where to turn it on.
+- **No Delete for songs already in your library.** A kept song your library
+  has (its file is in a collection, or the library has its own copy) is the
+  library's to manage, so its row offers only **Play**. **Delete kept
+  files…** (was "Delete all files…") deletes only the files that exist
+  nowhere else, and says how many library songs it leaves alone.
+
 ## 0.30.0
 
 - **A search shows how it's going.** While it runs, the Search tab shows

@@ -351,7 +351,14 @@ test("the Fallback tab is one list: a row per song with its outcome and its kept
     assert.equal(row.title, "Karma Police");
     assert.equal(row.badge.label, "Played");
     assert.match(row.subtitle, /in your library/, "slskd's folder sits inside the Music collection here: " + row.subtitle);
-    assert.deepEqual(row.actions, ["play-kept", "delete-kept"], "in the library already: nothing to move");
+    assert.deepEqual(row.actions, ["play-kept"], "in the library already: nothing to move, and nothing to delete — it's the library's");
+    // The tab says what it is before any numbers, and that cleanup is off by default.
+    const intro = texts.findIndex((t) => /^When a song can't play from anywhere else/.test(t));
+    const status = texts.findIndex((t) => /^Last used /.test(t));
+    assert.ok(intro >= 0 && intro < status, "the intro comes before the numbers: " + texts.join(" | "));
+    assert.ok(texts.some((t) => /Automatic cleanup is off/.test(t)), "with no limits set it says cleanup is off");
+    assert.ok(!fb.some((n) => n.type === "toolbar" && (n.buttons || []).some((b) => b.action === "delete-all-kept-ask")),
+      "no Delete kept files… when every kept song is in the library");
     assert.ok(!fb.some((n) => n.type === "toolbar" && (n.title === "Kept files" || n.title === "Recent" || n.title === "Last resolve")));
 
     texts = fb.filter((n) => n.type === "text").map((n) => n.content);
@@ -440,7 +447,7 @@ test("Move to library is not offered for a song the library has, nor for a kept 
     await have.h.resolvers["meta:" + plugin._FALLBACK_ID]("Karma Police", "Radiohead", null, 264, {});
     have.h.actions["main-tab"]({ tabId: "fallback" });
     const row = await fallbackRow(plugin, have.h);
-    assert.deepEqual(row.actions, ["play-kept", "delete-kept"]);
+    assert.deepEqual(row.actions, ["play-kept"], "the library has it: no Move, and no Delete either");
     assert.match(row.subtitle, /in your library/);
     await have.h.actions["move-kept"]({ itemId: row.id });
     assert.equal(have.imports.length, 0, "a move asked for anyway does nothing");

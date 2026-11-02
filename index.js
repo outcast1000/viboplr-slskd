@@ -6613,7 +6613,10 @@ function fallbackSongRows(history, index, status, live, opts) {
       row.action = "play-kept";
     }
     if (playable && opts.canMove && st.exists === true && st.inLibrary === false && !st.busy) row.actions.push("move-kept");
-    if (!st.busy) row.actions.push("delete-kept");
+    // A song in your library is the library's to manage — its file is a
+    // library track, or the library has a copy of its own — so no Delete here
+    // (owner, 2026-11-02). Cleanup, when the limits are on, still sees it.
+    if (!st.busy && !st.inLibrary) row.actions.push("delete-kept");
   }
 
   function finish(row) {
@@ -6695,10 +6698,37 @@ function fallbackSummaryText(st, totals) {
   return bits.join(" · ");
 }
 
+// Pure: what the Fallback tab is, before any numbers (owner, 2026-11-02: the
+// tab needed a better description). Two sentences: what the fallback does,
+// and why it keeps files and what becomes of them. Cleanup is off by default,
+// so with no limits set it says that rather than promise a cleanup that never
+// runs.
+function fallbackIntroNode(limitsOn) {
+  var keep = limitsOn
+    ? "Each file is kept in slskd's folder, so the song plays at once next time; old ones are cleaned up automatically, by the limits in Settings → Playback fallback. Move a song to your library to keep it for good."
+    : "Each file is kept in slskd's folder, so the song plays at once next time. Automatic cleanup is off — set limits in Settings → Playback fallback. Move a song to your library to keep it for good.";
+  return { type: "layout", direction: "vertical", children: [
+    { type: "text", content: "When a song can't play from anywhere else — a library file that went missing, a stream that won't load — Viboplr asks Soulseek: the fallback finds the song, downloads it and plays it, usually within half a minute." },
+    mutedText(keep)
+  ] };
+}
+
+// Pure: the kept files "Delete kept files…" removes — every one except those
+// whose song is in your library. Those are the library's to manage (a file
+// inside a collection IS a library track), so the plugin leaves them alone.
+function deletableKeptKeys(index, status) {
+  return Object.keys(index || {}).filter(function (k) {
+    if (!index[k]) return false;
+    var st = keptStatusOf(status, index, k);
+    return !(st && st.inLibrary);
+  });
+}
+
 function fallbackTab() {
   var children = [];
   var st = resolveStats(resolveHistory);
   var totals = fallbackTotals(fallback);
+  children.push(fallbackIntroNode(fallbackLimitsOn()));
   children.push(fallbackStatusNode(resolveHistory, lastResolve, Date.now(), fallbackLastUsedAt, fallbackSummaryText(st, totals)));
 
   scheduleKeptCheck();
@@ -6709,14 +6739,20 @@ function fallbackTab() {
   if (rows.length) {
     var buttons = [];
     if (resolveHistory.length) buttons.push({ label: "Clear history", action: "clear-resolve-history", icon: "✕" });
-    if (totals.count) buttons.push({ label: "Delete all files…", action: "delete-all-kept-ask", icon: "🗑" });
+    // Only the files that exist nowhere else: a song in your library is left
+    // alone (`deletableKeptKeys`), here as on its row.
+    var deletable = deletableKeptKeys(fallback, keptStatus);
+    var deletableBytes = deletable.reduce(function (n, k) { return n + ((fallback[k] && fallback[k].size) || 0); }, 0);
+    if (deletable.length) buttons.push({ label: "Delete kept files…", action: "delete-all-kept-ask", icon: "🗑" });
     children.push({ type: "toolbar", title: "Songs", status: rows.length + (rows.length === 1 ? " song" : " songs"), buttons: buttons });
-    if (keptConfirm) {
-      var col = downloadsCollection();
-      children.push({ type: "confirm", title: "Delete every kept file?",
-        message: "Deletes " + totals.count + (totals.count === 1 ? " file" : " files") + " (" + formatBytes(totals.bytes) + ") from slskd's downloads folder. A song is simply fetched again the next time it's needed." +
-          (col ? " They are library tracks too, through “" + col.name + "”, and leave the library with the files." : ""),
-        confirmLabel: "Delete " + totals.count + (totals.count === 1 ? " file" : " files"), cancelLabel: "Keep them", confirmVariant: "danger",
+    if (keptConfirm && deletable.length) {
+      var n = deletable.length;
+      var spared = totals.count - deletable.filter(function (k) { return fallback[k] && fallback[k].state === "kept"; }).length;
+      children.push({ type: "confirm", title: "Delete the kept files?",
+        message: "Deletes " + n + (n === 1 ? " file" : " files") + (deletableBytes ? " (" + formatBytes(deletableBytes) + ")" : "") +
+          " from slskd's downloads folder. A song is simply fetched again the next time it's needed." +
+          (spared > 0 ? " " + spared + (spared === 1 ? " song in your library is" : " songs in your library are") + " left alone." : ""),
+        confirmLabel: "Delete " + n + (n === 1 ? " file" : " files"), cancelLabel: "Keep them", confirmVariant: "danger",
         confirmAction: "delete-all-kept", cancelAction: "delete-all-kept-cancel" });
     }
     // Rows, not lines: each is a song, so it gets the universal track menu.
@@ -7346,8 +7382,9 @@ function registerActions() {
 
   api.ui.onAction("delete-all-kept", function () {
     keptConfirm = false;
-    var keys = Object.keys(fallback);
-    if (!keys.length) return;
+    // What the confirmation counted: songs in your library are left alone.
+    var keys = deletableKeptKeys(fallback, keptStatus);
+    if (!keys.length) { render(); return; }
     deleteFallbackFiles(keys).catch(function (e) { console.error("slskd: deleting fallback files failed:", e); });
   });
 
@@ -7576,6 +7613,22 @@ function registerActions() {
 
   api.ui.onAction("upgrade-history-clear", function () {
     clearUpgradeHistory().catch(function (e) { console.error("slskd: clearing the upgrade history failed:", e); });
+  });
+
+  api.ui.onAction("history-play", function (data) {
+    var id = rowIds(data)[0];
+    if (id) return playHistoryEntry(id).catch(function (e) { console.error("slskd: playing from the download history failed:", e); });
+  });
+
+  api.ui.onAction("history-again", function (data) {
+    rowIds(data).forEach(function (id) {
+      downloadHistoryEntryAgain(id).catch(function (e) { console.error("slskd: downloading again from the history failed:", e); });
+    });
+  });
+
+  api.ui.onAction("history-remove", function (data) {
+    var ids = rowIds(data);
+    if (ids.length) removeHistoryEntries(ids).catch(function (e) { console.error("slskd: removing from the download history failed:", e); });
   });
 
   api.ui.onAction("upgrade-remove", function (data) {
@@ -8288,14 +8341,20 @@ function upgradesNeedPoll() {
   return false;
 }
 
+// History rides with the jobs: every ending is followed by this save.
 async function saveUpgrades() {
   await api.storage.set(stateKey("upgrades"), upgrades);
+  await api.storage.set(stateKey("jobHistory"), jobHistory);
 }
 
 function setUpgradeState(e, state, message) {
+  var prev = e.state;
   e.state = state;
   e.message = message || null;
   e.updatedAt = nowMs();
+  // Into an ending, from something else: History gets one record. A state
+  // re-worded in place (failed → failed with a new reason) isn't a new ending.
+  if (state !== prev && state !== "saved" && JOB_ENDINGS[state]) recordJobEnding(e, state, null);
 }
 
 // Pure: the second line of an Upgrades row.
@@ -9157,6 +9216,8 @@ var lastSavedJob = null;
 // the file landed ({ trackId, path }).
 async function finishSavedJob(e, key, saved) {
   lastSavedJob = songSnapshot(saved, e);
+  // The job goes; History keeps that it was saved, and where.
+  recordJobEnding(e, "saved", saved);
   delete upgrades[key];
   delete sourcesOpen[key];
   if (focusedUpgrade === key) focusedUpgrade = null;
@@ -9508,13 +9569,174 @@ function jobDestination(e) {
   return "→ " + p.collectionName + (why ? " · " + why : "");
 }
 
-var showUpgradeHistory = false;   // the History list on the Upgrades tab, folded by default
+var showUpgradeHistory = false;   // the History list on the Downloads tab, folded by default
 
+// ---- download history (owner, 2026-11-02: "a subtle history of what has been
+// downloaded or failed") ------------------------------------------------------
+// A saved song leaves the Downloads list the moment it lands (0.29) and a
+// failure goes on Clear, so nothing said what had happened. Each job that
+// ends leaves one small record here instead — never the job itself, so the
+// History line costs nothing to keep. Per server (`stateKey`), newest first,
+// capped; the folded line at the foot of the tab replaces the old "Finished"
+// line, which listed replaced upgrades only.
+var JOB_HISTORY_MAX = 50;
+var jobHistory = [];
+var jobHistorySeq = 0;
+
+// The states a job ends in, and how each reads in History. "none" (nothing
+// found, or nothing better than your copy) counts as failed: the download
+// didn't happen. "gone" is listed but not counted — the job didn't fail, the
+// library row went away under it.
+var JOB_ENDINGS = {
+  saved: { label: "Saved", variant: "success", counts: "saved" },
+  replaced: { label: "Replaced", variant: "success", counts: "replaced" },
+  failed: { label: "Failed", variant: "error", counts: "failed" },
+  none: { label: "Nothing found", variant: "error", counts: "failed" },
+  cancelled: { label: "Cancelled", variant: "muted", counts: "cancelled" },
+  gone: { label: "Not in library", variant: "muted", counts: null }
+};
+
+// Pure: one History record for a job that just ended `outcome`. `extra`:
+// { collectionName, path, trackId } from a save. What it says is what the row
+// shows: the file and sharer for a download that worked, the reason otherwise.
+function jobHistoryEntry(e, outcome, at, seq, extra) {
+  var x = extra || {};
+  var file = e.file || null;
+  var user = (e.active && e.active.username) || (file && file.username) || null;
+  var quality = file && file.quality ? qualityLabel(file.quality) : null;
+  var line;
+  if (outcome === "saved") {
+    line = [quality ? quality + (user ? " from " + user : "") : null,
+      x.collectionName ? "in " + x.collectionName : null].filter(Boolean).join(" · ") || "Saved to your library";
+  } else if (outcome === "replaced") {
+    line = (e.currentLabel ? e.currentLabel + " → " : "") + (quality || "a better copy") + (user ? " from " + user : "");
+  } else {
+    line = e.message || JOB_ENDINGS[outcome].label;
+  }
+  return {
+    id: "h" + at + "-" + seq,
+    at: at,
+    outcome: outcome,
+    title: e.title || "Untitled",
+    artist: e.artist || null,
+    album: e.album || null,
+    durationSecs: e.durationSecs || null,
+    line: line,
+    // What Play needs: the library row (a replace keeps its id) or the path a
+    // save landed at. Neither for an ending that left nothing to play.
+    trackId: outcome === "saved" ? (x.trackId != null ? x.trackId : null) : outcome === "replaced" ? e.trackId : null,
+    path: outcome === "saved" ? (x.path || null) : null,
+    // An upgrade's "Download again" starts from the library row it was for.
+    upgradeOf: isGetJob(e) ? null : (e.trackId != null ? e.trackId : null)
+  };
+}
+
+// Pure: newest first, capped.
+function withJobHistory(list, entry, max) {
+  return [entry].concat(list || []).slice(0, max);
+}
+
+// Record that `e` ended `outcome` (in memory; saveUpgrades writes it). Only an
+// actual ending is recorded — setUpgradeState is also called to re-word a
+// state, and a failed job re-failing with a new message is still one failure.
+function recordJobEnding(e, outcome, extra) {
+  if (!JOB_ENDINGS[outcome]) return;
+  var at = nowMs();
+  jobHistory = withJobHistory(jobHistory, jobHistoryEntry(e, outcome, at, ++jobHistorySeq, extra), JOB_HISTORY_MAX);
+}
+
+// Pure: the History line's counts — "14 saved · 1 replaced · 2 failed", the
+// zeros left out.
+function jobHistorySummary(list) {
+  var n = { saved: 0, replaced: 0, failed: 0, cancelled: 0 };
+  for (var i = 0; i < (list || []).length; i++) {
+    var c = (JOB_ENDINGS[list[i].outcome] || {}).counts;
+    if (c) n[c]++;
+  }
+  var bits = ["saved", "replaced", "failed", "cancelled"].filter(function (k) { return n[k]; })
+    .map(function (k) { return n[k] + " " + k; });
+  return bits.length ? bits.join(" · ") : list.length + (list.length === 1 ? " entry" : " entries");
+}
+
+// Pure: History as rows. A row that left a song offers Play; one that didn't
+// work out offers Download again; every row can be removed.
+function jobHistoryRows(list, now) {
+  return (list || []).map(function (h) {
+    var end = JOB_ENDINGS[h.outcome] || { label: h.outcome, variant: "muted" };
+    var actions = [];
+    if ((h.outcome === "saved" || h.outcome === "replaced") && (h.trackId != null || h.path)) actions.push("history-play");
+    if (h.outcome === "failed" || h.outcome === "none" || h.outcome === "cancelled") actions.push("history-again");
+    actions.push("history-remove");
+    return {
+      id: h.id,
+      title: h.title,
+      subtitle: (h.artist ? h.artist + "  ·  " : "") + h.line + "  ·  " + agoLabel(h.at, now),
+      artistName: h.artist || null,
+      kind: "audio",
+      badge: { label: end.label, variant: end.variant },
+      actions: actions
+    };
+  });
+}
+
+// Pure: records for the upgrades an older version listed under "Finished"
+// (replaced / gone), for the first load of a version with History — so the
+// line doesn't start out empty for someone who has used upgrades.
+function seedJobHistory(all) {
+  var out = [];
+  var seq = 0;
+  for (var k in all || {}) {
+    var e = all[k];
+    if (!upgradeIsHistory(e)) continue;
+    out.push(jobHistoryEntry(e, e.state, e.updatedAt || e.createdAt || 0, ++seq, null));
+  }
+  out.sort(function (a, b) { return b.at - a.at; });
+  return out.slice(0, JOB_HISTORY_MAX);
+}
+
+async function playHistoryEntry(id) {
+  var h = jobHistory.filter(function (x) { return x.id === id; })[0];
+  if (!h) return;
+  var row = h.trackId != null ? await libraryTrackById(h.trackId) : null;
+  // A library row's path is scheme-prefixed; playMovedTrack wants it bare
+  // (it adds file:// itself), as a save's own path already is.
+  var rowPath = row && row.path ? String(row.path).replace(/^file:\/\//, "") : null;
+  var path = rowPath || h.path;
+  if (!path) {
+    api.ui.showNotification("“" + h.title + "” isn't in your library any more.", { kind: "warning" });
+    return;
+  }
+  return playMovedTrack({ trackId: h.trackId, path: path, title: h.title, artist: h.artist, album: h.album,
+    durationSecs: h.durationSecs });
+}
+
+// Download again: the same song through the ordinary entry point, which makes
+// it an upgrade again when the library has it as a file.
+async function downloadHistoryEntryAgain(id) {
+  var h = jobHistory.filter(function (x) { return x.id === id; })[0];
+  if (!h) return;
+  var target = { kind: "track", title: h.title, artistName: h.artist, albumTitle: h.album, durationSecs: h.durationSecs };
+  if (h.upgradeOf != null) target.trackId = h.upgradeOf;
+  return startJob(target, false);
+}
+
+async function removeHistoryEntries(ids) {
+  var drop = {};
+  ids.forEach(function (id) { drop[id] = true; });
+  jobHistory = jobHistory.filter(function (h) { return !drop[h.id]; });
+  await saveUpgrades();
+  render();
+}
+
+// Clear empties History, and drops the replaced / gone upgrade records an
+// older version showed under "Finished" (kept until now for list_upgrades'
+// includeReplaced).
 async function clearUpgradeHistory() {
   var keys = Object.keys(upgrades);
   for (var i = 0; i < keys.length; i++) {
     if (upgradeIsHistory(upgrades[keys[i]])) delete upgrades[keys[i]];
   }
+  jobHistory = [];
   if (focusedUpgrade && !upgrades[focusedUpgrade]) focusedUpgrade = null;
   await saveUpgrades();
   render();
@@ -9795,7 +10017,9 @@ function upgradesTab() {
   if (!Object.keys(upgrades).length) {
     children.push({ type: "text", className: "plugin-muted",
       content: "Nothing downloading. Right-click any song and choose Soulseek: Download, or type one above. Each download finds the best file, fetches it and puts it in your library — or, for a song you already have, offers to replace your copy. Take over any of them to choose the file yourself." });
-    return { type: "layout", direction: "vertical", children: children };
+    // A saved song leaves the jobs, so an empty list is often a finished one:
+    // History still shows under it.
+    return { type: "layout", direction: "vertical", children: children.concat(jobHistoryNodes()) };
   }
   var shown = panelUpgrade(upgrades, focusedUpgrade);
   var shownKey = shown ? jobKeyOf(shown) : null;
@@ -9846,23 +10070,32 @@ function upgradesTab() {
     children = children.concat(list("ended", ended));
   }
   if (!needs.length && !progress.length && !ended.length) children.push(mutedText("Nothing pending."));
-  // Finished upgrades are of little use once done: one folded line, and the
-  // list only on request.
-  var history = upgradeRows("history", null);
-  if (history.length) {
-    children.push({ type: "toolbar", title: "Finished", status: history.length + " done",
-      buttons: [{ label: showUpgradeHistory ? "Hide" : "Show", action: "upgrade-history-toggle" },
-        { label: "Clear", action: "upgrade-history-clear", icon: "✕" }] });
-    if (showUpgradeHistory) {
-      children.push({
-        type: "track-row-list",
-        items: history,
-        showHeader: false,
-        actions: declaredActions([{ id: "upgrade-remove", label: "Remove", icon: "✕" }], history)
-      });
-    }
-  }
-  return { type: "layout", direction: "vertical", children: children };
+  return { type: "layout", direction: "vertical", children: children.concat(jobHistoryNodes()) };
+}
+
+// History: what every download came to, kept quiet — one folded line at the
+// foot of the Downloads tab, the rows only on request. Selectable, because
+// only a selectable list draws a row's hover actions.
+function jobHistoryNodes() {
+  if (!jobHistory.length) return [];
+  var out = [{ type: "toolbar", title: "History", status: jobHistorySummary(jobHistory),
+    buttons: [{ label: showUpgradeHistory ? "Hide" : "Show", action: "upgrade-history-toggle" },
+      { label: "Clear", action: "upgrade-history-clear", icon: "✕" }] }];
+  if (!showUpgradeHistory) return out;
+  var rows = jobHistoryRows(jobHistory, nowMs());
+  out.push({
+    type: "track-row-list",
+    items: rows,
+    selectable: true,
+    showHeader: false,
+    actions: declaredActions([
+      { id: "history-play", label: "Play", icon: "▶" },
+      { id: "history-again", label: "Download again", icon: "↻" },
+      { id: "history-remove", label: "Remove from history", icon: "✕" }
+    ], rows)
+  });
+  if (jobHistory.length >= JOB_HISTORY_MAX) out.push(mutedText("The last " + JOB_HISTORY_MAX + " are kept."));
+  return out;
 }
 
 // The one setting that decides what a download looks for — first in
@@ -10493,6 +10726,7 @@ async function loadServerState() {
   fallback = {};
   sharers = {};
   upgrades = {};
+  jobHistory = [];
   resolveHistory = [];
   fallbackLastUsedAt = null;
   try {
@@ -10512,6 +10746,12 @@ async function loadServerState() {
       savedLeft.forEach(function (k) { delete upgrades[k]; });
       await api.storage.set(stateKey("upgrades"), upgrades);
     }
+    // Download History (0.31). Never stored yet: start it from the replaced /
+    // gone upgrades the old "Finished" line listed, so it isn't empty for
+    // someone who has used upgrades. Once stored — even emptied by Clear — it
+    // is read as it is.
+    var jh = await api.storage.get(stateKey("jobHistory"));
+    jobHistory = Array.isArray(jh) ? jh.slice(0, JOB_HISTORY_MAX) : seedJobHistory(upgrades);
     var hist = await api.storage.get(stateKey("resolveHistory"));
     if (Array.isArray(hist)) resolveHistory = hist.slice(0, RESOLVE_HISTORY_MAX);
     var used = await api.storage.get(stateKey("fallbackLastUsedAt"));
@@ -10903,6 +11143,14 @@ return {
   _rowTransferStatus: rowTransferStatus,
   _ownedInFolder: ownedInFolder,
   _fallbackSongRows: fallbackSongRows,
+  _fallbackIntroNode: fallbackIntroNode,
+  _deletableKeptKeys: deletableKeptKeys,
+  _jobHistoryEntry: jobHistoryEntry,
+  _withJobHistory: withJobHistory,
+  _jobHistorySummary: jobHistorySummary,
+  _jobHistoryRows: jobHistoryRows,
+  _seedJobHistory: seedJobHistory,
+  _JOB_HISTORY_MAX: JOB_HISTORY_MAX,
   _keptStatus: function () { return keptStatus; },
   _fallbackStatusNode: fallbackStatusNode,
   _sidebarBadge: sidebarBadge,
@@ -10918,6 +11166,7 @@ return {
   _queueUpgrade: queueUpgrade,
   _advanceUpgrades: advanceUpgrades,
   _upgrades: function () { return upgrades; },
+  _jobHistory: function () { return jobHistory; },
   _setTracked: function (key, rec) { tracked[key] = rec; },
   _handleCompletions: handleCompletions,
   _upgradeSource: upgradeSource,

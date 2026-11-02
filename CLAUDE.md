@@ -267,8 +267,21 @@ than by a long-running promise, because a stranger's queue can outlast a restart
 - **Grouped, not one "Pending" list** (UX pass, owner-approved 2026-10-28, from a mockup):
   `upgradeGroup` → **Needs you** (ready, alternative; *Replace all ready*) · **In progress**
   (searching, downloading, checking) · **Didn't work out** (none, failed, cancelled; *Search all
-  again* `upgrade-retry-ended`, *Clear* `upgrade-clear-ended`) · History (folded: *Show* / *Clear*,
-  `showUpgradeHistory`, memory only). Each list declares its own actions (`UPGRADE_LIST_ACTIONS`).
+  again* `upgrade-retry-ended`, *Clear* `upgrade-clear-ended`) · **History** (folded: *Show* /
+  *Clear*, `showUpgradeHistory` memory only). Each list declares its own actions (`UPGRADE_LIST_ACTIONS`).
+- **History is a log of endings, not of jobs** (owner, 2026-11-02, from a mockup: "a subtle
+  history of what has been downloaded or failed"). A saved song leaves the jobs at once (0.29)
+  and a failure goes on Clear, so `jobHistory` (storage, `stateKey`, newest first, capped at
+  `JOB_HISTORY_MAX` 50) keeps one small record per ending: `setUpgradeState` records a real
+  change *into* an ending (`JOB_ENDINGS`: replaced · failed · none → counted as failed ·
+  cancelled · gone → listed, not counted — a re-worded state is not a new ending) and
+  `finishSavedJob` records **saved** with where it landed. The line is `jobHistorySummary`
+  ("14 saved · 1 replaced · 2 failed"); rows (`jobHistoryRows`) offer *Play* when a song was left
+  (`playHistoryEntry` reads the library row, strips its `file://`), *Download again* for what
+  didn't work out (`startJob` by name, an upgrade's `upgradeOf` row id carried), and *Remove from
+  history*. It replaced the "Finished" line (replaced / gone upgrades only); the first load with
+  no stored History seeds it from those records (`seedJobHistory`). *Clear* empties it and drops
+  those records. It also shows under an empty jobs list — the usual state once everything saved.
   The tab count (`upgradesTabCount`) is what needs you, else what runs.
 - **A queued search says it is waiting.** slskd runs one search at a time, so a batch's entries
   queue: `upgradeSearchQueue` (running one = `upgradeSearchKey`, then key order, which is the order
@@ -391,6 +404,14 @@ the fallback; download history matters less. Each rule replaced a complaint:
   row went to the foot of the tab here and came back to the **top** on 2026-10-28: an MP3 library
   left at the FLAC default read "Nothing better" everywhere with the reason below the fold. Its
   description says new upgrades use it and running ones keep theirs.
+- **Fallback says what it is, and leaves library songs alone** (owner, 2026-11-02, from a
+  mockup). `fallbackIntroNode` opens the tab: what the fallback does, why files are kept, and —
+  read off `fallbackLimitsOn()`, since cleanup is **off** by default — either that old files are
+  cleaned up by the limits or that cleanup is off and where to turn it on. A song **in your
+  library** (`keptStatus.inLibrary`: its file is inside a collection, or the library has its own
+  copy) gets **no Delete file**: it's the library's to manage. *Delete kept files…* (was *Delete
+  all files…*) deletes `deletableKeptKeys` only and its confirmation names how many library songs
+  it leaves alone. Automatic cleanup still sees every kept file.
 - **Fallback**: the top line is `fallbackStatusNode` — the plugin can't see whether the user
   switched it on or where it sits in the order (the host doesn't say), so it reports its own
   history and names where the switch lives. Recent resolves are track rows (`historyRows`) with
