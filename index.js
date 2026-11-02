@@ -236,6 +236,12 @@ var ledgerSeen = {};
 // in flight), so every search — the view's, a context-menu one, an assistant
 // tool's — goes through this chain.
 var searchChain = Promise.resolve();
+// The search slskd is running right now (it runs one at a time): `owner` is
+// the caller's isStale function — how the Search tab tells its own search from
+// an upgrade's or the fallback's — and `finishEarly` is the tab's Stop, which
+// ends it like the 30 s cap does: stop slskd, rank what arrived.
+var activeSearch = null;
+var searchTicker = null;
 // What the assistant's recent `search` calls produced, keyed by candidate id,
 // so `download` can be handed ids instead of (user, filename, size) triples.
 // Each holds { c, mode, seq }: the candidate, the upgrade mode of the search it
@@ -2030,9 +2036,18 @@ async function performSearchNow(query, prefs, onProgress, isStale, until) {
   }
   var id = res.json.id;
   var startedAt = Date.now();
+  var me = { owner: isStale || null, query: query, startedAt: startedAt, finishEarly: false };
+  activeSearch = me;
+  try {
+    return await pollSearch(id, prefs, onProgress, stale, capAt, startedAt, me);
+  } finally {
+    if (activeSearch === me) activeSearch = null;
+  }
+}
 
+async function pollSearch(id, prefs, onProgress, stale, capAt, startedAt, me) {
   var last = null;
-  while (Date.now() < capAt) {
+  while (Date.now() < capAt && !me.finishEarly) {
     await sleep(Math.max(0, Math.min(SEARCH_POLL_MS, capAt - Date.now())));
     if (stale()) { await stopSearch(id); return null; }
 
@@ -2070,6 +2085,7 @@ async function performSearchNow(query, prefs, onProgress, isStale, until) {
     ranked.responseCount = partial.length;
     return ranked;
   }
+  if (me.finishEarly) throw new Error("Search stopped before anyone answered.");
   throw new Error("Search timed out after " + Math.round((Date.now() - startedAt) / 1000) + " seconds.");
 }
 
@@ -2131,7 +2147,8 @@ async function runSearch(query, extra) {
   if (!query || readiness.state !== "ready") return;
   var gen = ++searchGen;
   var mode = (extra && extra.mode) || null;
-  search = { query: query, id: null, running: true, responseCount: 0, fileCount: 0, matchCount: 0, folderCount: 0, results: [], folders: [], error: null, sortColumn: null, sortDir: "desc", folderSortColumn: null, folderSortDir: "desc", mode: mode, note: (extra && extra.note) || null };
+  var isStale = function () { return gen !== searchGen; };
+  search = { query: query, id: null, running: true, responseCount: 0, fileCount: 0, matchCount: 0, folderCount: 0, results: [], folders: [], error: null, sortColumn: null, sortDir: "desc", folderSortColumn: null, folderSortDir: "desc", mode: mode, note: (extra && extra.note) || null, isStale: isStale, requestedAt: nowMs() };
   // Filling an album is a folder job — Soulseek users share whole albums — so
   // that mode opens on the Folders view, as does a search handed over from an
   // album (`extra.folders`); everything else opens on Files.
@@ -2139,6 +2156,7 @@ async function runSearch(query, extra) {
   openFolder = null;
   folderOwned = {};
   folderOwnedChecked = {};
+  startSearchTicker();
   render();
 
   var ranked;
@@ -2148,9 +2166,10 @@ async function runSearch(query, extra) {
       search.responseCount = responses;
       search.fileCount = files;
       render();
-    }, function () { return gen !== searchGen; });
+    }, isStale);
   } catch (e) {
     if (gen !== searchGen) return;
+    stopSearchTicker();
     search.running = false;
     search.error = (e && e.message) || String(e);
     render();
@@ -2168,7 +2187,67 @@ async function runSearch(query, extra) {
   search.results = ranked.slice(0, MAX_RESULT_FILES);
   search.folders = folders.slice(0, MAX_RESULT_FOLDERS);
   search.running = false;
+  stopSearchTicker();
   render();
+}
+
+// While the tab's search runs, redraw once a second so its clock moves — also
+// while it waits behind another search, when no poll would redraw it.
+function startSearchTicker() {
+  stopSearchTicker();
+  searchTicker = setInterval(function () {
+    if (!search.running) { stopSearchTicker(); return; }
+    if (activeTab === "search" || activeTab === "folders") render();
+  }, 1000);
+}
+function stopSearchTicker() {
+  if (searchTicker) clearInterval(searchTicker);
+  searchTicker = null;
+}
+
+// Pure: when the tab's own search started at slskd, or null while it still
+// waits its turn behind an upgrade's or the fallback's.
+function tabSearchStartedAt(s, active) {
+  return s && s.running && active && active.owner && active.owner === s.isStale ? active.startedAt : null;
+}
+
+// Stop: a running search ends now and shows what arrived; one still waiting
+// its turn is dropped.
+function stopTabSearch() {
+  if (!search.running) return;
+  if (tabSearchStartedAt(search, activeSearch) != null) {
+    activeSearch.finishEarly = true;
+    return;
+  }
+  searchGen++;
+  stopSearchTicker();
+  search.running = false;
+  search.error = "Search cancelled.";
+  render();
+}
+
+// Pure: what the Search tab shows while its search runs. `startedAt` null =
+// waiting behind another search (slskd runs one at a time). The bar is the
+// clock against the cap — a true figure: the results come by then at the
+// latest — and the line says what has arrived so far.
+function searchRunningNodes(s, startedAt, now, capMs) {
+  if (startedAt == null) {
+    var waited = Math.max(0, Math.floor((now - (s.requestedAt || now)) / 1000));
+    return [
+      { type: "loading", message: "Waiting for another Soulseek search to finish — slskd runs one at a time" + (waited >= 2 ? " · " + waited + "s" : "") + "…" },
+      buttonRow([actionButton("Cancel", "search-stop")])
+    ];
+  }
+  var secs = Math.max(0, Math.floor((now - startedAt) / 1000));
+  var capSecs = Math.round(capMs / 1000);
+  var found = s.fileCount
+    ? formatCount(s.fileCount) + " files from " + formatCount(s.responseCount) + (s.responseCount === 1 ? " user" : " users") + " so far"
+    : (s.responseCount ? formatCount(s.responseCount) + (s.responseCount === 1 ? " user answered" : " users answered") + ", no files yet" : "No answers yet");
+  return [
+    { type: "loading", message: "Searching Soulseek for “" + s.query + "”…" },
+    { type: "progress-bar", value: Math.min(secs, capSecs), max: capSecs, label: found + " · " + secs + "s · results by " + capSecs + "s at the latest" },
+    buttonRow([actionButton(s.fileCount ? "Stop and show results" : "Stop", "search-stop")])
+  ];
 }
 
 // ---------------------------------------------------------------------------
@@ -2784,18 +2863,38 @@ function fallbackStatusNode(history, last, now, lastUsedAt, summary) {
 
 // The sidebar item says "working" while a resolve runs, so it shows from any
 // view; a problem with slskd itself (badgeFor) always wins over it.
+// The sidebar item is the one signal outside the view: a readiness problem
+// first, then a fallback resolve, then how many downloads are under way (a
+// right-click Download runs with the view closed), then a search running.
 function sidebarBadge() {
   var b = badgeFor(readiness.state);
   if (b) return b;
   if (lastResolve && lastResolve.outcome === "running") {
     return { type: "dot", variant: "accent", tooltip: "Finding “" + lastResolve.title + "” on Soulseek…" };
   }
+  var busy = busyJobCount(upgrades);
+  if (busy > 0) return { type: "count", value: busy, variant: "accent" };
+  if (search.running) return { type: "dot", variant: "accent", tooltip: "Searching Soulseek for “" + search.query + "”…" };
   return null;
 }
 
+// Pure: downloads still working (searching, downloading, checking, saving).
+function busyJobCount(all) {
+  var n = 0;
+  for (var k in all || {}) if (upgradeIsBusy(all[k])) n++;
+  return n;
+}
+
+// render() runs on every poll tick, so the badge is pushed only on a change —
+// each setBadge re-renders the host's sidebar.
+var lastBadgeJson = null;
 function pushBadge() {
   if (!api || !api.ui || typeof api.ui.setBadge !== "function") return;
-  api.ui.setBadge(VIEW_ID, sidebarBadge());
+  var b = sidebarBadge();
+  var json = JSON.stringify(b);
+  if (json === lastBadgeJson) return;
+  lastBadgeJson = json;
+  api.ui.setBadge(VIEW_ID, b);
 }
 
 function renderIfFallback() {
@@ -5755,7 +5854,7 @@ function rowTransferStatus(t, rec, playable, now) {
   if (p === "failed") return { phase: "failed", badge: { label: "Failed", variant: "error" }, progress: null, actions: ["show-job"], action: undefined };
   if (p === "downloading" || p === "starting") {
     var pr = transferProgress(t);
-    return { phase: "moving", badge: { label: "Downloading" + (pr != null ? " " + Math.round(pr * 100) + "%" : ""), variant: "accent" },
+    return { phase: "moving", badge: { label: "Downloading" + (pr != null ? " " + Math.round(pr * 100) + "%" : ""), variant: "accent", pulse: true },
       progress: pr, actions: ["cancel-transfer"], action: undefined };
   }
   return { phase: "waiting", badge: { label: "Queued" + (t && t.placeInQueue != null ? " · #" + t.placeInQueue : ""), variant: "warning" },
@@ -6217,12 +6316,7 @@ function searchTab() {
   }
 
   if (search.running) {
-    children.push({
-      type: "loading",
-      message: search.fileCount
-        ? search.fileCount + " files from " + search.responseCount + " users so far…"
-        : "Searching Soulseek — this takes a few seconds…"
-    });
+    children = children.concat(searchRunningNodes(search, tabSearchStartedAt(search, activeSearch), nowMs(), SEARCH_CAP_MS));
     return { type: "layout", direction: "vertical", children: children };
   }
 
@@ -6339,12 +6433,12 @@ function transferRowProgress(t) {
 
 // Pure: the chip on an Upgrades row, by state.
 var UPGRADE_BADGES = {
-  searching: { label: "Searching", variant: "muted" },
+  searching: { label: "Searching", variant: "accent", pulse: true },
   choosing: { label: "Your pick", variant: "warning" },
-  saving: { label: "Saving", variant: "accent" },
+  saving: { label: "Saving", variant: "accent", pulse: true },
   saved: { label: "In your library", variant: "success" },
-  downloading: { label: "Downloading", variant: "accent" },
-  checking: { label: "Checking", variant: "accent" },
+  downloading: { label: "Downloading", variant: "accent", pulse: true },
+  checking: { label: "Checking", variant: "accent", pulse: true },
   ready: { label: "Ready", variant: "success" },
   alternative: { label: "Better copy found", variant: "warning" },
   none: { label: "Nothing better", variant: "muted" },
@@ -6366,9 +6460,19 @@ function upgradeBadge(e, t, ahead) {
   return UPGRADE_BADGES[e.state] || null;
 }
 
-// Pure: an upgrade row's bar — the active download's, while it moves.
-function upgradeRowProgress(e, t) {
-  return e && e.state === "downloading" && t ? transferRowProgress(t) : null;
+// Pure: an upgrade row's bar — the active download's while bytes move, and
+// the host's sweep ("indeterminate") while the plugin itself is working with
+// no figure to show: its search running, the file being checked or saved.
+// Nothing for a row that is only waiting — its own search queued behind
+// another (`ahead`), or the file in a sharer's queue — since a moving bar
+// there would claim work nobody is doing. Hosts before the sweep draw nothing.
+var SWEEP = "indeterminate";
+function upgradeRowProgress(e, t, ahead) {
+  if (!e) return null;
+  if (e.state === "downloading") return t ? transferRowProgress(t) : null;
+  if (e.state === "searching") return ahead > 0 ? null : SWEEP;
+  if (e.state === "checking" || e.state === "saving") return SWEEP;
+  return null;
 }
 
 // The Fallback tab's "Last search" details: what the last automatic resolve
@@ -6883,6 +6987,7 @@ function fallbackSettingsSection() {
 function render() {
   if (!api) return;
   pushViewHeader();
+  pushBadge();
   if (managed.setup) {
     api.ui.setViewData(VIEW_ID, setupProgressView(), { scrollKey: "setup" });
     return;
@@ -7144,6 +7249,7 @@ function registerActions() {
     var q = (data && data.query) || "";
     runSearch(q.trim()).catch(function (e) { console.error("slskd search failed:", e); });
   });
+  api.ui.onAction("search-stop", function () { stopTabSearch(); });
 
   // Cmd+K hands its typed query over through this reserved action. The host
   // only auto-seeds a TOP-LEVEL search-input, and ours sits inside the Search
@@ -9458,7 +9564,7 @@ function upgradeRows(group, shownKey, queue) {
         title: e.title,
         subtitle: line,
         badge: upgradeBadge(e, t, queue[key]) || undefined,
-        progress: upgradeRowProgress(e, t),
+        progress: upgradeRowProgress(e, t, queue[key]),
         album: e.album || undefined,
         duration: e.durationSecs != null ? formatDurationSecs(e.durationSecs) : undefined,
         durationSecs: e.durationSecs,
@@ -10613,6 +10719,7 @@ async function activate(hostApi) {
 function deactivate() {
   startWait = null;
   if (readinessTimer) clearInterval(readinessTimer);
+  stopSearchTicker();
   if (transferTimer) clearTimeout(transferTimer);
   if (saveTimer) clearTimeout(saveTimer);
   readinessTimer = null;
@@ -10644,6 +10751,9 @@ return {
   _transferRowProgress: transferRowProgress,
   _upgradeBadge: upgradeBadge,
   _upgradeRowProgress: upgradeRowProgress,
+  _searchRunningNodes: searchRunningNodes,
+  _tabSearchStartedAt: tabSearchStartedAt,
+  _busyJobCount: busyJobCount,
   _queueUpgrades: queueUpgrades,
   _batchUpgradeNote: batchUpgradeNote,
   _replaceAllReady: replaceAllReady,

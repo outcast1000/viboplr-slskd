@@ -1,6 +1,23 @@
 # Changelog
 
-## 0.29.0
+## 0.30.0
+
+- **A search shows how it's going.** While it runs, the Search tab shows
+  how long it has been searching on a bar that fills toward the 30-second
+  limit (results come by then at the latest), with what has arrived so far
+  ("1,234 files from 28 users"). **Stop and show results** ends it early and
+  ranks what arrived. A search waiting behind another (slskd runs one at a
+  time) says so, with **Cancel**.
+- **Downloads that are working look like it.** A download's chip pulses
+  while it searches, downloads, checks or saves. Its bar sweeps while the
+  plugin works with no figure to show (its search, the file check), and
+  fills while bytes arrive. A download that is only waiting, in a sharer's
+  queue or behind other searches, stays still.
+- **The sidebar shows how many downloads are under way.** A count stays on
+  the Soulseek item until they finish, so a Download started from a right-click
+  menu shows progress with the view closed. A running search shows a dot.
+- The pulse and sweep need a Viboplr with them. Older versions show the same
+  chips and text without the motion.
 
 - **All settings are on the Settings tab.** **Look for** (the quality a
   download looks for) moved from the top of the Downloads tab to the start of

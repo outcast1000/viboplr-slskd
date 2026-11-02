@@ -215,16 +215,66 @@ test("transferRowProgress: a bar only while bytes move", () => {
 
 test("upgradeBadge / upgradeRowProgress: one chip per state; a queued download says Queued", () => {
   const b = (state, t) => plugin._upgradeBadge({ state }, t);
-  assert.deepEqual(b("searching"), { label: "Searching", variant: "muted" });
-  assert.deepEqual(b("downloading", { state: "Queued, Remotely" }), { label: "Queued", variant: "warning" });
-  assert.deepEqual(b("downloading", { state: "InProgress" }), { label: "Downloading", variant: "accent" });
+  assert.deepEqual(b("searching"), { label: "Searching", variant: "accent", pulse: true });
+  assert.deepEqual(b("downloading", { state: "Queued, Remotely" }), { label: "Queued", variant: "warning" }, "waiting: no pulse");
+  assert.deepEqual(b("downloading", { state: "InProgress" }), { label: "Downloading", variant: "accent", pulse: true });
+  assert.deepEqual(b("checking"), { label: "Checking", variant: "accent", pulse: true });
   assert.deepEqual(b("ready"), { label: "Ready", variant: "success" });
   assert.deepEqual(b("alternative"), { label: "Better copy found", variant: "warning" });
   assert.deepEqual(b("failed"), { label: "Didn't work", variant: "error" });
   assert.deepEqual(plugin._upgradeBadge({ state: "searching" }, null, 1), { label: "Up next", variant: "muted" });
   assert.deepEqual(plugin._upgradeBadge({ state: "searching" }, null, 4), { label: "Waiting", variant: "muted" });
-  assert.deepEqual(plugin._upgradeBadge({ state: "searching" }, null, 0), { label: "Searching", variant: "muted" });
+  assert.deepEqual(plugin._upgradeBadge({ state: "searching" }, null, 0), { label: "Searching", variant: "accent", pulse: true });
   assert.equal(plugin._upgradeBadge(null), null);
   assert.equal(plugin._upgradeRowProgress({ state: "downloading" }, { state: "InProgress", size: 10, bytesTransferred: 5 }), 0.5);
   assert.equal(plugin._upgradeRowProgress({ state: "ready" }, { state: "InProgress", size: 10, bytesTransferred: 5 }), null);
+});
+
+test("upgradeRowProgress: the sweep while the plugin works with no figure, nothing while a row only waits", () => {
+  const p = plugin._upgradeRowProgress;
+  assert.equal(p({ state: "searching" }, null, 0), "indeterminate", "its search is running");
+  assert.equal(p({ state: "searching" }, null, 2), null, "queued behind other searches");
+  assert.equal(p({ state: "checking" }, null), "indeterminate");
+  assert.equal(p({ state: "saving" }, null), "indeterminate");
+  assert.equal(p({ state: "downloading" }, { state: "Queued, Remotely" }), null, "in a sharer's queue");
+  assert.equal(p({ state: "downloading" }, null), null);
+  assert.equal(p({ state: "choosing" }, null), null, "waiting for the user");
+  assert.equal(p({ state: "failed" }, null), null);
+});
+
+test("searchRunningNodes: waiting its turn, then a clock against the cap with what arrived and a Stop", () => {
+  const n = plugin._searchRunningNodes;
+  const t0 = 1e9;
+  const waiting = n({ query: "x", requestedAt: t0 }, null, t0 + 5000, 30000);
+  assert.match(waiting[0].message, /Waiting for another Soulseek search.*5s/);
+  assert.equal(waiting[1].children[0].label, "Cancel");
+  assert.equal(waiting[1].children[0].action, "search-stop");
+
+  const early = n({ query: "Low", fileCount: 0, responseCount: 0 }, t0, t0 + 3400, 30000);
+  assert.match(early[0].message, /Searching Soulseek for “Low”/);
+  assert.deepEqual([early[1].type, early[1].value, early[1].max], ["progress-bar", 3, 30]);
+  assert.match(early[1].label, /^No answers yet · 3s/);
+  assert.equal(early[2].children[0].label, "Stop");
+
+  const some = n({ query: "Low", fileCount: 1234, responseCount: 1 }, t0, t0 + 45000, 30000);
+  assert.equal(some[1].value, 30, "clamped at the cap");
+  assert.match(some[1].label, /^1,234 files from 1 user so far/);
+  assert.equal(some[2].children[0].label, "Stop and show results");
+});
+
+test("tabSearchStartedAt: only the tab's own search counts as started", () => {
+  const mine = () => false;
+  const s = { running: true, isStale: mine };
+  assert.equal(plugin._tabSearchStartedAt(s, { owner: mine, startedAt: 7 }), 7);
+  assert.equal(plugin._tabSearchStartedAt(s, { owner: () => false, startedAt: 7 }), null, "an upgrade's search");
+  assert.equal(plugin._tabSearchStartedAt(s, null), null);
+  assert.equal(plugin._tabSearchStartedAt({ running: false, isStale: mine }, { owner: mine, startedAt: 7 }), null);
+});
+
+test("busyJobCount: jobs still working, not those waiting on the user or done", () => {
+  assert.equal(plugin._busyJobCount({
+    a: { state: "searching" }, b: { state: "downloading" }, c: { state: "checking" }, d: { state: "saving" },
+    e: { state: "ready" }, f: { state: "choosing" }, g: { state: "failed" }
+  }), 4);
+  assert.equal(plugin._busyJobCount({}), 0);
 });

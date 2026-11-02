@@ -336,6 +336,21 @@ Each tab owns one job, and a setting lives next to what it controls:
   Below target), a kept file still downloading — or where a row is special in its group (an
   **Upgrade** chip on a download fetched as one). Never a "Downloading" chip under the Downloading
   group title. Bars only while bytes move (`transferRowProgress`), never a 0% bar for a queued file.
+- **Motion means work** (owner asked for search / download feedback, 2026-11-02). Live chips carry
+  `pulse: true` (Searching · Downloading · Checking · Saving, `UPGRADE_BADGES`; the search row's
+  Downloading). `upgradeRowProgress` sends `"indeterminate"` (host sweep) while the plugin works
+  without a figure: its own search running (`ahead === 0`), checking, saving. A row that only
+  **waits** (queued behind searches, in a sharer's queue, your pick) gets neither. Older hosts
+  ignore both, which is why no `minAppVersion` bump. The sidebar (`sidebarBadge`) adds, after
+  readiness and the fallback dot, a **count** of busy jobs (`busyJobCount`), then a dot while the
+  tab's search runs; `pushBadge` runs from `render()`, change-gated on its JSON.
+- **The tab's search** shows `searchRunningNodes`: a `progress-bar` of elapsed seconds against
+  `SEARCH_CAP_MS` (a real bound, not invented progress), what arrived, and **Stop** (`search-stop`).
+  `activeSearch` (set by `performSearchNow`, keyed by the caller's `isStale` function) tells the
+  tab's own search from an upgrade's or the fallback's: its own → `finishEarly` ends the poll loop
+  the way the cap does (stop slskd, rank what arrived); still queued → dropped ("Search
+  cancelled."). A 1 s `searchTicker` redraws while it runs, because no poll redraws a search still
+  waiting its turn.
 
 ### UX pass (owner-approved 2026-10-11)
 

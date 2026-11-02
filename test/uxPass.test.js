@@ -465,3 +465,40 @@ test("folderQualityLabel / folderRowStatus", () => {
   assert.equal(plugin._folderQualityLabel([]), "");
   assert.equal(plugin._folderRowStatus({ username: "u", files: [flac(1)] }, Date.now()), null, "nothing queued, no chip");
 });
+
+test("Search: a running search shows its clock and what arrived, and Stop ranks what arrived", async () => {
+  const p = loadPlugin();
+  let stopped = false;
+  const h = fakeHost({
+    library: { tracks: [] },
+    fetch: async (url, init) => {
+      const json = (v) => ({ status: 200, text: async () => JSON.stringify(v) });
+      const method = (init && init.method) || "GET";
+      if (url.includes("/api/v0/searches") && method === "POST") return json({ id: "s1" });
+      if (url.includes("/api/v0/searches/s1") && method === "PUT") { stopped = true; return json({}); }
+      if (url.includes("/responses")) return json(stopped ? BODIES : []);
+      // Never completes by itself: only Stop (or the 30 s cap) ends it.
+      if (url.includes("/api/v0/searches/s1")) return json({ id: "s1", state: "InProgress", responseCount: 2, fileCount: 4 });
+      return undefined;
+    }
+  });
+  await p.activate(h.api);
+  try {
+    h.actions["search"]({ query: "ok computer" });
+    await waitFor(() => findNodes(lastView(h), (n) => n.type === "progress-bar").length === 1 &&
+      /4 files/.test(findNodes(lastView(h), (n) => n.type === "progress-bar")[0].label));
+    const bar = findNodes(lastView(h), (n) => n.type === "progress-bar")[0];
+    assert.equal(bar.max, 30);
+    assert.match(bar.label, /4 files from 2 users so far/);
+    assert.equal(h.calls.badges[h.calls.badges.length - 1].type, "dot", "the sidebar says a search runs");
+    const stop = findNodes(lastView(h), (n) => n.type === "button" && n.action === "search-stop")[0];
+    assert.equal(stop.label, "Stop and show results");
+    h.actions["search-stop"]();
+    await waitFor(() => findNodes(lastView(h), (n) => n.type === "track-row-list").length === 1);
+    assert.ok(stopped, "slskd was told to stop");
+    assert.equal(findNodes(lastView(h), (n) => n.type === "progress-bar").length, 0);
+    assert.equal(h.calls.badges[h.calls.badges.length - 1], null, "the dot clears");
+  } finally {
+    p.deactivate();
+  }
+});
