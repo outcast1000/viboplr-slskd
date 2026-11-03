@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.32.0
+
+- **Search in results.** A second box sits over the Search tab's results and
+  narrows them as you type, without asking Soulseek again. Every word must
+  appear in the file's path, its sharer or its quality ("flac 24",
+  "remaster 2011", a sharer's name), accents and case aside, and it works on
+  the Files and Folders views alike (a folder is found by a track inside it).
+  It searches the whole result set, including the files past the 1,000 shown,
+  and says how many of how many match; **Clear filter** brings the full list
+  back, and a new search starts with an empty box.
+
 ## 0.31.0
 
 - **Downloads keep a quiet History.** A song saved to your library leaves the

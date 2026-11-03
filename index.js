@@ -202,8 +202,14 @@ var activeTab = "search";
 // `mode` is what a context-menu action asked the search to do beyond finding
 // files — see "Upgrade / fill-album modes" — and is dropped by the next plain
 // search.
-var search = { query: "", id: null, running: false, responseCount: 0, fileCount: 0, matchCount: 0, folderCount: 0, results: [], folders: [], error: null, sortColumn: null, sortDir: "desc", folderSortColumn: null, folderSortDir: "desc", mode: null };
+// `all` / `allFolders` are the whole ranked lists, kept so "Search in results"
+// (`filtered`, see `filterSearchResults`) can reach past the cap; `allHay` /
+// `folderHay` are their match texts, built on the first filter keystroke.
+var search = { query: "", id: null, running: false, responseCount: 0, fileCount: 0, matchCount: 0, folderCount: 0, results: [], folders: [], all: [], allFolders: [], allHay: null, folderHay: null, filtered: null, filterText: "", error: null, sortColumn: null, sortDir: "desc", folderSortColumn: null, folderSortDir: "desc", mode: null };
 var searchGen = 0;
+// Bumped by every new search and by "Clear filter": the results filter box's
+// `stateKey`, so the host's box (which keeps its own text) starts empty.
+var resultFilterGen = 0;
 
 var transfers = [];       // raw slskd transfer records (downloads)
 var tracked = {};         // "user filename" -> { destination, b64, resolvedPath, meta, size, length }
@@ -2148,7 +2154,8 @@ async function runSearch(query, extra) {
   var gen = ++searchGen;
   var mode = (extra && extra.mode) || null;
   var isStale = function () { return gen !== searchGen; };
-  search = { query: query, id: null, running: true, responseCount: 0, fileCount: 0, matchCount: 0, folderCount: 0, results: [], folders: [], error: null, sortColumn: null, sortDir: "desc", folderSortColumn: null, folderSortDir: "desc", mode: mode, note: (extra && extra.note) || null, isStale: isStale, requestedAt: nowMs() };
+  resultFilterGen++;
+  search = { query: query, id: null, running: true, responseCount: 0, fileCount: 0, matchCount: 0, folderCount: 0, results: [], folders: [], all: [], allFolders: [], allHay: null, folderHay: null, filtered: null, filterText: "", error: null, sortColumn: null, sortDir: "desc", folderSortColumn: null, folderSortDir: "desc", mode: mode, note: (extra && extra.note) || null, isStale: isStale, requestedAt: nowMs() };
   // Filling an album is a folder job — Soulseek users share whole albums — so
   // that mode opens on the Folders view, as does a search handed over from an
   // album (`extra.folders`); everything else opens on Files.
@@ -2184,6 +2191,8 @@ async function runSearch(query, extra) {
   var folders = groupByFolder(ranked);
   search.matchCount = ranked.length;
   search.folderCount = folders.length;
+  search.all = ranked;
+  search.allFolders = folders;
   search.results = ranked.slice(0, MAX_RESULT_FILES);
   search.folders = folders.slice(0, MAX_RESULT_FOLDERS);
   search.running = false;
@@ -5804,10 +5813,11 @@ function resultCells(c) {
 // for all of it — only what the mode was started for.
 function visibleResults() {
   var m = search.mode;
-  if (!m || m.showAll) return search.results;
-  if (m.kind === "upgrade") return search.results.filter(function (c) { return c.better; });
-  if (m.kind === "fill") return search.results.filter(function (c) { return !c.owned; });
-  return search.results;
+  var base = search.filtered ? search.filtered.results : search.results;
+  if (!m || m.showAll) return base;
+  if (m.kind === "upgrade") return base.filter(function (c) { return c.better; });
+  if (m.kind === "fill") return base.filter(function (c) { return !c.owned; });
+  return base;
 }
 
 // A track's upgrade is a one-file job: no Folders view, whose only offer for
@@ -5818,8 +5828,91 @@ function singleFileMode(mode) {
 
 function visibleFolders() {
   var m = search.mode;
-  if (!m || m.kind !== "fill" || m.showAll) return search.folders;
-  return search.folders.filter(function (g) { return missingFiles(g.files, m.owned).length > 0; });
+  var base = search.filtered ? search.filtered.folders : search.folders;
+  if (!m || m.kind !== "fill" || m.showAll) return base;
+  return base.filter(function (g) { return missingFiles(g.files, m.owned).length > 0; });
+}
+
+// ---- search in results -----------------------------------------------------
+// A filter over what the search already found: nothing is asked of Soulseek.
+// Every word typed must appear (accent- and case-insensitive, anywhere in a
+// word) in the row's sharer, remote path or quality label, so "flac 24",
+// "remaster 2011" or a sharer's name narrow the list. It runs over the WHOLE
+// ranked list, not the 1,000 rows on screen: the rows it is for are often
+// exactly the ones past the cap. Order stays the ranking (or the column sort),
+// and a mode's own filter (Upgrade, Fill) still applies on top.
+
+function resultFilterWords(query) {
+  var n = normalizeText(query);
+  return n ? n.split(" ") : [];
+}
+
+// Pure: the text a file row is matched against.
+function candidateHaystack(c) {
+  return normalizeText([c.username, String(c.filename || ""), qualityLabel(c)].join(" "));
+}
+
+// Pure: a folder's: its sharer, its path, and every file name in it, so a
+// folder is found by a track it holds.
+function folderHaystack(g) {
+  var bits = [g.username, String(g.folder || ""), folderQualityLabel(g.files)];
+  for (var i = 0; i < (g.files || []).length; i++) bits.push(basenameRemote(g.files[i].filename));
+  return normalizeText(bits.join(" "));
+}
+
+function hasAllWords(hay, words) {
+  for (var i = 0; i < words.length; i++) if (hay.indexOf(words[i]) < 0) return false;
+  return true;
+}
+
+// Pure: `null` for a blank query (no filter), else the matching files and
+// folders, capped like the unfiltered lists, with their full counts. `allHay`
+// / `folderHay` are the haystacks of `all` / `folders`, index for index.
+function filterSearchResults(all, allHay, folders, folderHay, query, maxFiles, maxFolders) {
+  var words = resultFilterWords(query);
+  if (!words.length) return null;
+  var files = [], dirs = [];
+  for (var i = 0; i < (all || []).length; i++) if (hasAllWords(allHay[i], words)) files.push(all[i]);
+  for (var j = 0; j < (folders || []).length; j++) if (hasAllWords(folderHay[j], words)) dirs.push(folders[j]);
+  return {
+    query: String(query).trim(),
+    results: files.slice(0, maxFiles),
+    folders: dirs.slice(0, maxFolders),
+    matchCount: files.length,
+    folderCount: dirs.length
+  };
+}
+
+function setResultFilter(query) {
+  search.filterText = String(query || "");
+  if (!resultFilterWords(query).length) { search.filtered = null; return; }
+  if (!search.allHay) search.allHay = search.all.map(candidateHaystack);
+  if (!search.folderHay) search.folderHay = search.allFolders.map(folderHaystack);
+  search.filtered = filterSearchResults(search.all, search.allHay, search.allFolders, search.folderHay, query, MAX_RESULT_FILES, MAX_RESULT_FOLDERS);
+}
+
+// The box itself. Not submit-only: it filters as you type.
+function resultFilterInput() {
+  return {
+    type: "search-input",
+    placeholder: "Search in results: artist, album, file name, format, sharer…",
+    action: "results-filter",
+    value: search.filterText || "",
+    stateKey: "slskd-results-filter-" + resultFilterGen
+  };
+}
+
+// The line under the box while it filters, with the way out.
+function resultFilterNote(fileCount, folderCount, singleFile) {
+  var f = search.filtered;
+  if (!f) return [];
+  var what = singleFile || activeTab !== "folders"
+    ? formatCount(f.matchCount) + " of " + formatCount(search.matchCount) + " files"
+    : formatCount(f.folderCount) + " of " + formatCount(search.folderCount) + " folders";
+  var text = fileCount || folderCount
+    ? what + " match “" + f.query + "”."
+    : "Nothing in these results matches “" + f.query + "”.";
+  return [buttonRow([mutedText(text), actionButton("Clear filter", "results-filter-clear")])];
 }
 
 function sortedResults() {
@@ -6285,12 +6378,13 @@ function truncationNote() {
   // Under a mode's filter the shown count is the filter's doing, not the cap's,
   // and "the best 3 of 20,431" would blame the wrong thing.
   if (search.mode && !search.mode.showAll) return null;
-  var shown = activeTab === "folders" ? search.folders.length : search.results.length;
-  var total = activeTab === "folders" ? search.folderCount : search.matchCount;
+  var src = search.filtered || search;
+  var shown = activeTab === "folders" ? src.folders.length : src.results.length;
+  var total = activeTab === "folders" ? src.folderCount : src.matchCount;
   var noun = activeTab === "folders" ? "folders" : "files";
   if (!total || total <= shown) return null;
-  return "Showing the best " + formatCount(shown) + " of " + formatCount(total) + " " + noun +
-    ". Narrow the search to see the rest.";
+  return "Showing the best " + formatCount(shown) + " of " + formatCount(total) + (search.filtered ? " matching " : " ") + noun +
+    ". " + (search.filtered ? "Add a word to the filter" : "Narrow the search") + " to see the rest.";
 }
 
 function searchTab() {
@@ -6345,6 +6439,11 @@ function searchTab() {
   if (singleFile && activeTab === "folders") activeTab = "search";
   var files = visibleResults();
   var folders = singleFile ? [] : visibleFolders();
+  children.push(resultFilterInput());
+  children = children.concat(resultFilterNote(files.length, folders.length, singleFile));
+  if (search.filtered && !files.length && !folders.length) {
+    return { type: "layout", direction: "vertical", children: children };
+  }
   if (mode && !mode.showAll && !files.length && !folders.length) {
     children.push({ type: "text", className: "plugin-muted", content: upgrading
       ? "Nothing better than your copy turned up among " + formatCount(search.matchCount) + " files. Show everything found to see them anyway."
@@ -7174,7 +7273,8 @@ function candidateByRef(ref) {
   var fromFolder = raw.indexOf("o:") === 0;
   if (raw.indexOf("f:") === 0 || fromFolder) raw = raw.slice(2);
   var g = fromFolder ? folderByRef(openFolder) : null;
-  var list = g ? g.files : search.results;
+  // The full list: a row shown under the filter may lie past the cap.
+  var list = g ? g.files : (search.all && search.all.length ? search.all : search.results);
   for (var i = 0; i < list.length; i++) {
     var c = list[i];
     if (c.username + KEY_SEP + c.filename === raw) return c;
@@ -7185,8 +7285,9 @@ function candidateByRef(ref) {
 function folderByRef(ref) {
   var raw = String(ref || "");
   if (raw.indexOf("d:") === 0) raw = raw.slice(2);
-  for (var i = 0; i < search.folders.length; i++) {
-    if (search.folders[i].key === raw) return search.folders[i];
+  var list = search.allFolders && search.allFolders.length ? search.allFolders : search.folders;
+  for (var i = 0; i < list.length; i++) {
+    if (list[i].key === raw) return list[i];
   }
   return null;
 }
@@ -7286,6 +7387,16 @@ function registerActions() {
     runSearch(q.trim()).catch(function (e) { console.error("slskd search failed:", e); });
   });
   api.ui.onAction("search-stop", function () { stopTabSearch(); });
+  api.ui.onAction("results-filter", function (data) {
+    if (search.running) return;
+    setResultFilter((data && data.query) || "");
+    render();
+  });
+  api.ui.onAction("results-filter-clear", function () {
+    setResultFilter("");
+    resultFilterGen++;
+    render();
+  });
 
   // Cmd+K hands its typed query over through this reserved action. The host
   // only auto-seeds a TOP-LEVEL search-input, and ours sits inside the Search
@@ -11000,6 +11111,9 @@ return {
   _plainTransferError: plainTransferError,
   _waitedFor: waitedFor,
   _withRecentSearch: withRecentSearch,
+  _filterSearchResults: filterSearchResults,
+  _candidateHaystack: candidateHaystack,
+  _folderHaystack: folderHaystack,
   _folderSubtitle: folderSubtitle,
   _folderQualityLabel: folderQualityLabel,
   _folderRowStatus: folderRowStatus,

@@ -278,3 +278,76 @@ test("busyJobCount: jobs still working, not those waiting on the user or done", 
   }), 4);
   assert.equal(plugin._busyJobCount({}), 0);
 });
+
+// --- Search in results ------------------------------------------------------
+
+test("filterSearchResults: every word, anywhere in the path, sharer or quality; past the cap; blank = no filter", () => {
+  const f = plugin._filterSearchResults;
+  const hayC = plugin._candidateHaystack, hayG = plugin._folderHaystack;
+  const files = [
+    { username: "peerA", filename: "Music\Radiohead\OK Computer\01 - Airbag.flac", extension: "flac", qualityTier: 0, bitDepth: 16, sampleRate: 44100 },
+    { username: "peerB", filename: "Music\Radiohead\Kid A\01 - Everything.mp3", extension: "mp3", qualityTier: 1, bitRate: 320 },
+    { username: "björk_fan", filename: "Mp3\Björk\Homogenic\03 - Jóga.mp3", extension: "mp3", qualityTier: 1, bitRate: 320 }
+  ];
+  const folders = [
+    { username: "peerA", folder: "Music\Radiohead\OK Computer", files: [files[0]] },
+    { username: "peerB", folder: "Music\Radiohead\Kid A", files: [files[1]] }
+  ];
+  const run = (q, max) => f(files, files.map(hayC), folders, folders.map(hayG), q, max || 10, max || 10);
+  assert.equal(run("   "), null, "blank is no filter");
+  assert.deepEqual(run("radiohead flac").results.map((c) => c.username), ["peerA"], "all words, from folder and extension");
+  assert.deepEqual(run("320").results.map((c) => c.username), ["peerB", "björk_fan"], "the quality label counts");
+  assert.deepEqual(run("JOGA bjork").results.map((c) => c.username), ["björk_fan"], "accent- and case-insensitive");
+  assert.deepEqual(run("peerb").results.length, 1, "the sharer counts");
+  assert.deepEqual(run("airbag").folders.map((g) => g.username), ["peerA"], "a folder is found by a file in it");
+  const capped = run("mp3", 1);
+  assert.equal(capped.results.length, 1);
+  assert.equal(capped.matchCount, 2, "counts the matches past the cap");
+  assert.equal(run("nothing here").results.length, 0);
+});
+
+test("Search in results: the box filters the finished list as you type, past the cap, and Clear brings it back", async () => {
+  const p = loadPlugin();
+  let polls = 0;
+  const files = [];
+  for (let i = 0; i < 1200; i++) files.push({ filename: "m\Band " + i + "\01 - Song " + i + ".mp3", size: 5e6 + i, length: 200, bitRate: 320 });
+  files.push({ filename: "m\Rare Band\01 - Hidden Gem.flac", size: 1e6, length: 200, bitDepth: 16, sampleRate: 44100 });
+  const h = fakeHost({ fetch: async (url, init) => {
+    const json = (v) => ({ status: 200, text: async () => JSON.stringify(v) });
+    if (url.includes("/api/v0/searches") && init && init.method === "POST") return json({ id: "s1" });
+    if (url.includes("/responses")) return json([{ username: "peer", hasFreeUploadSlot: true, queueLength: 0, uploadSpeed: 1, files }]);
+    if (url.includes("/api/v0/searches/s1")) { polls++; return json({ id: "s1", state: polls >= 2 ? "Completed" : "InProgress", responseCount: 1, fileCount: files.length }); }
+    return undefined;
+  } });
+  await p.activate(h.api);
+  try {
+    await h.actions["search"]({ query: "band" });
+    const until = Date.now() + 8000;
+    while (Date.now() < until && !findNodes(lastView(h), (n) => n.type === "track-row-list").length) await new Promise((r) => setTimeout(r, 50));
+    const listOf = () => findNodes(lastView(h), (n) => n.type === "track-row-list")[0];
+    const box = findNodes(lastView(h), (n) => n.type === "search-input" && n.action === "results-filter")[0];
+    assert.ok(box, "the box is under the results");
+    assert.ok(!box.submitOnly && !box.buttonLabel, "it filters as you type");
+    assert.equal(listOf().items.length, 1000, "capped before filtering");
+
+    h.actions["results-filter"]({ query: "hidden gem" });
+    assert.equal(listOf().items.length, 1, "found past the 1,000-row cap");
+    assert.match(listOf().items[0].title || listOf().items[0].label || JSON.stringify(listOf().items[0]), /Hidden Gem/);
+    const note = findNodes(lastView(h), (n) => n.type === "text" && /match “hidden gem”/.test(n.content || ""));
+    assert.equal(note.length, 1, "says how many of how many match");
+
+    h.actions["results-filter"]({ query: "no such words" });
+    assert.ok(!listOf(), "no list when nothing matches");
+    assert.ok(findNodes(lastView(h), (n) => n.type === "text" && /Nothing in these results matches/.test(n.content || "")).length);
+    assert.ok(findNodes(lastView(h), (n) => n.type === "search-input" && n.action === "results-filter").length, "the box stays to edit");
+
+    const keyBefore = box.stateKey;
+    h.actions["results-filter-clear"]();
+    assert.equal(listOf().items.length, 1000, "cleared");
+    const after = findNodes(lastView(h), (n) => n.type === "search-input" && n.action === "results-filter")[0];
+    assert.notEqual(after.stateKey, keyBefore, "a fresh key empties the host's box");
+    assert.equal(after.value, "");
+  } finally {
+    p.deactivate();
+  }
+});
