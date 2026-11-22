@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.33.0
+- **Download**, **Download and let me choose…** and **Search…** now say which shared action they are, so Viboplr groups them with the other plugins' versions ("Download ▸ … Soulseek ▸ Download / Download and let me choose…", "Find downloads ▸ …"). Older Viboplr versions show the menu as before.
+- **"Fill missing tracks…" is gone from the album menu.** The album page's "Not in library" rows are where missing tracks are found now.
+
 ## 0.32.0
 
 - **Search in results.** A second box sits over the Search tab's results and

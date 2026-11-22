@@ -1,7 +1,7 @@
 {
   "id": "slskd",
   "name": "Soulseek",
-  "version": "0.32.0",
+  "version": "0.33.0",
   "author": "Viboplr",
   "description": "Search and download from the Soulseek network via a slskd daemon: ranked results, whole-album grabs, live transfer progress, finished files that play and reach your library, and a playback fallback that fetches a missing track from Soulseek.",
   "minAppVersion": "1.0.113",
@@ -259,14 +259,16 @@
         "label": "Download",
         "targets": [
           "track"
-        ]
+        ],
+        "action": "download"
       },
       {
         "id": "slskd-download-choose",
         "label": "Download and let me choose…",
         "targets": [
           "track"
-        ]
+        ],
+        "action": "download"
       },
       {
         "id": "slskd-search",
@@ -274,14 +276,8 @@
         "targets": [
           "album",
           "artist"
-        ]
-      },
-      {
-        "id": "slskd-fill-album",
-        "label": "Fill missing tracks…",
-        "targets": [
-          "album"
-        ]
+        ],
+        "action": "find-source"
       }
     ]
   }

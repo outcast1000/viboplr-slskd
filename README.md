@@ -105,10 +105,6 @@ rejected, or slskd not signed in to Soulseek — each with the fix.
   Select several tracks to upgrade them all (up to 100 at a time); their
   searches run one after another, and finished ones wait at Ready until you
   choose *Replace all ready…*, which shows Viboplr's compare dialog for each.
-- **Right-click → Soulseek: Fill missing tracks…** on an album: every
-  folder found is compared with the tracks you already have; open a folder
-  and **Download the N you don't have** fetches just those. "Show everything
-  found" lifts either filter.
 - **Every download is a job, Search's too.** Download on a result (a file, a
   selection or a whole folder) starts one job per file on the **Downloads**
   tab, holding the file you picked: it skips the job's own search, then is

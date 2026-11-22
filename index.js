@@ -8143,10 +8143,8 @@ function registerActions() {
     }
     return queueUpgrade(target).catch(function (e) { console.error("slskd upgrade failed:", e); });
   });
-
-  api.contextMenu.onAction("slskd-fill-album", function (target) {
-    startFill(target).catch(function (e) { console.error("slskd fill-album failed:", e); });
-  });
+  // "Fill missing tracks…" was taken off the album menu (2026-11-22, owner
+  // decision); its fill mode (startFill) has no entry point left.
 }
 
 // ---------------------------------------------------------------------------
