@@ -333,7 +333,7 @@ test("integration: a file slskd refuses fails its job with the reason, and says 
   }
 });
 
-test("adoptFileNames: tags replace the filename's guess once; Fill keeps its album", () => {
+test("adoptFileNames: tags replace the filename's guess once; a job saved by the removed Fill mode keeps its album", () => {
   const e = { from: "file", title: "Rammstein - Mutter - 05 - Feuer frei!", artist: null, album: "x", trackNumber: null };
   assert.equal(plugin._adoptFileNames(e, { title: "Feuer frei!", artist: "Rammstein", album: "Mutter", trackNumber: "5/11" }), true);
   assert.deepEqual([e.title, e.artist, e.album, e.trackNumber, e.from], ["Feuer frei!", "Rammstein", "Mutter", 5, null]);

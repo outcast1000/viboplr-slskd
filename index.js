@@ -200,7 +200,7 @@ var activeTab = "search";
 // `results` / `folders` are the capped slices the view renders. `sortColumn` is
 // null while the list is in ranked ("best match") order.
 // `mode` is what a context-menu action asked the search to do beyond finding
-// files — see "Upgrade / fill-album modes" — and is dropped by the next plain
+// files — see "Upgrade mode" — and is dropped by the next plain
 // search.
 // `all` / `allFolders` are the whole ranked lists, kept so "Search in results"
 // (`filtered`, see `filterSearchResults`) can reach past the cap; `allHay` /
@@ -1277,14 +1277,14 @@ function artistWords(artist, spelled) {
 }
 
 // ---------------------------------------------------------------------------
-// Upgrade / fill-album modes (context menu)
+// Upgrade mode
 // ---------------------------------------------------------------------------
-// Two context-menu actions run an ordinary search and then read its results
-// against the library: "Upgrade" hides everything that isn't better than the
-// copy in hand, "Fill missing tracks" hides everything the album already has.
-// Both stay interactive — the user still picks the file or folder — because a
-// download asked for by hand gets a file the user chose, never a best guess
-// (the same rule that keeps this plugin without a metadata download provider).
+// "Upgrade" runs an ordinary search and then reads its results against the
+// library, hiding everything that isn't better than the copy in hand. It stays
+// interactive — the user still picks the file — because a download asked for
+// by hand gets a file the user chose, never a best guess (the same rule that
+// keeps this plugin without a metadata download provider). (A "Fill missing
+// tracks" mode for albums lived here too; it was removed in 0.33.0.)
 
 // The library row described the way a search result describes itself. The host
 // stores a container and a size but no bitrate, so for a lossy file the rate is
@@ -1329,38 +1329,8 @@ function isUpgradeOver(candidate, current) {
   return candidate.bitRate >= current.bitRate * UPGRADE_MIN_RATE_GAIN;
 }
 
-// Which owned track a Soulseek file is a copy of, or null. The filename's title
-// (track number and "Artist - " prefix stripped by parseTrackMeta) is matched on
-// words the way the fallback matches a request to a file, in BOTH directions so
-// "Song" doesn't claim "Song Part Two", and a variant word the owned title
-// lacks ("live", "remix") marks a different recording, not a copy.
-function ownedTrackFor(candidate, owned) {
-  var list = owned || [];
-  if (!candidate || !list.length) return null;
-  var fileWords = titleWords(parseTrackMeta(candidate.filename).title);
-  if (!fileWords.length) return null;
-  for (var i = 0; i < list.length; i++) {
-    var want = titleWords(list[i].title);
-    if (!want.length) continue;
-    if (coverage(want, fileWords) < FALLBACK_MIN_TITLE_MATCH) continue;
-    if (coverage(fileWords, want) < 0.5) continue;
-    var variant = false;
-    for (var v = 0; v < fileWords.length; v++) {
-      if (VARIANT_WORDS.indexOf(fileWords[v]) >= 0 && want.indexOf(fileWords[v]) < 0) { variant = true; break; }
-    }
-    if (variant) continue;
-    return list[i];
-  }
-  return null;
-}
-
-function missingFiles(files, owned) {
-  return (files || []).filter(function (c) { return !ownedTrackFor(c, owned); });
-}
-
 // Stamp every ranked result with the mode's verdict once, so the view's filters
-// and the folder cards read a flag instead of re-matching 20,000 filenames on
-// every render.
+// read a flag instead of re-checking 20,000 files on every render.
 function annotateForMode(ranked, mode) {
   if (!mode) return;
   for (var i = 0; i < ranked.length; i++) {
@@ -1368,8 +1338,6 @@ function annotateForMode(ranked, mode) {
     if (mode.kind === "upgrade") {
       c.better = isUpgradeOver(c, mode.current);
       c.source = upgradeSource(c, mode);
-    } else if (mode.kind === "fill") {
-      c.owned = !!ownedTrackFor(c, mode.owned);
     }
   }
 }
@@ -2156,10 +2124,10 @@ async function runSearch(query, extra) {
   var isStale = function () { return gen !== searchGen; };
   resultFilterGen++;
   search = { query: query, id: null, running: true, responseCount: 0, fileCount: 0, matchCount: 0, folderCount: 0, results: [], folders: [], all: [], allFolders: [], allHay: null, folderHay: null, filtered: null, filterText: "", error: null, sortColumn: null, sortDir: "desc", folderSortColumn: null, folderSortDir: "desc", mode: mode, note: (extra && extra.note) || null, isStale: isStale, requestedAt: nowMs() };
-  // Filling an album is a folder job — Soulseek users share whole albums — so
-  // that mode opens on the Folders view, as does a search handed over from an
-  // album (`extra.folders`); everything else opens on Files.
-  activeTab = (mode && mode.kind === "fill") || (extra && extra.folders) ? "folders" : "search";
+  // An album is a folder job — Soulseek users share whole albums — so a search
+  // handed over from an album (`extra.folders`) opens on the Folders view;
+  // everything else opens on Files.
+  activeTab = extra && extra.folders ? "folders" : "search";
   openFolder = null;
   folderOwned = {};
   folderOwnedChecked = {};
@@ -5816,7 +5784,6 @@ function visibleResults() {
   var base = search.filtered ? search.filtered.results : search.results;
   if (!m || m.showAll) return base;
   if (m.kind === "upgrade") return base.filter(function (c) { return c.better; });
-  if (m.kind === "fill") return base.filter(function (c) { return !c.owned; });
   return base;
 }
 
@@ -5826,11 +5793,9 @@ function singleFileMode(mode) {
   return !!mode && mode.kind === "upgrade";
 }
 
+// No mode filters folders (Upgrade has no Folders view — see singleFileMode).
 function visibleFolders() {
-  var m = search.mode;
-  var base = search.filtered ? search.filtered.folders : search.folders;
-  if (!m || m.kind !== "fill" || m.showAll) return base;
-  return base.filter(function (g) { return missingFiles(g.files, m.owned).length > 0; });
+  return search.filtered ? search.filtered.folders : search.folders;
 }
 
 // ---- search in results -----------------------------------------------------
@@ -5840,7 +5805,7 @@ function visibleFolders() {
 // "remaster 2011" or a sharer's name narrow the list. It runs over the WHOLE
 // ranked list, not the 1,000 rows on screen: the rows it is for are often
 // exactly the ones past the cap. Order stays the ranking (or the column sort),
-// and a mode's own filter (Upgrade, Fill) still applies on top.
+// and a mode's own filter (Upgrade's) still applies on top.
 
 function resultFilterWords(query) {
   var n = normalizeText(query);
@@ -6091,36 +6056,23 @@ function folderRowStatus(g, now) {
     : { label: "Queued " + (done + active) + " of " + n, variant: "warning" };
 }
 
-// The files a folder row's Download fetches: in Fill, the ones the album
-// lacks; otherwise all of them — minus anything already on its way.
+// The files a folder row's Download fetches: all of them, minus anything
+// already on its way.
 function folderRowFiles(g) {
-  var m = search.mode;
-  var files = m && m.kind === "fill" ? missingFiles(g.files, m.owned) : g.files;
-  return notYetQueued(files);
+  return notYetQueued(g.files);
 }
 
 function folderRows() {
-  var m = search.mode;
-  var fill = m && m.kind === "fill" ? m : null;
   var now = nowMs();
   return sortedFolders().map(function (g) {
     var rep = sharerLabel(sharers[g.username]);
     var cells = { tracks: String(g.files.length), size: formatBytes(g.totalSize), availability: availabilityLabel(g) + (rep ? " · " + rep : "") };
     var quality = folderQualityLabel(g.files);
     if (quality) cells.quality = quality;
-    var subtitle = g.username;
-    if (fill) {
-      // What the row offers is the folder's contribution to THIS album, not
-      // the folder: how many of its files you lack and what they weigh.
-      var missing = missingFiles(g.files, fill.owned);
-      subtitle += " · " + (missing.length
-        ? missing.length + " you don't have · " + formatBytes(sumSizes(missing))
-        : "you have all of these");
-    }
     var row = {
       id: "d:" + g.key,
       title: g.name,
-      subtitle: subtitle,
+      subtitle: g.username,
       cells: cells,
       imageUrl: folderTile(g.files),
       action: "open-folder",
@@ -6133,9 +6085,8 @@ function folderRows() {
 }
 
 function folderRowActions(rows) {
-  var fill = search.mode && search.mode.kind === "fill";
   return declaredActions([
-    { id: "folder-row-download", label: fill ? "Download the ones you don't have" : "Download folder", icon: "⬇" },
+    { id: "folder-row-download", label: "Download folder", icon: "⬇" },
     { id: "open-folder", label: "Open folder", icon: "›" }
   ], rows, ["open-folder"]);
 }
@@ -6151,8 +6102,7 @@ var folderOwnedChecked = {};
 
 var FOLDER_OWNED_LOOKUPS_MAX = 40;
 
-// Plain searches ask the library about each song once per folder; Fill knows
-// already, from its mode.
+// The library is asked about each song once per folder.
 // `folderOwnedChecked[key]` is "pending" while the lookups run and true once
 // they're done — the view says "Checking your library…" until then.
 async function checkFolderOwned(g) {
@@ -6175,17 +6125,10 @@ async function checkFolderOwned(g) {
   }
 }
 
-// Pure: which of a folder's files the library has, as { filename: true }.
-function ownedInFolder(g, mode, ownedByName) {
-  if (mode && mode.kind === "fill") {
-    var missing = missingFiles(g.files, mode.owned);
-    var miss = {};
-    for (var i = 0; i < missing.length; i++) miss[missing[i].filename] = true;
-    var out = {};
-    for (var j = 0; j < g.files.length; j++) if (!miss[g.files[j].filename]) out[g.files[j].filename] = true;
-    return out;
-  }
-  return ownedByName || {};
+// Which of a folder's files the library has, as { filename: true } — empty
+// until `checkFolderOwned` has answered.
+function ownedInFolder(g) {
+  return folderOwned[g.key] || {};
 }
 
 // Pure-ish: the files that aren't queued, downloading or done already. Failed
@@ -6214,7 +6157,7 @@ var FOLDER_COLUMNS = RESULT_COLUMNS.map(function (c) {
 function folderView(g) {
   var out = [];
   out.push({ type: "toolbar", title: g.name, status: folderSubtitle(g), buttons: [] });
-  var owned = ownedInFolder(g, search.mode, folderOwned[g.key]);
+  var owned = ownedInFolder(g);
   var files = g.files.slice().sort(function (a, b) {
     var x = basenameRemote(a.filename).toLowerCase(), y = basenameRemote(b.filename).toLowerCase();
     return x < y ? -1 : x > y ? 1 : 0;
@@ -6224,7 +6167,7 @@ function folderView(g) {
   var ownedCount = files.filter(function (c) { return owned[c.filename]; }).length;
   // Until the library has answered, "all" may include songs you own, so it
   // isn't the button to press first.
-  var checking = !(search.mode && search.mode.kind === "fill") && folderOwnedChecked[g.key] !== true;
+  var checking = folderOwnedChecked[g.key] !== true;
   // Back leads the row: after a long folder name in the toolbar it drifted
   // toward the middle.
   var buttons = [actionButton("← Folders", "close-folder", "secondary")];
@@ -6298,8 +6241,8 @@ function resultsToolbar(fileCount, folderCount, singleFile) {
 
 // ---- recent searches -------------------------------------------------------
 // The last few plain searches as one-click buttons under the box, in place of
-// retyping. Modes (Upgrade, Fill) aren't remembered: they come from a track or
-// an album, not from the box.
+// retyping. Upgrade searches aren't remembered: they come from a track, not
+// from the box.
 var RECENT_SEARCH_MAX = 6;
 var recentSearches = [];
 
@@ -6348,12 +6291,8 @@ function modeHeader() {
     if (cur.size) have += " · " + formatBytes(cur.size);
     out.push({ type: "text", content: "Upgrading “" + m.title + "”" + (m.artist ? " by " + m.artist : "") +
       " — your copy is " + have + ". " + (m.showAll ? "Showing every file found; better ones are marked." : "Showing only files that would be an upgrade."), className: "plugin-muted" });
-  } else if (m.kind === "fill") {
-    out.push({ type: "text", content: "Filling “" + m.albumTitle + "”" + (m.artistName ? " by " + m.artistName : "") +
-      " — you have " + m.owned.length + (m.owned.length === 1 ? " track" : " tracks") + " of it. " +
-      (m.showAll ? "Showing every file and folder found." : "Showing only files you don't have; open a folder to download just those."), className: "plugin-muted" });
   }
-  out.push({ type: "button", label: m.showAll ? "Only what's missing" : "Show everything found", action: "mode-show-all", variant: "secondary" });
+  out.push({ type: "button", label: m.showAll ? "Only upgrades" : "Show everything found", action: "mode-show-all", variant: "secondary" });
   return out;
 }
 
@@ -6368,7 +6307,6 @@ function modeRecExtra(mode) {
       meta: { title: m.title, artist: m.artist, album: m.album, track_number: m.trackNumber }
     };
   }
-  if (m.kind === "fill") return { meta: { album: m.albumTitle, album_artist: m.artistName } };
   return null;
 }
 
@@ -7574,9 +7512,7 @@ function registerActions() {
     openFolder = g.key;
     activeTab = "folders";
     render();
-    if (!(search.mode && search.mode.kind === "fill")) {
-      checkFolderOwned(g).catch(function (e) { console.error("slskd: checking a folder against the library failed:", e); });
-    }
+    checkFolderOwned(g).catch(function (e) { console.error("slskd: checking a folder against the library failed:", e); });
   });
 
   api.ui.onAction("close-folder", function () {
@@ -7584,9 +7520,9 @@ function registerActions() {
     render();
   });
 
-  // A folder row's hover button: the folder without opening it — in Fill the
-  // files the album lacks, otherwise all of them (folderRowFiles). An older
-  // host's bulk toolbar sends a selection instead; each selected folder goes.
+  // A folder row's hover button: the whole folder without opening it
+  // (folderRowFiles). An older host's bulk toolbar sends a selection instead;
+  // each selected folder goes.
   api.ui.onAction("folder-row-download", function (data) {
     var refs = (data && data.selectedIds && data.selectedIds.length) ? data.selectedIds : [data && data.itemId];
     var files = [];
@@ -7599,11 +7535,11 @@ function registerActions() {
   });
 
   // The open folder's button: everything not yet queued, or — `which:
-  // "missing"` — only the songs the library lacks (in Fill, the album's).
+  // "missing"` — only the songs the library lacks.
   api.ui.onAction("folder-download", function (data) {
     var g = folderByRef(openFolder);
     if (!g) return;
-    var owned = ownedInFolder(g, search.mode, folderOwned[g.key]);
+    var owned = ownedInFolder(g);
     var files = g.files;
     if (data && data.which === "missing") files = files.filter(function (c) { return !owned[c.filename]; });
     files = notYetQueued(files);
@@ -8143,8 +8079,6 @@ function registerActions() {
     }
     return queueUpgrade(target).catch(function (e) { console.error("slskd upgrade failed:", e); });
   });
-  // "Fill missing tracks…" was taken off the album menu (2026-11-22, owner
-  // decision); its fill mode (startFill) has no entry point left.
 }
 
 // ---------------------------------------------------------------------------
@@ -8715,7 +8649,8 @@ async function beginUpgrade(row, opts) {
 // `jobForPick`). The job then starts at rest ("choosing") instead of
 // searching, and the caller hands it the file. `opts.from` says which names
 // came from the file and may be corrected by its tags once it lands
-// (`adoptFileNames`): "file" (all of them) or "fill" (all but the album).
+// (`adoptFileNames`): "file" (all of them). A job saved before 0.33.0 may still
+// say "fill" (all but the album) — the removed Fill mode's.
 async function beginGetJob(song, opts) {
   var pick = !!(opts && opts.pick);
   var wantT = normalizeText(song.title), wantA = normalizeText(song.artist || "");
@@ -8790,8 +8725,8 @@ function planJob(e) {
 // downloading, then the same check and save as any job — so a file found by
 // hand ends in the library like everything else, and the Downloads tab is
 // the one place every download is followed. Which song each file is: the
-// search mode's (Download → that song, Upgrade → that library track, Fill →
-// that album), else the file's own name, corrected by its tags once it lands.
+// search mode's (Download → that song, Upgrade → that library track), else
+// the file's own name, corrected by its tags once it lands.
 async function downloadPicks(list) {
   var m = search.mode;
   var started = 0;
@@ -8824,17 +8759,8 @@ async function jobForPick(c, m) {
     if (u) return pickInto(u, c);
   }
   var meta = parseTrackMeta(c.filename);
-  var song;
-  var from;
-  if (m && m.kind === "fill") {
-    song = { title: meta.title, artist: m.artistName || meta.artist, album: m.albumTitle || meta.album, trackNumber: meta.trackNumber };
-    from = "fill";
-  } else {
-    song = { title: meta.title, artist: meta.artist, album: meta.album, trackNumber: meta.trackNumber };
-    from = "file";
-  }
-  song.durationSecs = c.length || null;
-  var r = await beginGetJob(song, { pick: true, from: from });
+  var song = { title: meta.title, artist: meta.artist, album: meta.album, trackNumber: meta.trackNumber, durationSecs: c.length || null };
+  var r = await beginGetJob(song, { pick: true, from: "file" });
   return pickInto(r.entry, c);
 }
 
@@ -8886,8 +8812,8 @@ async function fetchChosen(e, c, next) {
 }
 
 // Pure-ish: a job started from a bare file takes the names its tags give,
-// once they are read — the filename was only a guess. Fill keeps the album
-// it is filling. Once only.
+// once they are read — the filename was only a guess. A job saved by the
+// removed Fill mode (`from: "fill"`) keeps the album it was filling. Once only.
 function adoptFileNames(e, meta) {
   if (!e.from || !meta) return false;
   var before = [e.title, e.artist, e.album].join(KEY_SEP);
@@ -10218,12 +10144,11 @@ function upgradeTargetRow() {
 }
 
 // ---------------------------------------------------------------------------
-// Upgrade / fill-album entry points
+// Upgrade entry point
 // ---------------------------------------------------------------------------
-// Both fall back to the plain "Search on Soulseek…" behaviour when the library
-// can't answer — a track that isn't a local library row has nothing to replace,
-// an album with no rows here has nothing to compare against — and say so, so
-// the user isn't left wondering why the filter never appeared.
+// Falls back to the plain "Search on Soulseek…" behaviour when the library
+// can't answer — a track that isn't a local library row has nothing to replace
+// — and says so, so the user isn't left wondering why the filter never appeared.
 // The library row a track target names. A target from the queue or Now Playing
 // often carries no library id — the host only has one when the queue entry
 // cached it — so the row is then found by name: same title and artist after
@@ -10318,59 +10243,6 @@ async function startUpgrade(target) {
   // hand is a different version, not a better copy of this one.
   if (row.duration_secs != null && row.duration_secs > 0) extra.knownDurationSecs = row.duration_secs;
   await runSearch(searchQueryForTarget({ kind: "track", title: row.title, artistName: row.artist_name }), extra);
-}
-
-// The album's library rows. An album target normally carries its id; one built
-// from names alone (the control API's plugin-action route) is looked up by
-// title + artist through the library's FTS.
-async function albumRowsFor(t) {
-  if (!api.library || typeof api.library.getTracks !== "function") return { id: null, tracks: [] };
-  var albumId = t.albumId != null ? t.albumId : null;
-  var title = t.albumTitle || t.title || "";
-  if (albumId == null && title && typeof api.library.ftsAlbums === "function") {
-    try {
-      var hits = await api.library.ftsAlbums(title, { limit: 20 }) || [];
-      var wantTitle = normalizeText(title);
-      var wantArtist = t.artistName ? normalizeText(t.artistName) : null;
-      for (var i = 0; i < hits.length; i++) {
-        if (normalizeText(hits[i].title) !== wantTitle) continue;
-        if (wantArtist && normalizeText(hits[i].artist_name || "") !== wantArtist) continue;
-        albumId = hits[i].id;
-        break;
-      }
-    } catch (e) {
-      console.error("slskd: album lookup failed:", e);
-    }
-  }
-  if (albumId == null) return { id: null, tracks: [] };
-  try {
-    return { id: albumId, tracks: await api.library.getTracks({ albumId: albumId, limit: 1000 }) || [] };
-  } catch (e) {
-    console.error("slskd: could not read album " + albumId + ":", e);
-    return { id: albumId, tracks: [] };
-  }
-}
-
-async function startFill(target) {
-  var t = target || {};
-  api.ui.navigateToView(VIEW_ID);
-  var title = t.albumTitle || t.title || "";
-  var album = await albumRowsFor(t);
-  if (!album.tracks.length) {
-    return plainSearch({ kind: "album", albumTitle: title, artistName: t.artistName },
-      "“" + title + "” has no tracks in your library to compare against — searching Soulseek for the whole album instead.");
-  }
-  var mode = {
-    kind: "fill",
-    albumId: album.id,
-    albumTitle: title,
-    artistName: t.artistName || null,
-    owned: album.tracks.map(function (r) {
-      return { title: r.title, trackNumber: r.track_number != null ? r.track_number : null, durationSecs: r.duration_secs != null ? r.duration_secs : null };
-    }),
-    showAll: false
-  };
-  await runSearch(searchQueryForTarget({ kind: "album", albumTitle: title, artistName: t.artistName }), { mode: mode });
 }
 
 // Hand a finished upgrade to the host's download modal with the library row it
@@ -11270,8 +11142,6 @@ return {
   _finishResolve: finishResolve,
   _libraryQuality: libraryQuality,
   _isUpgradeOver: isUpgradeOver,
-  _ownedTrackFor: ownedTrackFor,
-  _missingFiles: missingFiles,
   _startUpgrade: startUpgrade,
   _trackedQuality: trackedQuality,
   _finishedFileRefusal: finishedFileRefusal,
@@ -11317,7 +11187,6 @@ return {
   _upgradesTabCount: upgradesTabCount,
   _sameLibraryPath: sameLibraryPath,
   _setUpgradeTimings: function (searchMs, stallMs) { UPGRADE_SEARCH_MS = searchMs; if (stallMs != null) UPGRADE_STALL_MS = stallMs; },
-  _startFill: startFill,
   _setFallbackSearchMs: function (ms) { FALLBACK_SEARCH_MS = ms; },
   // Tests: what slskd's transfer list holds, without a poll.
   _setTransfersForTest: function (list) { transfers = list; }

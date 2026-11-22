@@ -6,11 +6,10 @@ const { fakeHost } = require("./harness/host");
 const plugin = loadPlugin();
 const SEP = plugin._KEY_SEP;
 
-// --- Upgrade / fill-album modes ---------------------------------------------
-// Two context-menu actions run a search and read it against the library:
-// "Upgrade with Soulseek…" keeps only files better than the copy in hand,
-// "Fill missing tracks with Soulseek…" keeps only files the album lacks. The
-// user still picks what to download — neither is a metadata download provider.
+// --- Upgrade mode -------------------------------------------------------------
+// Upgrade runs a search and reads it against the library, keeping only files
+// better than the copy in hand. The user still picks what to download — it is
+// not a metadata download provider. (Fill missing tracks was removed in 0.33.0.)
 
 // --- libraryQuality ---------------------------------------------------------
 
@@ -55,30 +54,6 @@ test("isUpgradeOver: a lossless copy is beaten only by more bits or a higher sam
   assert.equal(up({ qualityTier: 0, bitDepth: 24, sampleRate: 44100 }, flac), true, "24-bit");
   assert.equal(up({ qualityTier: 0, bitDepth: 16, sampleRate: 96000 }, flac), true, "96 kHz");
   assert.equal(up({ qualityTier: 1, bitRate: 320 }, flac), false, "lossy never beats lossless");
-});
-
-// --- ownedTrackFor / missingFiles -------------------------------------------
-
-test("ownedTrackFor matches a Soulseek filename to a library title on words, both ways", () => {
-  const owned = [{ title: "Karma Police" }, { title: "No Surprises" }];
-  const of = (filename) => plugin._ownedTrackFor({ filename }, owned);
-  assert.equal(of("m\\Radiohead - OK Computer\\06 - Karma Police.flac").title, "Karma Police");
-  assert.equal(of("m\\OK Computer\\Radiohead - No Surprises.mp3").title, "No Surprises", "an 'Artist - Title' stem");
-  assert.equal(of("m\\OK Computer\\Karma Police (Remastered 2009).flac").title, "Karma Police", "edition words and years are noise");
-  assert.equal(of("m\\OK Computer\\07 - Fitter Happier.flac"), null);
-  assert.equal(of("m\\Live\\06 - Karma Police (Live).mp3"), null, "a variant word the library title lacks is a different recording");
-  assert.equal(of("m\\x\\Police.mp3"), null, "half the words is not the song");
-  assert.equal(plugin._ownedTrackFor({ filename: "m\\x\\Karma Police.mp3" }, []), null, "nothing owned → nothing matches");
-});
-
-test("missingFiles keeps only what the album lacks", () => {
-  const owned = [{ title: "Airbag" }, { title: "Paranoid Android" }];
-  const files = [
-    { filename: "m\\OKC\\01 - Airbag.flac" },
-    { filename: "m\\OKC\\02 - Paranoid Android.flac" },
-    { filename: "m\\OKC\\03 - Subterranean Homesick Alien.flac" }
-  ];
-  assert.deepEqual(plugin._missingFiles(files, owned).map((f) => f.filename), ["m\\OKC\\03 - Subterranean Homesick Alien.flac"]);
 });
 
 // --- integration: the modes end to end --------------------------------------
@@ -249,127 +224,6 @@ test("Upgrade: a target with no library id finds the row by title and artist", a
     h.actions["download-file"]({ itemId: "f:" + key });
     await waitFor(() => h.store.tracked && h.store.tracked[key]);
     assert.equal(h.store.tracked[key].upgrade.trackId, 42, "the local copy nearest in length, not the remote or the live one");
-  } finally {
-    p.deactivate();
-  }
-});
-
-const OKC_OWNED = [
-  { id: 1, album_id: 7, title: "Airbag", track_number: 1, duration_secs: 284, path: "file:///a" },
-  { id: 2, album_id: 7, title: "Paranoid Android", track_number: 2, duration_secs: 383, path: "file:///b" },
-  { id: 9, album_id: 8, title: "Creep", track_number: 2, duration_secs: 238, path: "file:///c" }
-];
-const OKC_BODIES = [
-  { username: "peer", hasFreeUploadSlot: true, queueLength: 0, uploadSpeed: 1000, files: [
-    { filename: "m\\OK Computer\\01 - Airbag.flac", size: 30e6, length: 284, bitDepth: 16, sampleRate: 44100 },
-    { filename: "m\\OK Computer\\02 - Paranoid Android.flac", size: 40e6, length: 383, bitDepth: 16, sampleRate: 44100 },
-    { filename: "m\\OK Computer\\03 - Subterranean Homesick Alien.flac", size: 28e6, length: 267, bitDepth: 16, sampleRate: 44100 }
-  ] },
-  { username: "other", hasFreeUploadSlot: true, queueLength: 0, uploadSpeed: 500, files: [
-    { filename: "z\\OKC\\Airbag.mp3", size: 6e6, length: 284, bitRate: 320 }
-  ] }
-];
-
-test("Fill: compares each folder with the album's library rows and downloads only what's missing", async () => {
-  const p = loadPlugin();
-  const { h, posts } = modeHost({ library: { tracks: OKC_OWNED }, bodies: OKC_BODIES });
-  await p.activate(h.api);
-  try {
-    await p._startFill({ kind: "album", albumId: 7, albumTitle: "OK Computer", artistName: "Radiohead" });
-
-    let view = lastView(h);
-    const header = findNodes(view, (n) => n.type === "text" && /Filling/.test(n.content || ""))[0];
-    assert.ok(header, "mode header");
-    assert.ok(header.content.includes("“OK Computer” by Radiohead"), header.content);
-    assert.ok(header.content.includes("you have 2 tracks"), "counts this album's rows only: " + header.content);
-
-    // Opens on Folders; the folder that has nothing new is hidden.
-    const bar = findNodes(view, (n) => n.type === "toolbar" && (n.buttons || []).some((b) => b.action === "result-mode"))[0];
-    assert.equal(bar.buttons.filter((b) => b.variant === "accent")[0].label, "Folders");
-    let grid = findNodes(view, (n) => n.type === "track-row-list" && n.sortAction === "sort-folders")[0];
-    assert.ok(grid, "folder list");
-    assert.equal(grid.items.length, 1);
-    assert.equal(grid.items[0].title, "OK Computer");
-    assert.equal(grid.items[0].cells.tracks, "3");
-    assert.ok(grid.items[0].subtitle.includes("1 you don't have · 27 MB"), "the missing file's size, not the folder's: " + grid.items[0].subtitle);
-    assert.equal(grid.items[0].action, "open-folder", "a click opens the folder; nothing is queued yet");
-    assert.deepEqual(grid.items[0].actions, ["folder-row-download", "open-folder"]);
-    assert.equal(grid.actions[0].label, "Download the ones you don't have");
-
-    // Everything: both folders, the complete one saying so.
-    h.actions["mode-show-all"]();
-    grid = findNodes(lastView(h), (n) => n.type === "track-row-list" && n.sortAction === "sort-folders")[0];
-    assert.equal(grid.items.length, 2);
-    assert.ok(grid.items[1].subtitle.includes("you have all of these"), grid.items[1].subtitle);
-    h.actions["mode-show-all"]();
-
-    // The open folder: its tracklist, the owned songs marked, one button for
-    // what's missing and one for all of it.
-    h.actions["open-folder"]({ itemId: grid.items[0].id });
-    assert.equal(posts.length, 0, "opening queues nothing");
-    view = lastView(h);
-    const rows = findNodes(view, (n) => n.type === "track-row-list")[0].items;
-    assert.equal(rows.length, 3);
-    assert.equal(rows.filter((r) => r.badge && r.badge.label === "In library").length, 2);
-    const buttons = findNodes(view, (n) => n.type === "button" && n.action === "folder-download");
-    assert.deepEqual(buttons.map((b) => b.data.which), ["missing", "all"]);
-    assert.ok(/^Download the 1 you don't have · 27 MB$/.test(buttons[0].label), buttons[0].label);
-
-    // Fill from the folder: one file, tagged with the library's album.
-    h.actions["folder-download"]({ which: "missing" });
-    await waitFor(() => posts.length === 1);
-    assert.equal(posts[0].username, "peer");
-    assert.deepEqual(posts[0].files.map((f) => f.filename), ["m\\OK Computer\\03 - Subterranean Homesick Alien.flac"]);
-    await waitFor(() => h.store.tracked && Object.keys(h.store.tracked).length === 1);
-    const rec = h.store.tracked[Object.keys(h.store.tracked)[0]];
-    assert.equal(rec.meta.album, "OK Computer");
-    assert.equal(rec.meta.artist, "Radiohead");
-    assert.equal(rec.meta.title, "Subterranean Homesick Alien", "the file's own title stands");
-    await waitFor(() => p._upgrades()[rec.upgrade.job] && p._upgrades()[rec.upgrade.job].state === "downloading");
-    const job = p._upgrades()[rec.upgrade.job];
-    assert.equal(job.kind, "get", "a fill is a new song for the library, not an upgrade");
-    assert.equal(job.album, "OK Computer");
-    assert.equal(job.trackNumber, 3);
-
-    // The view stayed on the folder, and the queued row says so itself.
-    await waitFor(() => {
-      const r = findNodes(lastView(h), (n) => n.type === "track-row-list")[0];
-      return r && r.items.some((i) => i.badge && /^Queued/.test(i.badge.label));
-    });
-    assert.equal(h.calls.notifications.length, 0, "no toast: " + h.calls.notifications.join(" | "));
-    const after = findNodes(lastView(h), (n) => n.type === "button" && n.action === "folder-download");
-    assert.equal(after.length, 1, "nothing missing is left to fetch, so only “all” remains");
-
-    // The Files view under the same filter shows only the missing file.
-    h.actions["result-mode"]({ tabId: "files" });
-    const list = findNodes(lastView(h), (n) => n.type === "track-row-list")[0];
-    assert.deepEqual(list.items.map((i) => i.title), ["03 - Subterranean Homesick Alien.flac"]);
-    assert.ok(/^Queued/.test(list.items[0].badge.label), "the same file is Queued in Files too");
-    assert.deepEqual(list.items[0].actions, ["cancel-transfer"], "a queued row offers Cancel, not Download again");
-    assert.equal(list.artwork, "cached", "search rows name albums by guesswork: never let them trigger an image fetch");
-  } finally {
-    p.deactivate();
-  }
-});
-
-test("Fill: an album target without an id is looked up by name, and one with no library rows becomes a plain search", async () => {
-  const p = loadPlugin();
-  const { h } = modeHost({
-    library: { tracks: OKC_OWNED, albums: [{ id: 8, title: "Pablo Honey", artist_name: "Radiohead" }, { id: 7, title: "OK Computer", artist_name: "Radiohead" }] },
-    bodies: OKC_BODIES
-  });
-  await p.activate(h.api);
-  try {
-    await p._startFill({ kind: "album", albumTitle: "ok computer", artistName: "Radiohead" });
-    const header = findNodes(lastView(h), (n) => n.type === "text" && /Filling/.test(n.content || ""))[0];
-    assert.ok(header && header.content.includes("you have 2 tracks"), "resolved the id by title, case-insensitively");
-
-    await p._startFill({ kind: "album", albumTitle: "Kid A", artistName: "Radiohead" });
-    // Said in the view over the results, not in a toast.
-    assert.ok(!h.calls.notifications.some((m) => /Kid A/.test(m)), h.calls.notifications.join(" | "));
-    const note = findNodes(lastView(h), (n) => n.type === "text" && /“Kid A” has no tracks in your library/.test(n.content || ""));
-    assert.equal(note.length, 1, "the reason sits in the Search tab");
-    assert.equal(findNodes(lastView(h), (n) => n.type === "text" && /Filling/.test(n.content || "")).length, 0);
   } finally {
     p.deactivate();
   }

@@ -99,13 +99,10 @@ test("declaredActions: only what some row offers (the host greys out the rest in
   assert.deepEqual(plugin._declaredActions(all, [{ actions: ["b", "a"] }]).map((x) => x.id), ["a", "b"], "in the declared order");
 });
 
-test("ownedInFolder: Fill reads its mode, a plain search reads the library lookup", () => {
-  const g = { files: [{ filename: "m\\X\\01 - Airbag.flac" }, { filename: "m\\X\\03 - Subterranean Homesick Alien.flac" }] };
-  const fill = { kind: "fill", owned: [{ title: "Airbag", track_number: 1, duration_secs: 284 }] };
-  assert.deepEqual(Object.keys(plugin._ownedInFolder(g, fill, null)), ["m\\X\\01 - Airbag.flac"]);
-  assert.deepEqual(plugin._ownedInFolder(g, null, { "m\\X\\03 - Subterranean Homesick Alien.flac": true }),
-    { "m\\X\\03 - Subterranean Homesick Alien.flac": true });
-  assert.deepEqual(plugin._ownedInFolder(g, null, undefined), {}, "not looked up yet");
+test("ownedInFolder: nothing is owned until the library lookup has answered", () => {
+  // The lookup itself is covered end to end by "Search… on an album opens on Folders" below.
+  const g = { key: "never-opened", files: [{ filename: "m\\X\\01 - Airbag.flac" }] };
+  assert.deepEqual(plugin._ownedInFolder(g), {});
 });
 
 test("fallbackSongRows: one row per song — a chip per outcome, its kept file on the same row, the search only for a miss", () => {
